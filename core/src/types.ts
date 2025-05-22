@@ -1,0 +1,166 @@
+
+export const LogLevel = ["debug", "log", "warn", "error"] as const
+export type Logger = Pick<typeof console, typeof LogLevel[number]> & {
+  push: (_: (parent: (...args: any) => void, ...args: any) => void) => Logger
+}
+
+export const DHStatus = ["sleeping", "listening", "talking", "sleep_talking"] as const
+export const DHAsrSessionCommand = ["start", "stop"] as const
+export const DHInputMessageType = ["wakeup", "sleep", "input", "asr_session", "config", "ping"] as const
+export type ChatMessage = {
+  role: | 'system' | 'user' | 'assistant',
+  content: string,
+}
+
+/**
+ * Represents messages sent from the client to the server.
+ */
+export type DHInputMessage =
+  /**
+   * Control messages to manage the session state.
+   * @property type - The type of control message: 'wakeup', 'sleep', or 'input'.
+   * @property text - Optional text input from the user.
+   * @property bot_text - Optional text to be spoken by the bot.
+   */
+  | { type: | 'wakeup' | 'sleep' | 'input', text?: string, bot_text?: string }
+  /**
+   * Messages to control the Automatic Speech Recognition session.
+   * @property type - Indicates this is an ASR session message.
+   * @property command - The command to execute: 'start' or 'stop' the ASR session.
+   * @property should_respond - Optional flag indicating if the system should generate a response.
+   */
+  | { type: 'asr_session', command: typeof DHAsrSessionCommand[number], should_respond?: boolean }
+  /**
+   * Message to configure the digital human's settings.
+   * @property type - Indicates this is a configuration message.
+   * @property message_prefix - Optional array of initial messages to send to the digital human.
+   * @property voice - Optional voice to use for the digital human.
+   * @property asr_model - Optional ASR model to use for the digital human.
+   * @property llm_service - Optional LLM service configuration.
+   */
+  | {
+    type: 'config',
+    message_prefix?: ChatMessage[],
+    voice?: string,
+    asr_model?: | 'local' | 'remote',
+    tts_model?: | 'local' | 'remote',
+    mode?: | 'duplex' | 'half_duplex',
+    llm_service?: {
+      provider: string,
+      endpoint?: string,
+      token?: string,
+    },
+    llm_config?: {
+      model?: string,
+      temperature?: number,
+      max_tokens?: number,
+      top_p?: number,
+    }
+  }
+  /**
+   * Message to send a ping to the server.
+   * @property type - Indicates this is a ping message.
+   * @property timestamp - The timestamp of the ping message.
+   */
+  | { type: 'ping', timestamp: string }
+
+
+export const DHOutputMessageType = ["audio_text", "message_record", "status_change", "pong", "asr_session"] as const
+
+/**
+ * Represents messages received from the server.
+ */
+export type DHOutputMessage =
+  /**
+   * Message containing transcribed audio text.
+   * @property type - Indicates this message contains audio text.
+   * @property text - The transcribed text from audio.
+   */
+  | { type: 'audio_text', text: string, }
+  /**
+   * Message containing a conversation record.
+   * @property type - Indicates this is a message record.
+   * @property message - The conversation message details.
+   * @property message.role - The role of the message sender: 'user' or 'assistant'.
+   * @property message.content - The content of the message.
+   */
+  | {
+    type: 'message_record',
+    message: ChatMessage,
+  }
+  /**
+ * Message to change the digital human's status.
+ * @property type - Indicates this is a status change message.
+ * @property status - The new status to set for the digital human.
+ */
+  | { type: 'status_change', status: typeof DHStatus[number] }
+  /**
+   * Message containing ASR (Automatic Speech Recognition) session information.
+   * @property type - Indicates this is an ASR session message.
+   * @property sentence - Optional partial or complete transcription of the current utterance.
+   * @property completed - Optional flag indicating if the current utterance is complete.
+   * @property should_respond - Optional flag indicating if the system should generate a response.
+   */
+  | { type: 'asr_session', sentence?: string, completed?: boolean, should_respond?: boolean }
+  /**
+   * Message to acknowledge a ping.
+   * @property type - Indicates this is a pong message.
+   * @property timestamp - The timestamp of the ping message.
+   */
+  | { type: 'pong', timestamp: string }
+
+export type EventSource<T> = {
+  on<K extends keyof T>(event: K, handler: (_: T[K]) => void): () => void
+  off<K extends keyof T>(event: K, handler: (_: T[K]) => void): void
+  off<K extends keyof T>(event: K): void
+}
+
+export type EventTarget<T> = {
+  emit<K extends keyof T>(event: K, data: T[K]): void
+}
+
+export type Observable<T> = EventSource<T> & T
+export type Box<T> = Observable<{ value: T }>
+
+/**
+ * Interface for objects that can be aborted.
+ */
+export type Abortable = {
+  /**
+   * Aborts the operation and calls all registered abort handlers.
+   */
+  abort: () => void
+  /**
+   * Registers a handler to be called when abort is triggered.
+   * @param _ - The handler function to call on abort.
+   * @returns A function that, when called, removes the handler.
+   */
+  onabort: (_: () => void) => (() => void)
+}
+
+export type Config = {
+  /**
+   * The server endpoint URL.
+   * @default 'http://localhost:32101'
+   */
+  endpoint: string
+}
+
+export const DHConnectionEventTypes = ["message", "audio"] as const;
+export type DHConnectionEvents = {
+  message: DHOutputMessage;
+  audio: ArrayBuffer | Blob;
+};
+
+
+export type UnionEqual<T, U> = [T] extends [U] ? [U] extends [T] ? true : false : false;
+export type Diff<L, R> = {
+  [K in keyof L as K extends keyof R ? never : K]: L[K]
+};
+
+const assertion:
+  UnionEqual<DHOutputMessage['type'], typeof DHOutputMessageType[number]>
+  & UnionEqual<DHInputMessage['type'], typeof DHInputMessageType[number]>
+  & UnionEqual<keyof DHConnectionEvents, typeof DHConnectionEventTypes[number]>
+  = true
+
