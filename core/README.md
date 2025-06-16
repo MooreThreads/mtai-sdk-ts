@@ -24,9 +24,32 @@ The digital human can be in one of several states:
 
 You can monitor these states through the status_change event:
 
+## Component Management
+
+The SDK provides functionality to monitor and manage components in your application. You can observe component status changes, trigger updates, and cancel ongoing updates. This is particularly useful for managing the lifecycle of different components in your digital human system.
+
+```typescript
+import { observeComponents, updateComponent, cancelUpdateComponent } from 'mtai';
+
+// Observe component status changes
+const unsubscribe = observeComponents((components) => {
+  components.forEach(component => {
+    console.log(`Component ${component.name}: ${component.status}`);
+  });
+});
+
+// Update a specific component
+await updateComponent('component-name');
+
+// Cancel an ongoing update for a component
+await cancelUpdateComponent('component-name');
+
+// Don't forget to unsubscribe when done
+unsubscribe();
+```
 
 
-## Integration
+## Integrate Digital Human
 
 ```typescript
 import { createDH2DSession } from 'mtai';
@@ -77,6 +100,14 @@ session.send({
   }
 })
 
+// configure FAQ-based responses
+session.send({
+  type: 'config',
+  llm_service: {
+    provider: 'faq',
+    config_file: 'path/to/your/faq.json'  // Path to your FAQ configuration file
+  }
+})
 
 // print the subtitle
 sesson.on('message', (msg) => {
@@ -85,6 +116,35 @@ sesson.on('message', (msg) => {
   }
 })
 
+```
+
+## Available Configuration Choices
+
+The SDK provides methods to retrieve available configuration options for various components of the digital human system. This is useful for discovering supported voices, avatars, and other configurable elements.
+
+```typescript
+import { getAvailableVoices, getAvailableAvatars, getLlmModels } from 'mtai';
+
+// Get available TTS voices
+const voices = await getAvailableVoices();
+console.log('Available voices:', voices);
+
+
+// Get available avatars
+const avatars = await getAvailableAvatars();
+console.log('Available avatars:', avatars);
+
+// Get available LLM models
+const llmModels = await getLlmModels();
+console.log('Available LLM models:', llmModels);
+
+// You can then use these values in your configuration
+session.send({
+  type: 'config',
+  voice: voices[0].code,  // Use the first available voice
+  llm_service: llmModels[0].service,
+  llm_config: llmModels[0].config
+});
 ```
 
 ## Development
