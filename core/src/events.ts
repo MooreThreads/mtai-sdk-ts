@@ -47,23 +47,3 @@ export function events<T>(): EventSource<T> & EventTarget<T> {
     }
     return { on, off, emit }
 }
-
-export function refCountedEvents<T>(f: () => [EventSource<{value: T}>, () => void]): EventSource<{value: T}> {
-    let listeners: ((_: any) => void)[] = []
-    const on = (event: 'value', handler: (_: any) => void) => {
-        listeners = [...listeners, handler]
-        return () => off(event, handler)
-    }
-    const off = (event: 'value', handler?: (_: any) => void) => {
-        if (handler) {
-            listeners = listeners.filter(h => h !== handler)
-        } else {
-            listeners = []
-        }
-    }
-    const emit = (data: T[keyof T]) => {
-        listeners.forEach(handler => handler(data))
-    }
-    
-    return { on, off, }
-}

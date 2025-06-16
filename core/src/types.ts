@@ -45,10 +45,20 @@ export type DHInputMessage =
     asr_model?: | 'local' | 'remote',
     tts_model?: | 'local' | 'remote',
     mode?: | 'duplex' | 'half_duplex',
-    llm_service?: {
-      provider: string,
+    llm_service?: | {
+      provider: 'openai',
       endpoint?: string,
       token?: string,
+    }
+    | {
+      provider: 'musachat'
+    }
+    | {
+      provider: 'musachat_local'
+    }
+    | {
+      provider: 'faq',
+      config_file: string
     },
     llm_config?: {
       model?: string,
