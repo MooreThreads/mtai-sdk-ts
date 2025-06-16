@@ -1,58 +1,36 @@
 import { ComponentStatus } from "./types";
-import { EventSource, EventTarget } from "../types";
 import { events } from "../events";
 import { refCountedEvents } from "../refCountedEvents";
 import { config } from "../config";
-
+import { hooks } from "../hooks";
 const globalComponentEvents = refCountedEvents<ComponentStatus[]>(async () => {
+    const logger = hooks.logger.push((_, ...args) => _('[components]', ...args))
     let evt = events<{ value: ComponentStatus[] }>()
     let running = true
+    let currentEventSource: EventSource | undefined = undefined
 
-    const connectOnce = async () => {
+    const connectOnce = () => new Promise((resolve, reject) => {
         const { endpoint } = config()
-        const response = await fetch(`${endpoint}/api/v1/components`, {
-            headers: {
-                'Accept': 'text/event-stream',
-                'Cache-Control': 'no-cache'
-            }
+        const eventSource = new EventSource(`${endpoint}/api/v1/components`, {
+            withCredentials: true
         })
+        currentEventSource = eventSource
 
-        if (!response.ok) {
-            throw new Error(`SSE request failed: ${response.status}`)
-        }
-
-        const reader = response.body?.getReader()
-        const decoder = new TextDecoder()
-
-        if (reader) {
-            const readStream = async () => {
-                try {
-                    while (running) {
-                        const { done, value } = await reader.read()
-                        if (done) break
-
-                        const chunk = decoder.decode(value, { stream: true })
-                        const lines = chunk.split('\n')
-
-                        for (const line of lines) {
-                            if (line.startsWith('data: ')) {
-                                try {
-                                    const data = JSON.parse(line.slice(6))
-                                    evt.emit('value', data)
-                                } catch (error) {
-                                    console.error('Failed to parse SSE data:', error)
-                                }
-                            }
-                        }
-                    }
-                } catch (error) {
-                    console.error('SSE stream error:', error)
-                }
+        eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data)
+                evt.emit('value', data)
+            } catch (error) {
+                logger.error('Failed to parse SSE data:', error)
             }
-
-            readStream()
         }
-    }
+        
+        eventSource.onerror = (error) => {
+            logger.error('SSE connection error:', error)
+            eventSource.close()
+            reject(error)
+        }
+    })
 
     const retry = async () => {
         while (running) {
@@ -61,9 +39,11 @@ const globalComponentEvents = refCountedEvents<ComponentStatus[]>(async () => {
                 await connectOnce()
             } catch (error) {
                 retryCount ++
-                console.error('Connection failed:', error)
-                console.log(`Retrying in 2 seconds... (attempt ${retryCount + 1})`)
+                logger.error('Connection failed:', error)
+                logger.log(`Retrying in 2 seconds... (attempt ${retryCount + 1})`)
                 await new Promise(resolve => setTimeout(resolve, 2000))
+            } finally {
+                currentEventSource = undefined
             }
         }
     }
@@ -72,6 +52,8 @@ const globalComponentEvents = refCountedEvents<ComponentStatus[]>(async () => {
 
     return [evt, async () => {
         running = false
+        currentEventSource?.close()
+        currentEventSource = undefined
     }]
 })
 
