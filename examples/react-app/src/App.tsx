@@ -1,17 +1,16 @@
-import { useState, useRef, useEffect, Component } from 'react'
-import type { DH2DSession, ComponentStatus } from 'mtai'
+import { useState, useRef, useEffect } from 'react'
+import type { DH2DSession, ComponentStatus, Avatar, Voice } from 'mtai'
 import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
 import { DH2D } from './dh2d'
 import './App.css'
 
 interface ModalProps {
   isOpen: boolean;
-  onClose: () => void;
   title: string;
   children: React.ReactNode;
 }
 
-const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }) => {
+const Modal: React.FC<ModalProps> = ({ isOpen, title, children }) => {
   if (!isOpen) return null;
 
   return (
@@ -63,7 +62,7 @@ const ShareModal: React.FC<ShareModalProps> = ({ isOpen, onClose, shareCode, onS
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Share Code">
+    <Modal isOpen={isOpen} title="Share Code">
       <div style={{ marginBottom: "15px" }}>
         <p><strong>Current Share Code:</strong> {shareCode}</p>
       </div>
@@ -123,7 +122,7 @@ interface ComponentsModalProps {
 
 const ComponentsModal: React.FC<ComponentsModalProps> = ({ isOpen, onClose, components }) => {
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Components Status">
+    <Modal isOpen={isOpen} title="Components Status">
       <div style={{ marginBottom: "15px" }}>
         {components.map((component) => (
           <div key={component.component.name} style={{ 
@@ -267,7 +266,7 @@ interface ListModalProps {
 
 const ListModal: React.FC<ListModalProps> = ({ isOpen, onClose, title, items }) => {
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={title}>
+    <Modal isOpen={isOpen} title={title}>
       <div style={{ marginBottom: "15px" }}>
         {items.map((item) => (
           <div key={item.id} style={{ 
@@ -322,10 +321,9 @@ export default function App() {
   const [components, setComponents] = useState<ComponentStatus[]>([])
   const [showLlmModelsModal, setShowLlmModelsModal] = useState(false)
   const [showTtsVoicesModal, setShowTtsVoicesModal] = useState(false)
-  const [showAvatarsModal, setShowAvatarsModal] = useState(false)
   const [llmModels, setLlmModels] = useState<any[]>([])
-  const [ttsVoices, setTtsVoices] = useState<any[]>([])
-  const [avatars, setAvatars] = useState<any[]>([])
+  const [ttsVoices, setTtsVoices] = useState<Voice[]>([])
+  const [avatars, setAvatars] = useState<Avatar[]>([])
 
   useEffect(() => observeComponents(setComponents), []);
   useEffect(() => {
@@ -439,8 +437,7 @@ export default function App() {
               cursor: "pointer"
             }}
           >
-            <option value="liruyun">Liruyun</option>
-            <option value="aigc_20250212">AIGC</option>
+            {avatars.map(a => <option value={a.id}>{a.title || a.id}</option>)}
           </select>
         </div>
         <div style={{ lineHeight: "1.5" }}>
@@ -536,25 +533,6 @@ export default function App() {
           >
             TTS Voices
           </button>
-          <button 
-            onClick={async () => {
-              await fetchAvatars();
-              setShowAvatarsModal(true);
-            }}
-            style={{ 
-              padding: "8px 16px", 
-              backgroundColor: "#e83e8c", 
-              color: "white", 
-              border: "none", 
-              borderRadius: "5px", 
-              cursor: "pointer",
-              fontWeight: "500",
-              boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
-              marginRight: "10px"
-            }}
-          >
-            Avatars
-          </button>
         </div>
         <div style={{ marginTop: "15px" }}>
           <button 
@@ -606,19 +584,8 @@ export default function App() {
         title="TTS Voices"
         items={ttsVoices.map(voice => ({
           id: voice.code,
-          name: voice.display_name,
+          name: voice.display_name || voice.code,
           description: voice.description
-        }))}
-      />
-
-      <ListModal
-        isOpen={showAvatarsModal}
-        onClose={() => setShowAvatarsModal(false)}
-        title="Avatars"
-        items={avatars.map(avatar => ({
-          id: avatar.id || avatar.name,
-          name: avatar.name || avatar.id,
-          description: avatar.description
         }))}
       />
     </div>
