@@ -1,4 +1,4 @@
-import { DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, EventSource, EventTarget, UnionEqual } from "../types";
+import { DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, EventSource, UnionEqual } from "../types";
 
 /**
  * Represents a connection to the server.
@@ -145,4 +145,4 @@ export type DH2DSession = EventSource<DH2DSessionEvents> & {
 
 export const DH2DSessionStatus = ["pending", "connecting", "connected", "reconnecting", "closed", "failed"] as const
 
-const assert: UnionEqual<keyof DH2DSessionEvents, typeof DH2DSessionEventTypes[number]> = true
+true satisfies UnionEqual<keyof DH2DSessionEvents, typeof DH2DSessionEventTypes[number]>

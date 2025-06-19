@@ -1,4 +1,4 @@
 export type Avatar = {
     id: string
-    title?: string
+    name?: string
 }
