@@ -6,7 +6,8 @@ import {
   watch,
   computed,
   type Ref,
-  type CSSProperties
+  type CSSProperties,
+  watchEffect
 } from 'vue'
 import {
   createDH2DSession,
@@ -45,15 +46,12 @@ const props = withDefaults(defineProps<Props>(), {
 
 const containerRef = ref<HTMLDivElement | null>(null)
 const session = ref<DH2DSession | null>(null)
-const historyRef = ref<ChatMessage[]>([])
+const history = ref<ChatMessage[]>([])
+const status = ref<typeof DHStatus[number]>('sleeping')
+const upstreamStatus = ref<typeof DHStatus[number]>('sleeping')
+const asrSessionActive = ref(false)
 const latestGreetingMsg = computed(() => props.greetingMessage)
-
-// 状态管理 - 与React版本保持一致
-const status = behaviorSubject<typeof DHStatus[number]>('sleeping')
-const upstreamStatus = behaviorSubject<typeof DHStatus[number]>('sleeping')
-const asrSession = behaviorSubject(false)
-const statusLock = asyncLock()
-
+const statusLock = ref(Promise.resolve())
 
 defineExpose({
   send: (msg: any) => session.value?.send(msg),
@@ -67,19 +65,19 @@ watch(session, (newSession) => {
   }
 })
 
-
 const appendHistory = (message: ChatMessage) => {
   if (
       props.onHistoryChanged &&
-      (historyRef.value.length === 0 || historyRef.value[historyRef.value.length - 1]?.role !== message.role)
+      (history.value.length === 0 || history.value[history.value.length - 1]?.role !== message.role)
   ) {
-    historyRef.value = [...historyRef.value, message]
-    props.onHistoryChanged(historyRef.value)
+    history.value = [...history.value, message]
+    props.onHistoryChanged(history.value)
   }
 }
 
-combineLatest(status, asrSession, (s, a) => {
-  props.onStatusChanged?.(a ? 'listening' : s)
+// 组合状态变化
+watchEffect(() => {
+  props.onStatusChanged?.(asrSessionActive.value ? 'listening' : status.value)
 })
 
 watch(
@@ -145,8 +143,8 @@ onMounted(() => {
     audioInput: props.audioInput
   })
 
-  const unsub = newSession.on('statuschange', (status) => {
-    if (status === 'connected') {
+  const unsub = newSession.on('statuschange', (newStatus) => {
+    if (newStatus === 'connected') {
       unsub()
       setTimeout(() => {
         const text = latestGreetingMsg.value
@@ -165,7 +163,7 @@ onMounted(() => {
         props.onAsrOutput?.(sentence)
         if (message.completed) {
           newSession.send({
-            type: interactionType(upstreamStatus.value),
+            type: getInteractionType(upstreamStatus.value),
             text: sentence
           })
           appendHistory({ role: 'user', content: sentence })
@@ -192,120 +190,65 @@ onUnmounted(() => {
   session.value?.close()
 })
 
-useKey(props.asrKey, (down) => {
-  asrSession.value = down
-})
+// 按键监听
+if (props.asrKey) {
+  const handleKey = (event: KeyboardEvent) => {
+    if (event.key === props.asrKey) {
+      asrSessionActive.value = event.type === 'keydown'
+    }
+  }
 
-watch(
-    () => asrSession.value,
-    async (val) => {
-      if (!session.value || !props.asrKey) return
+  onMounted(() => {
+    document.addEventListener('keydown', handleKey)
+    document.addEventListener('keyup', handleKey)
+  })
 
-      await statusLock(async () => {
-        if (val && status.value !== 'sleeping') {
-          session.value!.send({ type: 'sleep' })
-          await new Promise<void>((resolve) => {
-            setTimeout(() => resolve(), 5000)
-            const unsubscribe = status.subscribe((status) => {
-              if (status === 'sleeping') {
-                resolve()
-                unsubscribe()
-              }
-            })
-          })
-        }
-        session.value!.send({
-          type: 'asr_session',
-          command: val ? 'start' : 'stop',
+  onUnmounted(() => {
+    document.removeEventListener('keydown', handleKey)
+    document.removeEventListener('keyup', handleKey)
+  })
+}
+
+// ASR 会话状态变化处理
+watch(asrSessionActive, async (active) => {
+  if (!session.value || !props.asrKey) return
+
+  const release = () => {
+    const next = Promise.resolve()
+    statusLock.value = next
+    return next
+  }
+
+  await statusLock.value
+  const currentLock = (statusLock.value = new Promise<void>(() => {}))
+
+  try {
+    if (active && status.value !== 'sleeping') {
+      session.value!.send({ type: 'sleep' })
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => resolve(), 5000)
+        const stop = watch(status, (newStatus) => {
+          if (newStatus === 'sleeping') {
+            clearTimeout(timer)
+            resolve()
+            stop()
+          }
         })
       })
     }
-)
-
-// 工具函数
-function useKey(key: string | undefined, callback: (down: boolean) => void) {
-  const handler = (event: KeyboardEvent) => {
-    if (event.key === key) {
-      callback(event.type === 'keydown')
+    session.value!.send({
+      type: 'asr_session',
+      command: active ? 'start' : 'stop',
+    })
+  } finally {
+    if (statusLock.value === currentLock) {
+      release()
     }
   }
+})
 
-  if (key) {
-    onMounted(() => {
-      document.addEventListener('keydown', handler)
-      document.addEventListener('keyup', handler)
-    })
-
-    onUnmounted(() => {
-      document.removeEventListener('keydown', handler)
-      document.removeEventListener('keyup', handler)
-    })
-  }
-}
-
-function asyncLock() {
-  let released = Promise.resolve()
-
-  return async function lock<T>(f: () => Promise<T>): Promise<T> {
-    await released
-    let resolve: () => void
-    released = new Promise<void>(r => resolve = r)
-    return f().finally(() => resolve?.())
-  }
-}
-
-function behaviorSubject<T>(initialValue: T) {
-  const subscribers = new Set<(value: T) => void>()
-  const state = ref<T>(initialValue)
-
-  return {
-    get value() {
-      return state.value
-    },
-    set value(newValue: T) {
-      if (state.value !== newValue) {
-        state.value = newValue
-        subscribers.forEach(fn => fn(newValue))
-      }
-    },
-    subscribe(fn: (value: T) => void) {
-      fn(state.value)
-      subscribers.add(fn)
-      return () => subscribers.delete(fn)
-    }
-  }
-}
-
-function combineLatest<A, B>(
-    a: ReturnType<typeof behaviorSubject<A>>,
-    b: ReturnType<typeof behaviorSubject<B>>,
-    cb: (a: A, b: B) => void
-) {
-  let aValue = a.value
-  let bValue = b.value
-
-  const publish = () => cb(aValue, bValue)
-
-  const unsubA = a.subscribe((v) => {
-    aValue = v
-    publish()
-  })
-
-  const unsubB = b.subscribe((v) => {
-    bValue = v
-    publish()
-  })
-
-  publish()
-
-  onUnmounted(() => {
-    unsubA()
-    unsubB()
-  })
-}
-
-function interactionType(type: typeof DHStatus[number]) {
-  return type === 'listening' || type === 'talking' ? 'sleep' : 'wakeup'
+function getInteractionType(status: typeof DHStatus[number]) {
+  return status === 'listening' || status === 'talking' ? 'sleep' : 'wakeup'
 }
 
 // 覆盖默认的getOrCreatePlayer方法
