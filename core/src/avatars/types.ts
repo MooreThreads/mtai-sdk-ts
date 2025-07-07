@@ -1,4 +1,5 @@
 export type Avatar = {
-    id: string
-    name?: string
+    id: string,
+    name?: string,
+    poster: string,
 }

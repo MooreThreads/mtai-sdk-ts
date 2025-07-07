@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { DH2DSession, ComponentStatus, Avatar, Voice } from 'mtai'
-import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
+import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars, setConfig } from 'mtai'
 import { DH2D } from './dh2d'
 import './App.css'
 
@@ -308,6 +308,110 @@ const ListModal: React.FC<ListModalProps> = ({ isOpen, onClose, title, items }) 
   );
 };
 
+interface AvatarSelectionModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  avatars: Avatar[];
+  selectedVideoId: string;
+  onSelectAvatar: (videoId: string) => void;
+}
+
+const AvatarSelectionModal: React.FC<AvatarSelectionModalProps> = ({ 
+  isOpen, 
+  onClose, 
+  avatars, 
+  selectedVideoId, 
+  onSelectAvatar 
+}) => {
+  return (
+    <Modal isOpen={isOpen} title="Select Character">
+      <div style={{ 
+        display: "grid", 
+        gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", 
+        gap: "20px",
+        maxHeight: "70vh",
+        overflowY: "auto"
+      }}>
+        {avatars.map((avatar) => (
+          <div 
+            key={avatar.id}
+            onClick={() => {
+              onSelectAvatar(avatar.id);
+              onClose();
+            }}
+            style={{
+              border: selectedVideoId === avatar.id ? "3px solid #007bff" : "1px solid #ddd",
+              borderRadius: "12px",
+              padding: "15px",
+              cursor: "pointer",
+              backgroundColor: selectedVideoId === avatar.id ? "#f0f8ff" : "white",
+              transition: "all 0.2s ease",
+              textAlign: "center",
+              overflow: "hidden"
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = "translateY(-2px)";
+              e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
+              e.currentTarget.style.boxShadow = "none";
+            }}
+          >
+            {avatar.poster && (
+              <img 
+                src={avatar.poster} 
+                alt={avatar.name || avatar.id}
+                style={{
+                  width: "100%",
+                  height: "auto",
+                  maxHeight: "300px",
+                  objectFit: "contain",
+                  borderRadius: "8px",
+                  marginBottom: "12px"
+                }}
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                }}
+              />
+            )}
+            <div style={{
+              fontSize: "18px",
+              fontWeight: "600",
+              color: "#2c3e50",
+              marginBottom: "6px"
+            }}>
+              {avatar.name || avatar.id}
+            </div>
+            <div style={{
+              fontSize: "14px",
+              color: "#666",
+              fontStyle: "italic"
+            }}>
+              ID: {avatar.id}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: "20px", textAlign: "center" }}>
+        <button
+          onClick={onClose}
+          style={{
+            padding: "8px 16px",
+            backgroundColor: "#6c757d",
+            color: "white",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer"
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    </Modal>
+  );
+};
+
 export default function App() {
   const sessionRef = useRef<DH2DSession | null>(null)
   const [status, setStatus] = useState("sleeping")
@@ -321,6 +425,7 @@ export default function App() {
   const [components, setComponents] = useState<ComponentStatus[]>([])
   const [showLlmModelsModal, setShowLlmModelsModal] = useState(false)
   const [showTtsVoicesModal, setShowTtsVoicesModal] = useState(false)
+  const [showAvatarSelectionModal, setShowAvatarSelectionModal] = useState(false)
   const [llmModels, setLlmModels] = useState<any[]>([])
   const [ttsVoices, setTtsVoices] = useState<Voice[]>([])
   const [avatars, setAvatars] = useState<Avatar[]>([])
@@ -370,6 +475,10 @@ export default function App() {
   const handleSetShareCode = async (newCode: string) => {
     await setShareCode(newCode)
     setShareCodeState(newCode)
+  }
+
+  const handleSelectAvatar = (avatarId: string) => {
+    setVideoId(avatarId)
   }
 
   return (
@@ -424,21 +533,24 @@ export default function App() {
         fontSize: "16px"
       }}>
         <div style={{ marginBottom: "15px" }}>
-          <label htmlFor="videoId" style={{ marginRight: "10px", fontWeight: "500" }}>Select Character:</label>
-          <select 
-            id="videoId" 
-            value={videoId} 
-            onChange={(e) => setVideoId(e.target.value)}
-            style={{ 
-              padding: "8px 12px", 
+          <label style={{ marginRight: "10px", fontWeight: "500" }}>Selected Character:</label>
+          <button
+            onClick={() => setShowAvatarSelectionModal(true)}
+            style={{
+              padding: "8px 12px",
               borderRadius: "5px",
               border: "1px solid #ccc",
               backgroundColor: "#f8f8f8",
-              cursor: "pointer"
+              cursor: "pointer",
+              fontSize: "14px",
+              fontWeight: "500",
+              color: "#2c3e50",
+              minWidth: "150px",
+              textAlign: "left"
             }}
           >
-            {avatars.map(a => <option value={a.id}>{a.title || a.id}</option>)}
-          </select>
+            {avatars.find(a => a.id === videoId)?.name || videoId} ▼
+          </button>
         </div>
         <div style={{ lineHeight: "1.5" }}>
           <div><strong>Status:</strong> {status}</div>
@@ -459,7 +571,7 @@ export default function App() {
               boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
               marginRight: "10px"
             }}
-            disabled={!start || status !== "sleeping"}
+            disabled={!start}
           >
             Wake Up
           </button>
@@ -587,6 +699,14 @@ export default function App() {
           name: voice.display_name || voice.code,
           description: voice.description
         }))}
+      />
+
+      <AvatarSelectionModal
+        isOpen={showAvatarSelectionModal}
+        onClose={() => setShowAvatarSelectionModal(false)}
+        avatars={avatars}
+        selectedVideoId={videoId}
+        onSelectAvatar={handleSelectAvatar}
       />
     </div>
   );
