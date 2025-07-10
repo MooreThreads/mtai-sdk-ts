@@ -92,7 +92,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 await hooks.dh2d.afterClosingSession(session)
             }
         },
-        ...(({on, off}) => ({on, off}))(evt),
+        ...(({ on, off }) => ({ on, off }))(evt),
     }
 
     evt.on("statuschange", _ => {
@@ -124,58 +124,61 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         }
         const player = hooks.dh2d.getOrCreatePlayer(parent)
         let connection = await withChild(rootAbortable, (_) => hooks.dh2d.connect(rootLogger, player, realConfig, _))
-        if (aborted) {
-            emitStatus("closed")
-            send = notConnected
-            return
-        }
-        realConfig.sessionId = connection.sessionId
-        sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
-        send = _ => sendMessage(connection.ws, _)
-        drainMessage(connection.ws)
-        connection.on("message", _ => evt.emit("message", _))
-        connection.on("audio", _ => evt.emit("audio", _))
-        if (configMsg) {
-            await send(configMsg)
-        }
-        if (aborted) {
-            emitStatus("closed")
-            send = notConnected
-            await withChild(rootAbortable, (_) => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
-            return
-        }
-        emitStatus("connected")
-        while (!aborted) {
-            await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(sessionLogger, connection, realConfig, _))
-            emitStatus("reconnecting")
-            send = enqueueMessage
-            await withChild(rootAbortable, _ => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
+        try {
             if (aborted) {
                 emitStatus("closed")
                 send = notConnected
                 return
             }
-            if (!await isLoggedIn()) {
-                rootLogger.error("unauthorized")
-                emitStatus("failed")
-                send = notConnected
-                return
-            }
-            connection = await withChild(rootAbortable, _ => hooks.dh2d.connect(rootLogger, player, realConfig, _))
             realConfig.sessionId = connection.sessionId
             sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
+            send = _ => sendMessage(connection.ws, _)
+            drainMessage(connection.ws)
             connection.on("message", _ => evt.emit("message", _))
             connection.on("audio", _ => evt.emit("audio", _))
-            emitStatus("connected")
-            send = async _ => sendMessage(connection.ws, _)
             if (configMsg) {
                 await send(configMsg)
             }
-            drainMessage(connection.ws)
+            if (aborted) {
+                emitStatus("closed")
+                send = notConnected
+                await withChild(rootAbortable, (_) => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
+                return
+            }
+            emitStatus("connected")
+            while (!aborted) {
+                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(sessionLogger, connection, realConfig, _))
+                emitStatus("reconnecting")
+                send = enqueueMessage
+                await withChild(rootAbortable, _ => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
+                if (aborted) {
+                    emitStatus("closed")
+                    send = notConnected
+                    return
+                }
+                if (!await isLoggedIn()) {
+                    rootLogger.error("unauthorized")
+                    emitStatus("failed")
+                    send = notConnected
+                    return
+                }
+                connection = await withChild(rootAbortable, _ => hooks.dh2d.connect(rootLogger, player, realConfig, _))
+                realConfig.sessionId = connection.sessionId
+                sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
+                connection.on("message", _ => evt.emit("message", _))
+                connection.on("audio", _ => evt.emit("audio", _))
+                emitStatus("connected")
+                send = async _ => sendMessage(connection.ws, _)
+                if (configMsg) {
+                    await send(configMsg)
+                }
+                drainMessage(connection.ws)
+            }
+        } finally {
+            emitStatus("closed")
+            send = notConnected
+            hooks.dh2d.disconnect(sessionLogger, connection, player, abortable())
         }
-        emitStatus("closed")
-        send = notConnected
-        await withChild(rootAbortable, _ => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
     })()
 
     return session
