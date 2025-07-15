@@ -75,7 +75,7 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended"] as const
 
 /**
  * Represents messages received from the server.
@@ -124,6 +124,12 @@ export type DHOutputMessage =
    * @property timestamp - The timestamp of the ping message.
    */
   | { type: 'pong', timestamp: string }
+  /**
+ * Message to indicate the session has ended.
+ * @property type - Indicates this is a session ended message.
+ */
+  | { type: 'session_ended' }
+
 
 export type EventSource<T> = {
   on<K extends keyof T>(event: K, handler: (_: T[K]) => void): () => void

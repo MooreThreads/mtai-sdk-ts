@@ -1,6 +1,6 @@
 {
   "name": "mtai",
-  "version": "0.2.4",
+  "version": "0.2.5-alpha.3",
   "private": false,
   "publishConfig": {
     "access": "public",

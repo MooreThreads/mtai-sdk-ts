@@ -3,8 +3,8 @@ import { isLoggedIn } from "../auth"
 import { box } from "../box"
 import { events } from "../events"
 import { hooks } from "../hooks"
-import { Box, DHInputMessage } from "../types"
-import { DH2DSession, DH2DSessionEvents, DH2DSessionEventTypes, DH2DSessionStatus } from "./types"
+import { Box, DHInputMessage, DHOutputMessage } from "../types"
+import { DH2DConnection, DH2DSession, DH2DSessionEvents, DH2DSessionEventTypes, DH2DSessionStatus } from "./types"
 import { DH2DSessionConfig } from "./types"
 
 
@@ -71,6 +71,9 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         await send(message)
     }
 
+    let closed = false
+    let connRef: DH2DConnection | undefined = undefined
+    const player = hooks.dh2d.getOrCreatePlayer(parent)
     const session: DH2DSession = {
         get sessionId() { return realConfig.sessionId },
         get videoId() { return realConfig.videoId },
@@ -78,9 +81,16 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         get send() { return send },
         get config() { return sendConfig },
         close: async () => {
+            if (closed) {
+                return
+            }
+            closed = true
             rootAbortable.abort()
             try {
-                await completed
+                if (connRef) {
+                    await hooks.dh2d.disconnect(rootLogger, connRef, player, rootAbortable)
+                }
+                await Promise.race([completed, new Promise(r => setTimeout(r, 3000))])
             } catch (e: any) {
                 rootLogger.error(e)
                 if (e.message === 'connection aborted') {
@@ -103,6 +113,14 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         }
     })
 
+    function onMessage(message: DHOutputMessage) {
+        if (message.type === "session_ended") {
+            session.close()
+        } else {
+            evt.emit("message", message)
+        }
+    }
+
     const completed = (async () => {
         let sessionLogger = rootLogger
         function emitStatus(_status: typeof DH2DSessionStatus[number]) {
@@ -122,7 +140,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             send = notConnected
             return
         }
-        const player = hooks.dh2d.getOrCreatePlayer(parent)
         let connection = await withChild(rootAbortable, (_) => hooks.dh2d.connect(rootLogger, player, realConfig, _))
         try {
             if (aborted) {
@@ -134,7 +151,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
             send = _ => sendMessage(connection.ws, _)
             drainMessage(connection.ws)
-            connection.on("message", _ => evt.emit("message", _))
+            connection.on("message", onMessage)
             connection.on("audio", _ => evt.emit("audio", _))
             if (configMsg) {
                 await send(configMsg)
@@ -165,7 +182,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 connection = await withChild(rootAbortable, _ => hooks.dh2d.connect(rootLogger, player, realConfig, _))
                 realConfig.sessionId = connection.sessionId
                 sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
-                connection.on("message", _ => evt.emit("message", _))
+                connection.on("message", onMessage)
                 connection.on("audio", _ => evt.emit("audio", _))
                 emitStatus("connected")
                 send = async _ => sendMessage(connection.ws, _)

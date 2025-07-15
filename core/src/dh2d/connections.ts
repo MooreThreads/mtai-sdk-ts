@@ -70,6 +70,10 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                 get audioPc() { return audioPc },
                 get sessionId() { return sessionId },
             }
+            ws.onclose = () => {
+                if (!running) return
+                reject(new Error('connection closed'))
+            }
             ws.onmessage = (event) => {
                 if (!running) return
                 if (typeof event.data === "string") {

@@ -4,6 +4,9 @@ import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent
 import { DH2D } from './dh2d'
 import './App.css'
 
+// setConfig({
+//   endpoint: 'http://192.168.4.50:32101'
+// })
 interface ModalProps {
   isOpen: boolean;
   title: string;
