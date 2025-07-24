@@ -22,32 +22,7 @@ The digital human can be in one of several states:
 
 4. **sleep_talking**: A special state where the digital human responds to text input while remaining in sleep mode. In this state, it will provide text responses without audio output or animation. This is useful for quiet interactions or when audio responses are not desired.
 
-You can monitor these states through the status_change event:
-
-## Component Management
-
-The SDK provides functionality to monitor and manage components in your application. You can observe component status changes, trigger updates, and cancel ongoing updates. This is particularly useful for managing the lifecycle of different components in your digital human system.
-
-```typescript
-import { observeComponents, updateComponent, cancelUpdateComponent } from 'mtai';
-
-// Observe component status changes
-const unsubscribe = observeComponents((components) => {
-  components.forEach(component => {
-    console.log(`Component ${component.name}: ${component.status}`);
-  });
-});
-
-// Update a specific component
-await updateComponent('component-name');
-
-// Cancel an ongoing update for a component
-await cancelUpdateComponent('component-name');
-
-// Don't forget to unsubscribe when done
-unsubscribe();
-```
-
+You can monitor these states through the status_change event
 
 ## Integrate Digital Human
 
@@ -55,7 +30,7 @@ unsubscribe();
 import { createDH2DSession } from 'mtai';
 
 // Initialize the 2d digital human session
-const session = createDH2DSession(divElement, { audioInput: true })
+const session = createDH2DSession(divElement, { audioInput: true, videoId: 'YOUR_VIDEO_ID' })
 
 // wakeup the 2d digital human
 session.send({ type: 'wakeup' })
@@ -64,8 +39,7 @@ session.send({ type: 'wakeup' })
 session.send({ type: 'sleep' })
 
 // set system-prompt
-session.send({ 
-  type: 'config',
+session.config({ 
   message_prefix: [{
     role: 'system',
     content: 'You are a helpful assistant'
@@ -83,8 +57,7 @@ session.send({ type: 'asr_session', command: 'start' }) // start listening
 session.send({ type: 'asr_session', command: 'stop' }) // stop listening
 
 // configure advanced settings
-session.send({
-  type: 'config',
+session.config({
   asr_model: 'remote',
   tts_model: 'remote',
   mode: 'duplex',
@@ -101,8 +74,7 @@ session.send({
 })
 
 // configure FAQ-based responses
-session.send({
-  type: 'config',
+session.config({
   llm_service: {
     provider: 'faq',
     config_file: 'path/to/your/faq.json'  // Path to your FAQ configuration file
@@ -139,13 +111,55 @@ const llmModels = await getLlmModels();
 console.log('Available LLM models:', llmModels);
 
 // You can then use these values in your configuration
-session.send({
-  type: 'config',
+session.config({
   voice: voices[0].code,  // Use the first available voice
   llm_service: llmModels[0].service,
   llm_config: llmModels[0].config
 });
 ```
+
+## Custom Endpoint Configuration
+
+You can configure the SDK to use a custom backend endpoint, for example, when connecting to a self-hosted or on-premise server. This is done using the `setConfig` method before initializing your session.
+
+> setConfig must be called before creating sessions.
+
+**Example:**
+
+```typescript
+setConfig({
+  endpoint: 'http://your_server_ip:32101'
+});
+```
+
+
+## Component Management
+
+Components in the SDK refer to items like custom avatars and local ASR (Automatic Speech Recognition) models. The SDK allows you to monitor the status of these components, trigger updates, and cancel ongoing updates. 
+
+```typescript
+import { observeComponents, updateComponent, cancelUpdateComponent } from 'mtai';
+
+// Observe component status changes
+const unsubscribe = observeComponents((components) => {
+  components.forEach(component => {
+    console.log(`Component ${component.name}: ${component.status}`);
+  });
+});
+
+// Update a specific component
+await updateComponent('component-name');
+
+// Cancel an ongoing update for a component
+await cancelUpdateComponent('component-name');
+
+// Don't forget to unsubscribe when done
+unsubscribe();
+```
+
+
+
+
 
 ## Development
 
