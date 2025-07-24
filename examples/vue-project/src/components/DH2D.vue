@@ -81,70 +81,88 @@ watchEffect(() => {
 })
 
 // 处理 session 创建和销毁
-watchEffect((onCleanup) => {
-  if (!containerReady.value || !containerRef.value) return
+watch(
+  [
+    () => containerReady.value,
+    () => containerRef.value,
+    () => props.videoId,
+    () => props.audioInput,
+    () => latestGreetingMsg.value,
+    () => props.onSessionStatusChanged
+  ],
+  ([ready, container, videoId, audioInput, greetingMsg, statusChangeHandler], _, onCleanup) => {
+    if (!ready || !container) return
 
-  const newSession = createDH2DSession(containerRef.value, {
-    videoId: props.videoId,
-    audioInput: props.audioInput
-  })
+    const newSession = createDH2DSession(container, {
+      videoId,
+      audioInput
+    })
 
-  const unsubStatusChange = newSession.on('statuschange', (newStatus) => {
-    if (newStatus === 'connected') {
-      setTimeout(() => {
-        const text = latestGreetingMsg.value
-        if (text) newSession.send({ type: 'wakeup', text })
-      }, 5000)
+    const unsubStatusChange = newSession.on('statuschange', (newStatus) => {
+      if (newStatus === 'connected') {
+        setTimeout(() => {
+          if (greetingMsg) newSession.send({ type: 'wakeup', text: greetingMsg })
+        }, 5000)
+      }
+    })
+
+    const messageHandler = (message: any) => {
+      if (message.type === 'status_change') {
+        upstreamStatus.value = message.status
+        status.value = message.status
+      } else if (message.type === 'asr_session') {
+        handleAsrSession(message, newSession)
+      } else if (message.type === 'audio_text') {
+        props.onBotOutput?.(message.text)
+      } else if (message.type === 'message_record') {
+        handleMessageRecord(message, newSession)
+      }
     }
-  })
 
-  const messageHandler = (message: any) => {
-    if (message.type === 'status_change') {
-      upstreamStatus.value = message.status
-      status.value = message.status
-    } else if (message.type === 'asr_session') {
-      const { sentence } = message
+    const handleAsrSession = (message: any, session: DH2DSession) => {
+      const { sentence, completed } = message
       if (sentence) {
         props.onAsrOutput?.(sentence)
-        if (message.completed) {
-          newSession.send({
+        if (completed) {
+          session.send({
             type: getInteractionType(upstreamStatus.value),
             text: sentence
           })
           appendHistory({ role: 'user', content: sentence })
           status.value = 'talking'
         }
-      } else if (message.completed) {
+      } else if (completed) {
         status.value = 'sleeping'
       }
-    } else if (message.type === 'audio_text') {
-      props.onBotOutput?.(message.text)
-    } else if (message.type === 'message_record') {
+    }
+
+    const handleMessageRecord = (message: any, session: DH2DSession) => {
       appendHistory(message.message)
       if (message.message.role === 'user' &&
           message.message.content.match(/.*(?:拜拜|再见|睡觉)(?:吧)?$/)) {
-        newSession.send({ type: 'sleep' })
+        session.send({ type: 'sleep' })
       }
     }
-  }
 
-  newSession.on('message', messageHandler)
 
-  if (props.onSessionStatusChanged) {
-    newSession.on('statuschange', props.onSessionStatusChanged)
-  }
-
-  session.value = newSession
-
-  onCleanup(() => {
-    unsubStatusChange()
-    newSession.off('message', messageHandler)
-    if (props.onSessionStatusChanged) {
-      newSession.off('statuschange', props.onSessionStatusChanged)
+    newSession.on('message', messageHandler)
+    if (statusChangeHandler) {
+      newSession.on('statuschange', statusChangeHandler)
     }
-    newSession.close()
-  })
-})
+
+    session.value = newSession
+
+    onCleanup(() => {
+      unsubStatusChange()
+      newSession.off('message', messageHandler)
+      if (statusChangeHandler) {
+        newSession.off('statuschange', statusChangeHandler)
+      }
+      newSession.close()
+    })
+  },
+  { immediate: true }
+)
 
 watch(
     () => [
