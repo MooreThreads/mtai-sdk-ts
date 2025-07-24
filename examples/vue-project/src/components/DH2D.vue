@@ -5,6 +5,7 @@ import {
   computed,
   type Ref,
   type CSSProperties,
+  onMounted,
   watchEffect
 } from 'vue'
 import {
@@ -50,7 +51,10 @@ const upstreamStatus = ref<typeof DHStatus[number]>('sleeping')
 const asrSessionActive = ref(false)
 const latestGreetingMsg = computed(() => props.greetingMessage)
 const statusLock = ref(Promise.resolve())
-
+const containerReady = ref(false)
+onMounted(() => {
+  containerReady.value = true
+})
 defineExpose({
   send: (msg: any) => session.value?.send(msg),
   close: () => session.value?.close()
@@ -78,7 +82,7 @@ watchEffect(() => {
 
 // 处理 session 创建和销毁
 watchEffect((onCleanup) => {
-  if (!containerRef.value) return
+  if (!containerReady.value || !containerRef.value) return
 
   const newSession = createDH2DSession(containerRef.value, {
     videoId: props.videoId,
@@ -131,8 +135,6 @@ watchEffect((onCleanup) => {
   }
 
   session.value = newSession
-  // 加一个初始化后立即调用 config
-  updateSessionConfig(newSession)
 
   onCleanup(() => {
     unsubStatusChange()
@@ -143,51 +145,49 @@ watchEffect((onCleanup) => {
     newSession.close()
   })
 })
-function updateSessionConfig(session: DH2DSession | null) {
-  if (!session) return
 
-  const { model, chatCompletionAddr, bearerToken } = props.openaiCompatibleLLM || {}
-  session.config({
-    type: 'config',
-    voice: props.voice,
-    ...(props.systemPrompt && {
-      message_prefix: [
-        {
-          role: 'system',
-          content: props.systemPrompt,
-        },
-      ],
-    }),
-    ...(props.asrModel && {
-      asr_model: props.asrModel,
-    }),
-    ...(model && {
-      llm_config: { model }
-    }),
-    ...(chatCompletionAddr && {
-      llm_service: {
-        provider: 'openai',
-        endpoint: chatCompletionAddr,
-        ...(bearerToken && {
-          token: bearerToken,
-        }),
-      },
-    }),
-  })
-}
 watch(
-  () => [
-    props.voice,
-    props.systemPrompt,
-    props.asrModel,
-    props.openaiCompatibleLLM?.model,
-    props.openaiCompatibleLLM?.chatCompletionAddr,
-    props.openaiCompatibleLLM?.bearerToken
-  ],
-  () => updateSessionConfig(session.value),
-  { immediate: true }
+    () => [
+      session.value,
+      props.voice,
+      props.systemPrompt,
+      props.asrModel,
+      props.openaiCompatibleLLM?.model,
+      props.openaiCompatibleLLM?.chatCompletionAddr,
+      props.openaiCompatibleLLM?.bearerToken
+    ],
+    () => {
+      const { model, chatCompletionAddr, bearerToken } = props.openaiCompatibleLLM || {}
+      session.value?.config({
+        type: 'config',
+        voice: props.voice,
+        ...(props.systemPrompt && {
+          message_prefix: [
+            {
+              role: 'system',
+              content: props.systemPrompt,
+            },
+          ],
+        }),
+        ...(props.asrModel && {
+          asr_model: props.asrModel,
+        }),
+        ...(model && {
+          llm_config: { model }
+        }),
+        ...(chatCompletionAddr && {
+          llm_service: {
+            provider: 'openai',
+            endpoint: chatCompletionAddr,
+            ...(bearerToken && {
+              token: bearerToken,
+            }),
+          },
+        }),
+      })
+    },
+    { immediate: true }
 )
-
 
 // 按键监听
 watchEffect((onCleanup) => {
