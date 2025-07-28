@@ -1,4 +1,3 @@
-
 import { withChild } from "../abortable"
 import { events } from "../events"
 
@@ -45,7 +44,7 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
         }
         url.protocol = url.protocol === 'https:' || url.protocol === 'wss:' ? 'wss:' : 'ws:'
         logger.log('connecting websocket', url.toString())
-        let ws = new WebSocket(url.toString())
+        const ws = new WebSocket(url.toString())
         innerAbortable.onabort(() => {
             ws.close()
         })
@@ -133,23 +132,33 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
             }
             pc.addEventListener("track", onTrack)
             innerAbortable.onabort(() => pc.removeEventListener("track", onTrack))
+
+            // 用于标记是否已经播放了第一帧
+            let firstFramePlayed = false;
+
+            const onFirstFrame = () => {
+                if (firstFramePlayed) return;
+                firstFramePlayed = true;
+                videoVisible = true;
+                video.removeEventListener('timeupdate', onFirstFrame)
+                video.removeEventListener('canplay', onCanPlay);
+                
+                sessionLogger.log('first video frame played')
+                resolve()
+            };
+
+            // 监听第一帧
+            video.addEventListener('timeupdate', onFirstFrame, { once: true });
+
             const onCanPlay = () => {
-                videoVisible = true
-                video.removeEventListener('canplay', onCanPlay)
-                const cover = elements.cover
                 sessionLogger.log('video canplay')
                 video.play()
-                if (cover != null && cover.style.opacity != "0") {
-                    setTimeout(() => {
-                        cover.style.opacity = "0"
-                        resolve()
-                    }, 500)
-                } else {
-                    resolve()
-                }
             }
             video.addEventListener("canplay", onCanPlay)
-            innerAbortable.onabort(() => video.removeEventListener("canplay", onCanPlay))
+            innerAbortable.onabort(() => {
+                video.removeEventListener("canplay", onCanPlay)
+                video.removeEventListener('timeupdate', onFirstFrame)
+            })
         })
         return await Promise.all([pcConnected, videoReady]).then(([connection, _]) => connection).catch(e => {
             sessionLogger.error(e)
@@ -224,7 +233,7 @@ export async function untilFailed(logger: Logger, connection: DH2DConnection, co
     logger = logger.push((_, ...args) => _('[untilFailed]', ...args))
     logger.log('enter')
     let running = true
-    let connectionStart = Date.now()
+    const connectionStart = Date.now()
     const dispose: (() => void)[] = []
     return await new Promise<void>((resolve) => {
         abortable.onabort(() => {
