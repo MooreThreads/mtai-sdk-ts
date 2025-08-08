@@ -176,7 +176,7 @@ function monitorVideoStall(video: HTMLVideoElement, maxStallDuration: number, on
     };
 }
 
-export async function connect(logger: Logger, elements: DH2DPlayerElements, config: Required<DH2DSessionConfig>, abortable: Abortable): Promise<DH2DConnection> {
+export async function connect(logger: Logger, evts: ReturnType<typeof events<DHConnectionEvents>>,  elements: DH2DPlayerElements, config: Required<DH2DSessionConfig>, abortable: Abortable): Promise<DH2DConnection> {
     const { endpoint } = rootConfig()
     const rootLogger = logger.push((_, ...args) => _('[connect]', ...args))
     let videoVisible = false
@@ -216,8 +216,7 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
             abortable.onabort(() => {
                 reject(new Error('connection aborted'))
             })
-            const evt = events<DHConnectionEvents>()
-            const connection: Diff<DH2DConnection, typeof evt> = {
+            const connection: Diff<DH2DConnection, typeof evts> = {
                 get ws() { return ws },
                 get pc() { return pc },
                 get audioPc() { return audioPc },
@@ -258,14 +257,14 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                         }
                         Promise.all(tasks).then(() => resolve({
                             ...connection,
-                            ...(({ on, off }) => ({ on, off }))(evt),
+                            ...(({ on, off }) => ({ on, off }))(evts),
                         })).catch(reject)
                     }
                     if (DHOutputMessageType.includes(message.type)) {
-                        evt.emit("message", message)
+                        evts.emit("message", message)
                     }
                 } else {
-                    evt.emit("audio", event.data)
+                    evts.emit("audio", event.data)
                 }
             }
         })
@@ -365,9 +364,6 @@ export async function disconnect(logger: Logger, connection: DH2DConnection, ele
         connection.ws.close()
         connection.pc.close()
         connection.audioPc?.close()
-        for (const events of DHConnectionEventTypes) {
-            connection.off(events)
-        }
         await gc()
     } catch (e) {
         logger.error(e)
