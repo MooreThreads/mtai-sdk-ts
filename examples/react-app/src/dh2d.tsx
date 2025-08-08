@@ -147,6 +147,7 @@ export const DH2D: FC<{
 
     session.on('message', (message) => {
       if (message.type === 'status_change') {
+        console.log('status_change', message.status);
         upstreamStatus.value = message.status;
         status.value = message.status;
       } else if (message.type === 'asr_session') {

@@ -14,6 +14,7 @@ function defaultConfig(config?: DH2DSessionConfig): Required<DH2DSessionConfig> 
         frameRate: config?.frameRate || 25,
         reconnectInterval: config?.reconnectInterval || 20 * 60 * 1000,
         connectTimeout: config?.connectTimeout || 60 * 1000,
+        maxStallDuration: config?.maxStallDuration || 10 * 1000,
         maxAudioVideoDurationDifference: config?.maxAudioVideoDurationDifference || 10 * 1000,
         pingInterval: config?.pingInterval || 10 * 1000,
         pingTimeout: config?.pingTimeout || 5 * 1000,

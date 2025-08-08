@@ -3,7 +3,7 @@ import { isLoggedIn } from "../auth"
 import { box } from "../box"
 import { events } from "../events"
 import { hooks } from "../hooks"
-import { Box, DHInputMessage, DHOutputMessage } from "../types"
+import { Box, DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, DHOutputMessage } from "../types"
 import { DH2DConnection, DH2DSession, DH2DSessionEvents, DH2DSessionEventTypes, DH2DSessionStatus } from "./types"
 import { DH2DSessionConfig } from "./types"
 
@@ -123,6 +123,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
 
     const completed = (async () => {
         let sessionLogger = rootLogger
+        const evts = events<DHConnectionEvents>()
         function emitStatus(_status: typeof DH2DSessionStatus[number]) {
             sessionLogger.log(`status changing from ${status} to ${_status}`)
             status = _status
@@ -140,7 +141,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             send = notConnected
             return
         }
-        let connection = await withChild(rootAbortable, (_) => hooks.dh2d.connect(rootLogger, player, realConfig, _))
+        let connection = await withChild(rootAbortable, (_) => hooks.dh2d.connect(rootLogger, evts, player, realConfig, _))
         try {
             if (aborted) {
                 emitStatus("closed")
@@ -164,7 +165,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             }
             emitStatus("connected")
             while (!aborted) {
-                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(sessionLogger, connection, realConfig, _))
+                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(sessionLogger,  connection, player, realConfig, _))
                 emitStatus("reconnecting")
                 send = enqueueMessage
                 await withChild(rootAbortable, _ => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
@@ -179,7 +180,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                     send = notConnected
                     return
                 }
-                connection = await withChild(rootAbortable, _ => hooks.dh2d.connect(rootLogger, player, realConfig, _))
+                connection = await withChild(rootAbortable, _ => hooks.dh2d.connect(rootLogger, evts, player, realConfig, _))
                 realConfig.sessionId = connection.sessionId
                 sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
                 connection.on("message", onMessage)
@@ -192,6 +193,9 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 drainMessage(connection.ws)
             }
         } finally {
+            for (const evt of DHConnectionEventTypes) {
+                evts.off(evt)
+            }
             emitStatus("closed")
             send = notConnected
             hooks.dh2d.disconnect(sessionLogger, connection, player, abortable())

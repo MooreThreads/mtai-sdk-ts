@@ -71,6 +71,12 @@ export type DH2DSessionConfig = {
   reconnectInterval?: number
 
   /**
+   * The maximum duration to allow video to stall before triggering a reconnect.
+   * @default 10 * 1000 (10 seconds)
+   */
+  maxStallDuration?: number
+
+  /**
    * The timeout for the establishing connection.
    * @default 60 * 1000 (60 seconds)
    */

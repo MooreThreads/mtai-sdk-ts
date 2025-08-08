@@ -1,12 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import type { DH2DSession, ComponentStatus, Avatar, Voice } from 'mtai'
-import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars, setConfig } from 'mtai'
+import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
 import { DH2D } from './dh2d'
 import './App.css'
-
-// setConfig({
-//   endpoint: 'http://192.168.4.50:32101'
-// })
 interface ModalProps {
   isOpen: boolean;
   title: string;
