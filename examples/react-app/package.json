@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "mtai": "^0.2.5-alpha.3",
+    "mtai": "^0.2.5",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

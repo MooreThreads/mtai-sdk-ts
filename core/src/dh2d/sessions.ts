@@ -164,7 +164,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             }
             emitStatus("connected")
             while (!aborted) {
-                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(sessionLogger, connection, realConfig, _))
+                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(sessionLogger,  connection, player, realConfig, _))
                 emitStatus("reconnecting")
                 send = enqueueMessage
                 await withChild(rootAbortable, _ => hooks.dh2d.disconnect(sessionLogger, connection, player, _))

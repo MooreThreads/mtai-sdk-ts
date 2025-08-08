@@ -23,6 +23,159 @@ async function gc() {
     })
 }
 
+function monitorVideoStall(video: HTMLVideoElement, maxStallDuration: number, onStall: (info: {
+    currentTime: number;
+    duration: number;
+    buffered: { start: number; end: number }[];
+    readyState: number;
+    readyStateDesc: string;
+    reason: string;
+}) => void, logFn: (info: any) => void) {
+    let lastTime = 0;
+    let lastUpdate = 0;
+    let intervalId: number | null = null;
+    let started = false;
+    let stallTimer: number | null = null;
+    let inStall = false;
+
+    function resetTimeTracking() {
+        lastTime = video.currentTime;
+        lastUpdate = Date.now();
+    }
+
+    function enterPlayingState() {
+        inStall = false;
+        resetTimeTracking();
+        stallTimer && clearTimeout(stallTimer);
+        stallTimer = null;
+    }
+
+    function startMonitoring() {
+        if (!started) {
+            started = true;
+            enterPlayingState();
+
+            video.addEventListener("timeupdate", onTimeUpdate);
+            video.addEventListener("waiting", onWaiting);
+            intervalId = setInterval(checkStall, 1000);
+        } else {
+            enterPlayingState();
+        }
+    }
+
+    function onTimeUpdate() {
+        if (video.currentTime !== lastTime) {
+            enterPlayingState();
+        }
+    }
+
+    function checkStall() {
+        if (!video.paused && !video.ended && !inStall) {
+            const now = Date.now();
+            if (now - lastUpdate >= maxStallDuration) {
+                triggerStall();
+            }
+        }
+    }
+
+    function onWaiting() {
+        if (!inStall) {
+            stallTimer && clearTimeout(stallTimer);
+            stallTimer = setTimeout(() => {
+                triggerStall();
+            }, maxStallDuration);
+        }
+    }
+
+    function getBufferedRanges() {
+        const ranges = [];
+        for (let i = 0; i < video.buffered.length; i++) {
+            ranges.push({
+                start: video.buffered.start(i),
+                end: video.buffered.end(i)
+            });
+        }
+        return ranges;
+    }
+
+    function analyzeReason() {
+        const readyStateMap = {
+            0: "no media data loaded",
+            1: "metadata loaded, no data to play",
+            2: "data for current position only",
+            3: "data to play a little ahead",
+            4: "enough data to keep playing"
+        } as Record<number, string>;
+
+        const buffered = getBufferedRanges();
+        const current = video.currentTime;
+
+        let hasDataAhead = buffered.some(range => range.end > current + 0.05);
+
+        let reason;
+        if (!hasDataAhead) {
+            reason = "network starvation (no buffered data ahead)";
+        } else if (video.readyState <= 2) {
+            reason = "decoding or format delay";
+        } else {
+            reason = "unknown stall cause";
+        }
+
+        return {
+            reason,
+            readyState: video.readyState,
+            readyStateDesc: readyStateMap[video.readyState] || "unknown state"
+        };
+    }
+
+    function triggerStall() {
+        if (!inStall) {
+            inStall = true;
+            const bufferedRanges = getBufferedRanges();
+            const reasonInfo = analyzeReason();
+
+            const info = {
+                currentTime: video.currentTime,
+                duration: video.duration,
+                buffered: bufferedRanges,
+                readyState: reasonInfo.readyState,
+                readyStateDesc: reasonInfo.readyStateDesc,
+                reason: reasonInfo.reason
+            };
+
+            // Delegate logging if provided
+            if (typeof logFn === "function") {
+                logFn({
+                    event: "stall-detected",
+                    ...info,
+                    bufferedGaps: bufferedRanges.map(r =>
+                        `[${r.start.toFixed(2)}s → ${r.end.toFixed(2)}s]`
+                    )
+                });
+            }
+
+            onStall(info);
+        }
+    }
+
+    // Start monitoring immediately if video is already playing, otherwise wait for playing event
+    if (!video.paused && !video.ended) {
+        startMonitoring();
+    } else {
+        video.addEventListener("playing", startMonitoring);
+    }
+
+    return function cancelMonitor() {
+        intervalId && clearInterval(intervalId);
+        intervalId = null;
+        stallTimer && clearTimeout(stallTimer);
+        stallTimer = null;
+        video.removeEventListener("playing", startMonitoring);
+        video.removeEventListener("timeupdate", onTimeUpdate);
+        video.removeEventListener("waiting", onWaiting);
+    };
+}
+
 export async function connect(logger: Logger, elements: DH2DPlayerElements, config: Required<DH2DSessionConfig>, abortable: Abortable): Promise<DH2DConnection> {
     const { endpoint } = rootConfig()
     const rootLogger = logger.push((_, ...args) => _('[connect]', ...args))
@@ -224,7 +377,7 @@ export async function disconnect(logger: Logger, connection: DH2DConnection, ele
     }
 }
 
-export async function untilFailed(logger: Logger, connection: DH2DConnection, config: Required<DH2DSessionConfig>, abortable: Abortable) {
+export async function untilFailed(logger: Logger, connection: DH2DConnection, player: DH2DPlayerElements, config: Required<DH2DSessionConfig>, abortable: Abortable) {
     logger = logger.push((_, ...args) => _('[untilFailed]', ...args))
     logger.log('enter')
     let running = true
@@ -235,6 +388,24 @@ export async function untilFailed(logger: Logger, connection: DH2DConnection, co
             running = false
             resolve()
         })
+        const maxStallDuration = config.maxStallDuration
+        if (maxStallDuration > 0) {
+            dispose.push(
+                monitorVideoStall(
+                    player.video,
+                    config.maxStallDuration,
+                    (info) => {
+                        logger.error(
+                            `reconnect due to video stall: ${info.reason} at ${info.currentTime.toFixed(2)}s`, info)
+                        running = false
+                        resolve()
+                    },
+                    (msg) => {
+                        logger.log(msg)
+                    }
+                )
+            )
+        }
         connection.ws.addEventListener("close", () => {
             if (!running) return
             logger.log('reconnect due to websocket close')
