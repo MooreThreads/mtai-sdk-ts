@@ -4,7 +4,7 @@ type DownloadStatus = {
     error?: string
 }
 
-type Component = {
+export type Component = {
     url?: string,
     name: string,
     filename?: string,

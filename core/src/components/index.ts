@@ -1,4 +1,4 @@
-import { ComponentStatus } from "./types";
+import { ComponentStatus, Component } from "./types";
 import { events } from "../events";
 import { refCountedEvents } from "../refCountedEvents";
 import { config } from "../config";
@@ -84,4 +84,19 @@ export async function updateComponent(name: string) {
 
 export async function cancelUpdateComponent(name: string) {
     return await componentAction(name, 'cancel_update')
+}
+
+export async function registerComponent(component: Component) {
+    const { endpoint } = config()
+    const response = await fetch(`${endpoint}/api/v1/components`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(component)
+    })
+    if (!response.ok) {
+        const body = await response.json()
+        throw new Error(body.message)
+    }
 }
