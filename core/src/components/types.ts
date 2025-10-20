@@ -5,6 +5,7 @@ type DownloadStatus = {
 }
 
 export type Component = {
+    id: number,
     url?: string,
     name: string,
     filename?: string,
