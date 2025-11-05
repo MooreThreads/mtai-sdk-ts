@@ -1,6 +1,10 @@
 import { DHInputMessage } from "../types"
 export type LocalLLMStatus = {
     running: boolean
+    creating: boolean
+    destroying: boolean
+    current_model: string
+    debounce_period: number
     models: {
         title: string
     }[]
