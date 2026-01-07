@@ -37,6 +37,8 @@ export type DHInputMessage =
    * @property voice - Optional voice to use for the digital human.
    * @property asr_model - Optional ASR model to use for the digital human.
    * @property llm_service - Optional LLM service configuration.
+   * @property llm_config - Optional LLM configuration.
+   * @property history - Optional array of chat messages to use as history.
    */
   | {
     type: 'config',
@@ -65,7 +67,8 @@ export type DHInputMessage =
       temperature?: number,
       max_tokens?: number,
       top_p?: number,
-    }
+    },
+    history?: ChatMessage[],
   }
   /**
    * Message to send a ping to the server.
