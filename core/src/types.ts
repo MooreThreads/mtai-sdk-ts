@@ -68,6 +68,31 @@ export type DHInputMessage =
       max_tokens?: number,
       top_p?: number,
     },
+    tts_config?: {
+      provider: 'aliyun',
+      voice: string,
+      appkey: string,
+      token: string,
+      endpoint?: string,
+    }
+    | {
+      provider: 'volcengine',
+      voice: string,
+      appid: string,
+      token: string,
+      cluster: string,
+      endpoint?: string,
+    }
+    | {
+      provider: 'mthreads',
+      voice: string,
+      endpoint?: string
+    }
+    | {
+      provider: 'local',
+      voice: string,
+      endpoint?: string
+    }
     history?: ChatMessage[],
   }
   /**
@@ -78,7 +103,10 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended", "start_tool_call", "finish_tool_call"] as const
+type ToolCall = {type: 'function' | 'official', function: {name: string, arguments?: Record<string, any>}} | {
+  type: 'unknown'
+}
 
 /**
  * Represents messages received from the server.
@@ -132,6 +160,19 @@ export type DHOutputMessage =
  * @property type - Indicates this is a session ended message.
  */
   | { type: 'session_ended' }
+  /**
+   * Message indicating the start of a tool call.
+   * @property type - Indicates this is a tool call initiation message.
+   * @property tool_call - The details of the tool call being started.
+   */
+  | { type: 'start_tool_call', tool_call: ToolCall }
+  /**
+   * Message indicating the completion of a tool call.
+   * @property type - Indicates this is a tool call completion message.
+   * @property tool_call - The details of the finished tool call.
+   * @property result - (Optional) The result returned by the tool call.
+   */
+  | { type: 'finish_tool_call', tool_call: ToolCall, result?: string }
 
 
 export type EventSource<T> = {
