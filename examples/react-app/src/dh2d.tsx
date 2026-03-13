@@ -17,6 +17,7 @@ import {
   DHStatus,
   hooks,
   DH2DSessionStatus,
+  type DH2DPlaybackAudioStatus,
   type ChatMessage,
   type DH2DSession,
 } from 'mtai';
@@ -59,6 +60,8 @@ export const DH2D: FC<{
   onStatusChanged?: (status: (typeof DHStatus)[number]) => void;
   /** Callback fired when the session status changes */
   onSessionStatusChanged?: (status: (typeof DH2DSessionStatus)[number]) => void;
+  /** Callback fired when the frontend playback audio status changes */
+  onAudioStatusChanged?: (status: DH2DPlaybackAudioStatus) => void;
 }> = ({
   sessionRef,
   style,
@@ -75,6 +78,7 @@ export const DH2D: FC<{
   onHistoryChanged,
   onStatusChanged,
   onSessionStatusChanged,
+  onAudioStatusChanged,
 }) => {
   const [session, setSession] = useState<DH2DSession>();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -129,6 +133,11 @@ export const DH2D: FC<{
     });
   }, [session, videoId, voice, systemPrompt, asrModel, openaiCompatibleLLM?.model, openaiCompatibleLLM?.chatCompletionAddr, openaiCompatibleLLM?.bearerToken]);
   useEffect(() => onSessionStatusChanged && session?.on('statuschange', onSessionStatusChanged), [session, onSessionStatusChanged]);
+  useEffect(() => {
+    if (!session || !onAudioStatusChanged) return;
+    onAudioStatusChanged(session.playback.audioStatus);
+    return session.playback.observeAudioStatus(onAudioStatusChanged);
+  }, [session, onAudioStatusChanged]);
   useEffect(() => {
     if (!containerRef.current) {
       console.error('containerRef.current is null');
