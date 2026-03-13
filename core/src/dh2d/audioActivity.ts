@@ -10,6 +10,14 @@ export type AudioActivityState = {
   silentForMs: number
 }
 
+export type AudioActivityReporterOptions = {
+  silenceTailMs: number
+  sampleIntervalMs: number
+  activeHeartbeatMs: number
+  silenceHeartbeatMs: number
+  rmsDeltaThreshold: number
+}
+
 export type AudioActivityMessage = {
   type: 'dh_2d_audio_activity'
   connection_seq: number
@@ -40,10 +48,7 @@ export function createAudioActivityTracker(options: AudioActivityTrackerOptions)
       if (audioActive) {
         silentForMs = 0
       } else {
-        silentForMs = Math.min(
-          silentForMs + options.sampleIntervalMs,
-          options.silenceTailMs,
-        )
+        silentForMs += options.sampleIntervalMs
       }
 
       return {
@@ -51,6 +56,45 @@ export function createAudioActivityTracker(options: AudioActivityTrackerOptions)
         rms,
         silentForMs,
       }
+    },
+  }
+}
+
+export function createAudioActivityReporter(options: AudioActivityReporterOptions) {
+  let lastReported: AudioActivityState | undefined
+  let elapsedSinceLastReportMs = 0
+
+  return {
+    shouldReport(next: AudioActivityState) {
+      if (!lastReported) {
+        lastReported = next
+        elapsedSinceLastReportMs = 0
+        return true
+      }
+
+      elapsedSinceLastReportMs += options.sampleIntervalMs
+
+      const shouldReport = (
+        next.audioActive !== lastReported.audioActive
+        || (
+          next.audioActive
+          ? (
+            Math.abs(next.rms - lastReported.rms) >= options.rmsDeltaThreshold
+            || elapsedSinceLastReportMs >= options.activeHeartbeatMs
+          )
+          : (
+            next.silentForMs <= options.silenceTailMs
+            || elapsedSinceLastReportMs >= options.silenceHeartbeatMs
+          )
+        )
+      )
+
+      if (shouldReport) {
+        lastReported = next
+        elapsedSinceLastReportMs = 0
+      }
+
+      return shouldReport
     },
   }
 }

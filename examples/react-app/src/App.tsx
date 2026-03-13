@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
-import type { DH2DSession, ComponentStatus, Avatar, Voice } from 'mtai'
-import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars, setConfig } from 'mtai'
+import type { DH2DSession, ComponentStatus, Avatar, Voice, DH2DPlaybackAudioStatus } from 'mtai'
+import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
 import { DH2D } from './dh2d'
+import { createManualInputMessage, type ManualInputType } from './manualInput'
+import { advancePlaybackAnalysis, createInitialPlaybackAnalysis } from './playbackAnalysis'
 import './App.css'
 
 // setConfig({
@@ -432,12 +434,30 @@ export default function App() {
   const [llmModels, setLlmModels] = useState<any[]>([])
   const [ttsVoices, setTtsVoices] = useState<Voice[]>([])
   const [avatars, setAvatars] = useState<Avatar[]>([])
+  const [inputType, setInputType] = useState<ManualInputType>('wakeup')
+  const [inputText, setInputText] = useState('')
+  const [audioStatus, setAudioStatus] = useState<DH2DPlaybackAudioStatus>({
+    state: 'pending',
+    rms: 0,
+    audioActive: false,
+    silentForMs: 0,
+    connectionSeq: 0,
+    activitySeq: 0,
+  })
+  const [playbackAnalysis, setPlaybackAnalysis] = useState(createInitialPlaybackAnalysis)
 
   useEffect(() => observeComponents(setComponents), []);
   useEffect(() => {
     if (status != "talking") setBotText("")
     if (status != "listening") setAsrText("")
   }, [status])
+  useEffect(() => {
+    setPlaybackAnalysis((current) => advancePlaybackAnalysis(current, {
+      status,
+      audioStatus,
+      nowMs: Date.now(),
+    }))
+  }, [audioStatus, status])
 
   const fetchLlmModels = async () => {
     const models = await getLlmModels();
@@ -484,6 +504,13 @@ export default function App() {
     setVideoId(avatarId)
   }
 
+  const handleManualSend = async () => {
+    if (!start || !sessionRef.current) return
+    await sessionRef.current.send(createManualInputMessage(inputType, inputText))
+    setInputText('')
+  }
+  const audioLevel = Math.min(audioStatus.rms / 0.12, 1)
+
   return (
     <div style={{
       width: "100%",
@@ -524,6 +551,7 @@ export default function App() {
         onAsrOutput={setAsrText}
         onBotOutput={_ => setBotText(prev => prev + _)}
         onStatusChanged={setStatus}
+        onAudioStatusChanged={setAudioStatus}
       />}
       <div style={{
         backgroundColor: "white", 
@@ -560,6 +588,91 @@ export default function App() {
           <div><strong>Bot Text:</strong> {botText}</div>
           <div><strong>ASR Text:</strong> {asrText}</div>
         </div>
+        <div style={{ marginTop: "15px", textAlign: "left" }}>
+          <div style={{ fontWeight: "600", marginBottom: "6px" }}>Playback Audio</div>
+          <div style={{
+            width: "240px",
+            height: "10px",
+            borderRadius: "999px",
+            backgroundColor: "#e9ecef",
+            overflow: "hidden",
+            marginBottom: "8px"
+          }}>
+            <div style={{
+              width: `${audioLevel * 100}%`,
+              height: "100%",
+              backgroundColor: audioStatus.audioActive ? "#20c997" : "#adb5bd",
+              transition: "width 120ms linear, background-color 120ms linear"
+            }} />
+          </div>
+          <div><strong>Monitor:</strong> {audioStatus.state}</div>
+          <div><strong>RMS:</strong> {audioStatus.rms.toFixed(4)}</div>
+          <div><strong>Audio Active:</strong> {String(audioStatus.audioActive)}</div>
+          <div><strong>Silent For:</strong> {audioStatus.silentForMs} ms</div>
+          <div>
+            <strong>Silence400→Listening:</strong>{' '}
+            {playbackAnalysis.latestListeningDelayMs === null
+              ? 'pending'
+              : `${playbackAnalysis.latestListeningDelayMs} ms`}
+          </div>
+        </div>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            void handleManualSend()
+          }}
+          style={{ marginTop: "15px", textAlign: "left" }}
+        >
+          <div style={{ fontWeight: "600", marginBottom: "6px" }}>Manual Message</div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <select
+              value={inputType}
+              onChange={(event) => setInputType(event.target.value as ManualInputType)}
+              disabled={!start}
+              style={{
+                padding: "8px 10px",
+                borderRadius: "5px",
+                border: "1px solid #ccc",
+                backgroundColor: "white",
+                fontSize: "14px"
+              }}
+            >
+              <option value="wakeup">wakeup</option>
+              <option value="sleep">sleep</option>
+              <option value="input">input</option>
+            </select>
+            <input
+              value={inputText}
+              onChange={(event) => setInputText(event.target.value)}
+              disabled={!start}
+              placeholder="Optional text"
+              style={{
+                flex: 1,
+                minWidth: "160px",
+                padding: "8px 10px",
+                borderRadius: "5px",
+                border: "1px solid #ccc",
+                fontSize: "14px"
+              }}
+            />
+            <button
+              type="submit"
+              disabled={!start}
+              style={{
+                padding: "8px 16px",
+                backgroundColor: start ? "#0d6efd" : "#adb5bd",
+                color: "white",
+                border: "none",
+                borderRadius: "5px",
+                cursor: start ? "pointer" : "not-allowed",
+                fontWeight: "500",
+                boxShadow: "0 2px 4px rgba(0,0,0,0.2)"
+              }}
+            >
+              Send
+            </button>
+          </div>
+        </form>
         <div style={{ marginTop: "15px" }}>
           <button 
             onClick={() => sessionRef.current?.send({type: "wakeup"})} 

@@ -1,6 +1,7 @@
 import {
   calculateRms,
   createAudioActivityMessageBuilder,
+  createAudioActivityReporter,
   createAudioActivityTracker,
   nextConnectionSeq,
 } from './audioActivity'
@@ -20,7 +21,7 @@ describe('createAudioActivityTracker', () => {
     })
   })
 
-  test('accumulates silence until the configured tail is reached', () => {
+  test('accumulates silence beyond the configured tail threshold', () => {
     const tracker = createAudioActivityTracker({
       threshold: 0.1,
       silenceTailMs: 400,
@@ -48,6 +49,11 @@ describe('createAudioActivityTracker', () => {
       audioActive: false,
       rms: 0.01,
       silentForMs: 400,
+    })
+    expect(tracker.update(0.01)).toEqual({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 500,
     })
   })
 
@@ -106,5 +112,99 @@ describe('audio activity telemetry helpers', () => {
       rms: 0.01,
       silent_for_ms: 100,
     })
+  })
+
+  test('keeps reporting each silence step until the silence tail is reached', () => {
+    const reporter = createAudioActivityReporter({
+      silenceTailMs: 400,
+      sampleIntervalMs: 100,
+      activeHeartbeatMs: 500,
+      silenceHeartbeatMs: 500,
+      rmsDeltaThreshold: 0.02,
+    })
+
+    expect(reporter.shouldReport({
+      audioActive: true,
+      rms: 0.3,
+      silentForMs: 0,
+    })).toBe(true)
+
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 100,
+    })).toBe(true)
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 200,
+    })).toBe(true)
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 300,
+    })).toBe(true)
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 400,
+    })).toBe(true)
+  })
+
+  test('throttles steady silence once the backend threshold has already been reached', () => {
+    const reporter = createAudioActivityReporter({
+      silenceTailMs: 400,
+      sampleIntervalMs: 100,
+      activeHeartbeatMs: 500,
+      silenceHeartbeatMs: 500,
+      rmsDeltaThreshold: 0.02,
+    })
+
+    reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 100,
+    })
+    reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 200,
+    })
+    reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 300,
+    })
+    reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 400,
+    })
+
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 500,
+    })).toBe(false)
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 600,
+    })).toBe(false)
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 700,
+    })).toBe(false)
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 800,
+    })).toBe(false)
+    expect(reporter.shouldReport({
+      audioActive: false,
+      rms: 0.01,
+      silentForMs: 900,
+    })).toBe(true)
   })
 })

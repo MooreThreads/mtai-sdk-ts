@@ -7,6 +7,7 @@ import { Box, DHInputMessage, DHOutputMessage } from "../types"
 import { DH2DConnection, DH2DSession, DH2DSessionEvents, DH2DSessionEventTypes, DH2DSessionStatus } from "./types"
 import { DH2DSessionConfig } from "./types"
 import { nextConnectionSeq } from "./audioActivity"
+import { createDH2DPlayback } from "./playback"
 
 
 /**
@@ -71,6 +72,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         configMsg = message
         await send(message)
     }
+    const playback = createDH2DPlayback()
 
     let closed = false
     let connRef: DH2DConnection | undefined = undefined
@@ -79,6 +81,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         get sessionId() { return realConfig.sessionId },
         get videoId() { return realConfig.videoId },
         get status() { return status },
+        get playback() { return playback },
         get send() { return send },
         get config() { return sendConfig },
         close: async () => {
@@ -143,10 +146,12 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             return
         }
         connectionSeq = nextConnectionSeq(connectionSeq)
+        playback.resetAudioStatus(connectionSeq)
         let connection = await withChild(rootAbortable, (_) => hooks.dh2d.connect(rootLogger, player, realConfig, _))
         try {
             if (aborted) {
                 emitStatus("closed")
+                playback.markAudioStatusUnavailable(connectionSeq)
                 send = notConnected
                 return
             }
@@ -161,28 +166,40 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             }
             if (aborted) {
                 emitStatus("closed")
+                playback.markAudioStatusUnavailable(connectionSeq)
                 send = notConnected
                 await withChild(rootAbortable, (_) => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
                 return
             }
             emitStatus("connected")
             while (!aborted) {
-                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(sessionLogger, connection, player, realConfig, connectionSeq, _))
+                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(
+                    sessionLogger,
+                    connection,
+                    player,
+                    realConfig,
+                    connectionSeq,
+                    playback.setAudioStatus,
+                    _,
+                ))
                 emitStatus("reconnecting")
                 send = enqueueMessage
                 await withChild(rootAbortable, _ => hooks.dh2d.disconnect(sessionLogger, connection, player, _))
                 if (aborted) {
                     emitStatus("closed")
+                    playback.markAudioStatusUnavailable(connectionSeq)
                     send = notConnected
                     return
                 }
                 if (!await isLoggedIn()) {
                     rootLogger.error("unauthorized")
                     emitStatus("failed")
+                    playback.markAudioStatusUnavailable(connectionSeq)
                     send = notConnected
                     return
                 }
                 connectionSeq = nextConnectionSeq(connectionSeq)
+                playback.resetAudioStatus(connectionSeq)
                 connection = await withChild(rootAbortable, _ => hooks.dh2d.connect(rootLogger, player, realConfig, _))
                 realConfig.sessionId = connection.sessionId
                 sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
@@ -196,6 +213,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 drainMessage(connection.ws)
             }
         } finally {
+            playback.markAudioStatusUnavailable(connectionSeq)
             emitStatus("closed")
             send = notConnected
             hooks.dh2d.disconnect(sessionLogger, connection, player, abortable())
@@ -204,4 +222,3 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
 
     return session
 }
-

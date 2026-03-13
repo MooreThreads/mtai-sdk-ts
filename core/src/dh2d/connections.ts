@@ -5,14 +5,17 @@ import { events } from "../events"
 import { connectPc } from "../pc"
 import { Abortable, DHOutputMessageType, Diff, Logger, DHConnectionEventTypes, DHConnectionEvents } from "../types"
 import { config as rootConfig } from "../config"
-import { calculateRms, createAudioActivityMessageBuilder, createAudioActivityTracker } from "./audioActivity"
+import { calculateRms, createAudioActivityMessageBuilder, createAudioActivityReporter, createAudioActivityTracker } from "./audioActivity"
 import { DH2DSessionConfig } from "./types"
 import { DH2DPlayerElements } from "./types"
 import { DH2DConnection } from "./types"
+import { DH2DPlaybackAudioStatus } from "./playback"
 
 const AUDIO_ACTIVITY_SAMPLE_INTERVAL_MS = 100
 const AUDIO_ACTIVITY_SILENCE_TAIL_MS = 400
 const AUDIO_ACTIVITY_THRESHOLD = 0.02
+const AUDIO_ACTIVITY_ACTIVE_HEARTBEAT_MS = 500
+const AUDIO_ACTIVITY_SILENCE_HEARTBEAT_MS = 500
 
 async function gc() {
     await new Promise<void>(resolve => {
@@ -33,21 +36,49 @@ function startAudioActivityMonitoring(
     connection: DH2DConnection,
     elements: DH2DPlayerElements,
     connectionSeq: number,
+    onAudioStatus: (_: DH2DPlaybackAudioStatus) => void,
     abortable: Abortable,
 ) {
+    const reportAudioStatus = (status: DH2DPlaybackAudioStatus) => {
+        onAudioStatus(status)
+    }
     const stream = elements.video.srcObject
     if (!(stream instanceof MediaStream)) {
         logger.warn('audio activity monitor skipped: video srcObject is not a MediaStream')
+        reportAudioStatus({
+            state: 'unavailable',
+            rms: 0,
+            audioActive: false,
+            silentForMs: 0,
+            connectionSeq,
+            activitySeq: 0,
+        })
         return
     }
     if (stream.getAudioTracks().length === 0) {
         logger.warn('audio activity monitor skipped: no remote audio tracks found')
+        reportAudioStatus({
+            state: 'unavailable',
+            rms: 0,
+            audioActive: false,
+            silentForMs: 0,
+            connectionSeq,
+            activitySeq: 0,
+        })
         return
     }
     const AudioContextCtor = window.AudioContext
         || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
     if (!AudioContextCtor) {
         logger.warn('audio activity monitor skipped: AudioContext is unavailable')
+        reportAudioStatus({
+            state: 'unavailable',
+            rms: 0,
+            audioActive: false,
+            silentForMs: 0,
+            connectionSeq,
+            activitySeq: 0,
+        })
         return
     }
 
@@ -63,12 +94,31 @@ function startAudioActivityMonitoring(
         silenceTailMs: AUDIO_ACTIVITY_SILENCE_TAIL_MS,
         sampleIntervalMs: AUDIO_ACTIVITY_SAMPLE_INTERVAL_MS,
     })
+    const reporter = createAudioActivityReporter({
+        silenceTailMs: AUDIO_ACTIVITY_SILENCE_TAIL_MS,
+        sampleIntervalMs: AUDIO_ACTIVITY_SAMPLE_INTERVAL_MS,
+        activeHeartbeatMs: AUDIO_ACTIVITY_ACTIVE_HEARTBEAT_MS,
+        silenceHeartbeatMs: AUDIO_ACTIVITY_SILENCE_HEARTBEAT_MS,
+        rmsDeltaThreshold: AUDIO_ACTIVITY_THRESHOLD,
+    })
     const buildMessage = createAudioActivityMessageBuilder(connectionSeq)
 
     const emit = () => {
         analyser.getFloatTimeDomainData(samples)
         const state = tracker.update(calculateRms(samples))
-        connection.ws.send(JSON.stringify(buildMessage(state)))
+        if (!reporter.shouldReport(state)) {
+            return
+        }
+        const message = buildMessage(state)
+        reportAudioStatus({
+            state: 'running',
+            rms: message.rms,
+            audioActive: message.audio_active,
+            silentForMs: message.silent_for_ms,
+            connectionSeq: message.connection_seq,
+            activitySeq: message.activity_seq,
+        })
+        connection.ws.send(JSON.stringify(message))
     }
 
     const interval = window.setInterval(() => {
@@ -94,6 +144,14 @@ function startAudioActivityMonitoring(
         emit()
     }).catch(error => {
         logger.error('failed to start audio activity monitor', error)
+        reportAudioStatus({
+            state: 'failed',
+            rms: 0,
+            audioActive: false,
+            silentForMs: 0,
+            connectionSeq,
+            activitySeq: 0,
+        })
         cleanup()
     })
 }
@@ -305,6 +363,7 @@ export async function untilFailed(
     elements: DH2DPlayerElements,
     config: Required<DH2DSessionConfig>,
     connectionSeq: number,
+    onAudioStatus: (_: DH2DPlaybackAudioStatus) => void,
     abortable: Abortable,
 ) {
     logger = logger.push((_, ...args) => _('[untilFailed]', ...args))
@@ -364,7 +423,7 @@ export async function untilFailed(
             }, 200)
             dispose.push(() => clearInterval(statTask))
         }
-        startAudioActivityMonitoring(logger, connection, elements, connectionSeq, abortable)
+        startAudioActivityMonitoring(logger, connection, elements, connectionSeq, onAudioStatus, abortable)
         const reconnectInterval = config.reconnectInterval
         if (reconnectInterval > 0) {
             let status = 'sleeping'
