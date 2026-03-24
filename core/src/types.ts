@@ -103,7 +103,7 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended", "start_tool_call", "finish_tool_call"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended", "start_tool_call", "finish_tool_call", "error"] as const
 type ToolCall = {type: 'function' | 'official', function: {name: string, arguments?: Record<string, any>}} | {
   type: 'unknown'
 }
@@ -173,6 +173,12 @@ export type DHOutputMessage =
    * @property result - (Optional) The result returned by the tool call.
    */
   | { type: 'finish_tool_call', tool_call: ToolCall, result?: string }
+  /**
+   * Message indicating an error has occurred.
+   * @property type - Indicates this is an error message.
+   * @property code - The numeric error code representing the specific error.
+   */
+  | { type: 'error', code: number }
 
 
 export type EventSource<T> = {
