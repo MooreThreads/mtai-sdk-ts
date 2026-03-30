@@ -37,8 +37,7 @@ function startAudioActivityMonitoring(
     elements: DH2DPlayerElements,
     connectionSeq: number,
     onAudioStatus: (_: DH2DPlaybackAudioStatus) => void,
-    abortable: Abortable,
-) {
+): () => void {
     const reportAudioStatus = (status: DH2DPlaybackAudioStatus) => {
         onAudioStatus(status)
     }
@@ -53,7 +52,7 @@ function startAudioActivityMonitoring(
             connectionSeq,
             activitySeq: 0,
         })
-        return
+        return () => undefined
     }
     if (stream.getAudioTracks().length === 0) {
         logger.warn('audio activity monitor skipped: no remote audio tracks found')
@@ -65,7 +64,7 @@ function startAudioActivityMonitoring(
             connectionSeq,
             activitySeq: 0,
         })
-        return
+        return () => undefined
     }
     const AudioContextCtor = window.AudioContext
         || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
@@ -79,7 +78,7 @@ function startAudioActivityMonitoring(
             connectionSeq,
             activitySeq: 0,
         })
-        return
+        return () => undefined
     }
 
     const audioContext = new AudioContextCtor()
@@ -103,7 +102,12 @@ function startAudioActivityMonitoring(
     })
     const buildMessage = createAudioActivityMessageBuilder(connectionSeq)
 
+    let closed = false
+
     const emit = () => {
+        if (closed) {
+            return
+        }
         analyser.getFloatTimeDomainData(samples)
         const state = tracker.update(calculateRms(samples))
         if (!reporter.shouldReport(state)) {
@@ -128,7 +132,6 @@ function startAudioActivityMonitoring(
         emit()
     }, AUDIO_ACTIVITY_SAMPLE_INTERVAL_MS)
 
-    let closed = false
     const cleanup = () => {
         if (closed) {
             return
@@ -139,7 +142,6 @@ function startAudioActivityMonitoring(
         analyser.disconnect()
         void audioContext.close().catch(() => undefined)
     }
-    abortable.onabort(cleanup)
     void audioContext.resume().then(() => {
         emit()
     }).catch(error => {
@@ -154,6 +156,7 @@ function startAudioActivityMonitoring(
         })
         cleanup()
     })
+    return cleanup
 }
 
 export async function connect(logger: Logger, elements: DH2DPlayerElements, config: Required<DH2DSessionConfig>, abortable: Abortable): Promise<DH2DConnection> {
@@ -423,7 +426,7 @@ export async function untilFailed(
             }, 200)
             dispose.push(() => clearInterval(statTask))
         }
-        startAudioActivityMonitoring(logger, connection, elements, connectionSeq, onAudioStatus, abortable)
+        dispose.push(startAudioActivityMonitoring(logger, connection, elements, connectionSeq, onAudioStatus))
         const reconnectInterval = config.reconnectInterval
         if (reconnectInterval > 0) {
             let status = 'sleeping'
