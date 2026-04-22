@@ -6,9 +6,9 @@ import { createManualInputMessage, type ManualInputType } from './manualInput'
 import { advancePlaybackAnalysis, createInitialPlaybackAnalysis } from './playbackAnalysis'
 import './App.css'
 
-// setConfig({
-//   endpoint: 'http://192.168.4.50:32101'
-// })
+setConfig({
+  endpoint: 'http://192.168.10.54:32101'
+})
 interface ModalProps {
   isOpen: boolean;
   title: string;
@@ -611,9 +611,11 @@ export default function App() {
           <div><strong>Silent For:</strong> {audioStatus.silentForMs} ms</div>
           <div>
             <strong>Silence400→Listening:</strong>{' '}
-            {playbackAnalysis.latestListeningDelayMs === null
-              ? 'pending'
-              : `${playbackAnalysis.latestListeningDelayMs} ms`}
+            {playbackAnalysis.latestListeningError !== null
+              ? `error: ${playbackAnalysis.latestListeningError}`
+              : playbackAnalysis.latestListeningDelayMs === null
+                ? 'pending'
+                : `${playbackAnalysis.latestListeningDelayMs} ms`}
           </div>
         </div>
         <form

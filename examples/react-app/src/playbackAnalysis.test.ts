@@ -62,3 +62,56 @@ test('resets pending silence timing when playback becomes active again', () => {
   assert.equal(analysis.silenceThresholdReachedAtMs, null)
   assert.equal(analysis.latestListeningDelayMs, null)
 })
+
+test('marks the measurement invalid when listening starts before silence-400', () => {
+  let analysis = createInitialPlaybackAnalysis()
+
+  analysis = advancePlaybackAnalysis(analysis, {
+    status: 'listening',
+    audioStatus: audioStatus({ audioActive: false, silentForMs: 150, activitySeq: 1 }),
+    nowMs: 1000,
+  })
+  assert.equal(analysis.latestListeningDelayMs, null)
+  assert.equal(analysis.latestListeningError, 'listening started before silence-400')
+
+  analysis = advancePlaybackAnalysis(analysis, {
+    status: 'listening',
+    audioStatus: audioStatus({ audioActive: false, silentForMs: 450, activitySeq: 2 }),
+    nowMs: 1300,
+  })
+  assert.equal(analysis.silenceThresholdReachedAtMs, 1250)
+  assert.equal(analysis.latestListeningDelayMs, null)
+  assert.equal(analysis.latestListeningError, 'listening started before silence-400')
+})
+
+test('replaces a previous successful measurement with an immediate error on the next invalid cycle', () => {
+  let analysis = createInitialPlaybackAnalysis()
+
+  analysis = advancePlaybackAnalysis(analysis, {
+    status: 'talking',
+    audioStatus: audioStatus({ audioActive: false, silentForMs: 500, activitySeq: 1 }),
+    nowMs: 1800,
+  })
+
+  analysis = advancePlaybackAnalysis(analysis, {
+    status: 'listening',
+    audioStatus: audioStatus({ audioActive: false, silentForMs: 600, activitySeq: 2 }),
+    nowMs: 1930,
+  })
+  assert.equal(analysis.latestListeningDelayMs, 230)
+  assert.equal(analysis.latestListeningError, null)
+
+  analysis = advancePlaybackAnalysis(analysis, {
+    status: 'talking',
+    audioStatus: audioStatus({ audioActive: true, silentForMs: 0, activitySeq: 3 }),
+    nowMs: 2400,
+  })
+
+  analysis = advancePlaybackAnalysis(analysis, {
+    status: 'listening',
+    audioStatus: audioStatus({ audioActive: false, silentForMs: 100, activitySeq: 4 }),
+    nowMs: 2500,
+  })
+  assert.equal(analysis.latestListeningDelayMs, null)
+  assert.equal(analysis.latestListeningError, 'listening started before silence-400')
+})
