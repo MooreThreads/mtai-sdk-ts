@@ -103,7 +103,7 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended", "start_tool_call", "finish_tool_call", "error"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt"] as const
 type ToolCall = {type: 'function' | 'official', function: {name: string, arguments?: Record<string, any>}} | {
   type: 'unknown'
 }
@@ -179,6 +179,21 @@ export type DHOutputMessage =
    * @property code - The numeric error code representing the specific error.
    */
   | { type: 'error', code: number }
+  /**
+   * Message reporting round-trip time (RTT) metrics.
+   * @property type - Indicates this is an RTT message.
+   * @property service - The name of the measured service.
+   * @property rtt_ms - The measured round-trip time in milliseconds.
+   * @property session_id - (Optional) Identifier of the session the RTT measurement relates to.
+   * @property timestamp - (Optional) Timestamp when the RTT was measured.
+   */
+  | {
+    type: 'rtt',
+    service: string,
+    rtt_ms: number,
+    session_id?: string,
+    timestamp?: string
+  }
 
 
 export type EventSource<T> = {
