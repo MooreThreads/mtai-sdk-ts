@@ -103,7 +103,7 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "asr_process", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt"] as const
 type ToolCall = {type: 'function' | 'official', function: {name: string, arguments?: Record<string, any>}} | {
   type: 'unknown'
 }
@@ -149,6 +149,13 @@ export type DHOutputMessage =
    * @property should_respond - Optional flag indicating if the system should generate a response.
    */
   | { type: 'asr_session', sentence?: string, completed?: boolean, should_respond?: boolean }
+  /**
+   * Message containing streaming ASR progress for wakeup-driven conversations.
+   * @property type - Indicates this message contains ASR progress updates.
+   * @property sentence - Optional partial or complete transcription of the current utterance.
+   * @property completed - Optional flag indicating if the current utterance is complete.
+   */
+  | { type: 'asr_process', sentence?: string, completed?: boolean }
   /**
    * Message to acknowledge a ping.
    * @property type - Indicates this is a pong message.
