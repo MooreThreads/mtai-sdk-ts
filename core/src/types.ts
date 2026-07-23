@@ -103,7 +103,7 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "asr_process", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "asr_process", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt", "command"] as const
 type ToolCall = {type: 'function' | 'official', function: {name: string, arguments?: Record<string, any>}} | {
   type: 'unknown'
 }
@@ -200,6 +200,15 @@ export type DHOutputMessage =
     rtt_ms: number,
     session_id?: string,
     timestamp?: string
+  }
+  /**
+   * Message to indicate a command has been received.
+   * @property type - Indicates this is a command message.
+   * @property name - The command to execute.
+   */
+  | {
+    type: 'command'
+    name: string
   }
 
 
