@@ -103,7 +103,7 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "asr_process", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt", "command"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "asr_process", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt", "command", "face_recognition_result"] as const
 type ToolCall = {type: 'function' | 'official', function: {name: string, arguments?: Record<string, any>}} | {
   type: 'unknown'
 }
@@ -209,6 +209,36 @@ export type DHOutputMessage =
   | {
     type: 'command'
     name: string
+  }
+  /**
+   * Message containing one face recognition sample produced while the digital
+   * human is sleeping.
+   * @property type - Indicates this is a face recognition result message.
+   * @property seq - Monotonic sequence number of the sample within the session.
+   * @property unknown - Whether the sample did not match any enrolled user.
+   * @property user_id - The matched user id, or null when unknown.
+   * @property display_name - The matched user display name, or null when unknown.
+   * @property score - The recognition similarity score.
+   * @property model_version - The face model version used for recognition.
+   * @property image_id - The matched enrolled image id, when available.
+   * @property face_box - Face bounding box in the captured frame, when available.
+   * @property landmarks - Face landmarks reported by the model, when available.
+   * @property timing - Recognition timing details reported by the model, when available.
+   * @property session_id - (Optional) Identifier of the session the sample belongs to.
+   */
+  | {
+    type: 'face_recognition_result'
+    seq?: number
+    unknown: boolean
+    user_id?: string | null
+    display_name?: string | null
+    score?: number
+    model_version?: string
+    image_id?: string | null
+    face_box?: number[] | null
+    landmarks?: unknown
+    timing?: unknown
+    session_id?: string
   }
 
 
