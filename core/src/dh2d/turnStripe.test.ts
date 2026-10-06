@@ -156,43 +156,43 @@ describe('stripeLumaFromImageData', () => {
 })
 
 describe('createTurnTransitionTracker', () => {
-  test('first observed turn emits nothing', () => {
+  test('first observed turn emits nothing but reports the observation', () => {
     const tracker = createTurnTransitionTracker()
-    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A0' })
   })
 
-  test('the same turn emits nothing', () => {
+  test('the same turn emits nothing but reports the observation', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
-    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A0' })
   })
 
   test('a validated A to B transition reports the previous turn', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
-    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'A0' })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'A0', observedTurnId: 'A1' })
   })
 
-  test('an invalid or missing frame emits nothing', () => {
+  test('an invalid or missing frame emits and observes nothing', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
-    expect(tracker.observe([])).toEqual({ endedTurnId: undefined })
-    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe([])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A0' })
   })
 
   test('duplicate transitions emit at most once per turn', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
-    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'A0' })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'A0', observedTurnId: 'A1' })
     tracker.observe(['A0'])
-    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
   })
 
   test('a frame with conflicting tokens is ignored', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
-    expect(tracker.observe(['A1', 'B2'])).toEqual({ endedTurnId: undefined })
-    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'A0' })
+    expect(tracker.observe(['A1', 'B2'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'A0', observedTurnId: 'A1' })
   })
 
   test('transitions chain across turns', () => {
@@ -208,7 +208,7 @@ describe('createTurnTransitionTracker', () => {
     tracker.observe(['A0'])
     tracker.observe(['A1'])
     tracker.reset()
-    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
     expect(tracker.observe(['A2']).endedTurnId).toBe('A1')
   })
 
@@ -228,30 +228,30 @@ describe('endCurrent', () => {
   test('an explicit media end reports the current turn exactly once', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
-    expect(tracker.endCurrent()).toEqual({ endedTurnId: 'A0' })
-    expect(tracker.endCurrent()).toEqual({ endedTurnId: undefined })
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: 'A0', observedTurnId: undefined })
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
   })
 
   test('an explicit media end without a current turn emits nothing', () => {
     const tracker = createTurnTransitionTracker()
-    expect(tracker.endCurrent()).toEqual({ endedTurnId: undefined })
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
   })
 
   test('frames after an explicit media end start a fresh generation', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
     tracker.endCurrent()
-    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined })
-    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined })
-    expect(tracker.observe(['B2'])).toEqual({ endedTurnId: 'A1' })
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A0' })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
+    expect(tracker.observe(['B2'])).toEqual({ endedTurnId: 'A1', observedTurnId: 'B2' })
   })
 
   test('invalid frames never emit and never substitute for an explicit media end', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
-    expect(tracker.observe([])).toEqual({ endedTurnId: undefined })
-    expect(tracker.endCurrent()).toEqual({ endedTurnId: 'A0' })
-    expect(tracker.observe([])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe([])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: 'A0', observedTurnId: undefined })
+    expect(tracker.observe([])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
   })
 })
 

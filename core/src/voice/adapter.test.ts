@@ -522,7 +522,7 @@ describe('sleep with text', () => {
 
   test('text.accepted for the sleep text emits no app-facing message', () => {
     const adapter = createAdapter()
-    const frame = adapter.sleep('再见') as any
+    const frame = (adapter.sleep('再见') as any[])[0]
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
     }))).toEqual([])
@@ -530,7 +530,7 @@ describe('sleep with text', () => {
 
   test('text.accepted for another session or an unknown request emits no app-facing message', () => {
     const adapter = createAdapter()
-    const frame = adapter.sleep('再见') as any
+    const frame = (adapter.sleep('再见') as any[])[0]
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: 'other-session', request_id: frame.request_id, turn_id: 'A1',
     }))).toEqual([])
@@ -575,6 +575,152 @@ describe('pending message sequencing interruption', () => {
     adapter.reset()
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
     expect(sent).toEqual([])
+  })
+})
+
+describe('sleep with text waits for the avatar turn transition', () => {
+  function sentStops(sent: any[]) {
+    return sent.filter(frame => frame.type === 'conversation.stop')
+  }
+
+  function armPendingSleep(adapter: ReturnType<typeof createAdapter>) {
+    const frame = (adapter.sleep('再见') as any[])[0]
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
+    }))
+    return frame.request_id as string
+  }
+
+  test('stops once after the accepted turn is observed and then a different valid turn follows', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    adapter.observeAvatarTurn('B0')
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('A1')
+    expect(sent).toEqual([])
+    adapter.observeAvatarTurn('B2')
+    expect(sentStops(sent)).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+    // The sequence completed; later transitions never send a second stop.
+    adapter.observeAvatarTurn('C3')
+    expect(sentStops(sent)).toHaveLength(1)
+  })
+
+  test('no stop while the accepted turn has not appeared in avatar playback', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    adapter.observeAvatarTurn('B2')
+    adapter.observeAvatarTurn('C3')
+    expect(sent).toEqual([])
+  })
+
+  test('no stop while the current turn remains the accepted turn', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('A1')
+    expect(sent).toEqual([])
+  })
+
+  test('a duplicate acknowledgement keeps the first accepted turn', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    const frame = (adapter.sleep('再见') as any[])[0]
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
+    }))
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A2',
+    }))
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('A2')
+    expect(sentStops(sent)).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+  })
+
+  test('a new input interrupts the pending sleep sequence', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    adapter.textInput('hold on')
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('a new wakeup interrupts the pending sleep sequence', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    adapter.wakeup()
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('a new sleep with text replaces the pending sleep sequence', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    const frame = (adapter.sleep('另一句') as any[])[0]
+    // The retired sequence's accepted turn and transition never stop.
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+    // The replacement sequence still completes on its own acknowledgement.
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'C3',
+    }))
+    adapter.observeAvatarTurn('C3')
+    adapter.observeAvatarTurn('D4')
+    expect(sentStops(sent)).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+  })
+
+  test('reset retires the pending sleep sequence', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    adapter.reset()
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('an acknowledgement after reset never arms the old sequence', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    const frame = (adapter.sleep('再见') as any[])[0]
+    adapter.reset()
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
+    }))
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('avatar observations before the accepted turn correlate nothing', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    const frame = (adapter.sleep('再见') as any[])[0]
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
+    }))
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sentStops(sent)).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
   })
 })
 

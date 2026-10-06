@@ -325,6 +325,70 @@ describe('createAvatarPlayback notifyMediaEnded', () => {
   })
 })
 
+describe('createAvatarPlayback onTurnObserved', () => {
+  test('reports every validated turn observation, including repeats', () => {
+    const frames = createManualFrameSource()
+    const observed: string[] = []
+    let image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: () => undefined,
+      onTurnObserved: turnId => observed.push(turnId),
+    })
+    playback.start()
+    frames.emitFrame()
+    frames.emitFrame()
+    image = stripeImageData('A1')
+    frames.emitFrame()
+    image = stripeImageData(null)
+    frames.emitFrame()
+    expect(observed).toEqual(['A0', 'A0', 'A1'])
+  })
+
+  test('missing frames are never reported as observations', () => {
+    const frames = createManualFrameSource()
+    const observed: string[] = []
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => null,
+      onPlaybackEnded: () => undefined,
+      onTurnObserved: turnId => observed.push(turnId),
+    })
+    playback.start()
+    frames.emitFrame()
+    frames.emitFrame()
+    expect(observed).toEqual([])
+  })
+
+  test('CRC-failing frames are never reported as observations', () => {
+    const frames = createManualFrameSource()
+    const observed: string[] = []
+    // Build a valid 'A1' stripe, then flip the last CRC cell so the
+    // repetition fails validation.
+    const image: ImageData = stripeImageData('A1')
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        const i = ((1 * 4 + y) * 64 + 15 * 4 + x) * 4
+        const value = image.data[i] > 128 ? 16 : 235
+        image.data[i] = image.data[i + 1] = image.data[i + 2] = value
+      }
+    }
+    let current: ImageData | null = image
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => current,
+      onPlaybackEnded: () => undefined,
+      onTurnObserved: turnId => observed.push(turnId),
+    })
+    playback.start()
+    frames.emitFrame()
+    current = stripeImageData('A1')
+    frames.emitFrame()
+    expect(observed).toEqual(['A1'])
+  })
+})
+
 describe('createAvatarFrameRequester', () => {
   test('returns null when requestVideoFrameCallback is unavailable', () => {
     expect(createAvatarFrameRequester({} as HTMLVideoElement)).toBeNull()

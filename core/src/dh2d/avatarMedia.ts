@@ -27,6 +27,13 @@ export type AvatarPlaybackOptions = {
   sampleFrame: AvatarFrameSampler,
   /** Called with the previous turn when its playback boundary is confirmed. */
   onPlaybackEnded: (_: string) => void,
+  /**
+   * Called with every validated current-turn observation from stripe
+   * decoding — including repeats of the current turn. Invalid, missing, or
+   * CRC-failing frames are never reported, so they never read as idle or as
+   * a transition.
+   */
+  onTurnObserved?: (_: string) => void,
 }
 
 /**
@@ -55,9 +62,12 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       const image = options.sampleFrame()
       if (image != null) {
         const { tokens } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
-        const { endedTurnId } = tracker.observe(tokens)
+        const { endedTurnId, observedTurnId } = tracker.observe(tokens)
         if (endedTurnId !== undefined) {
           options.onPlaybackEnded(endedTurnId)
+        }
+        if (observedTurnId !== undefined) {
+          options.onTurnObserved?.(observedTurnId)
         }
       }
     } catch (error) {

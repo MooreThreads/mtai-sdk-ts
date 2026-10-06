@@ -349,6 +349,9 @@ async function connectOnce(
       onPlaybackEnded: turnId => {
         sendFrame(JSON.stringify(adapter.playbackEnded(turnId)))
       },
+      onTurnObserved: turnId => {
+        adapter.observeAvatarTurn(turnId)
+      },
     })
     avatarPlayback = playback
     playback.start()

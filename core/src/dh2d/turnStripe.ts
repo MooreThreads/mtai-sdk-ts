@@ -121,6 +121,15 @@ export type TurnTransition = {
    * boundary, or undefined when the frame confirms nothing.
    */
   endedTurnId: string | undefined,
+  /**
+   * The validated turn token this frame's observation confirms, or
+   * undefined when the frame carried no single valid token (missing,
+   * undecodable, CRC-failing, or conflicting). Reported on every validated
+   * observation — including repeats of the current turn — so playback
+   * consumers can track the avatar's current turn without inferring
+   * anything from invalid frames.
+   */
+  observedTurnId: string | undefined,
 }
 
 /**
@@ -143,20 +152,21 @@ export function createTurnTransitionTracker() {
     const valid = [...new Set(tokens)].filter(token => typeof token === 'string' && token.length === 2)
     if (valid.length !== 1) {
       // No token, or conflicting tokens: the frame is not evidence of a
-      // validated transition. Undecodable frames are never read as idle.
-      return { endedTurnId: undefined }
+      // validated transition or of the current turn. Undecodable frames are
+      // never read as idle.
+      return { endedTurnId: undefined, observedTurnId: undefined }
     }
     const token = valid[0]
     if (token === currentTurn) {
-      return { endedTurnId: undefined }
+      return { endedTurnId: undefined, observedTurnId: token }
     }
     const previous = currentTurn
     currentTurn = token
     if (previous === undefined || reported.has(previous)) {
-      return { endedTurnId: undefined }
+      return { endedTurnId: undefined, observedTurnId: token }
     }
     reported.add(previous)
-    return { endedTurnId: previous }
+    return { endedTurnId: previous, observedTurnId: token }
   }
 
   /**
@@ -168,10 +178,10 @@ export function createTurnTransitionTracker() {
     const previous = currentTurn
     currentTurn = undefined
     if (previous === undefined || reported.has(previous)) {
-      return { endedTurnId: undefined }
+      return { endedTurnId: undefined, observedTurnId: undefined }
     }
     reported.add(previous)
-    return { endedTurnId: previous }
+    return { endedTurnId: previous, observedTurnId: undefined }
   }
 
   /** The currently tracked turn, or undefined while none is tracked. */

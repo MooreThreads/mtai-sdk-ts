@@ -651,6 +651,127 @@ describe('connectVoiceClient', () => {
   })
 })
 
+describe('voice-client sleep with text sequencing', () => {
+  test('sends conversation.stop once after the accepted turn plays out', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws, connection } = await connectReady(createConfig(), video)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'sleep', text: '再见' })
+      const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
+      expect(input.text).toBe('再见')
+      ws.receive(JSON.stringify({
+        type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 'A1',
+      }))
+      globals.setSample('B0')
+      globals.emitFrame()
+      globals.setSample('A1')
+      globals.emitFrame()
+      globals.setSample('A1')
+      globals.emitFrame()
+      // Invalid stripes never count as a transition.
+      globals.setSample(null)
+      globals.emitFrame()
+      let stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([])
+      globals.setSample('B2')
+      globals.emitFrame()
+      stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([
+        { type: 'conversation.stop', session_id: 'voice-1' },
+      ])
+      globals.setSample('C3')
+      globals.emitFrame()
+      stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toHaveLength(1)
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('never sends conversation.stop while the accepted turn keeps playing', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws, connection } = await connectReady(createConfig(), video)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'sleep', text: '再见' })
+      const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
+      ws.receive(JSON.stringify({
+        type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 'A1',
+      }))
+      for (let i = 0; i < 3; i++) {
+        globals.setSample('A1')
+        globals.emitFrame()
+        globals.setSample(null)
+        globals.emitFrame()
+      }
+      const stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('a new input cancels the pending sleep with text', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws, connection } = await connectReady(createConfig(), video)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'sleep', text: '再见' })
+      const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
+      ws.receive(JSON.stringify({
+        type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 'A1',
+      }))
+      globals.setSample('A1')
+      globals.emitFrame()
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: '等一下' })
+      globals.setSample('B2')
+      globals.emitFrame()
+      const stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('a pending sleep with text never stops after disconnect', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws, connection, scope } = await connectReady(createConfig(), video)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'sleep', text: '再见' })
+      const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
+      ws.receive(JSON.stringify({
+        type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 'A1',
+      }))
+      globals.setSample('A1')
+      globals.emitFrame()
+      await disconnectVoiceClient(logger, connection, { video }, abortable())
+      scope.abort()
+      globals.setSample('B2')
+      globals.emitFrame()
+      const stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('wakeup with text through the connection sends start then input', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws, connection } = await connectReady(createConfig(), video)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'wakeup', text: '你好' })
+      const frames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type !== 'session.start')
+      expect(frames.map((f: any) => f.type)).toEqual(['conversation.start', 'text.input'])
+      expect(frames[1].text).toBe('你好')
+    } finally {
+      globals.restore()
+    }
+  })
+})
+
 describe('voice-client microphone input', () => {
   test('no microphone is opened when audio input is disabled', async () => {
     const globals = setupGlobals()

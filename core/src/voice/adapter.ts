@@ -71,6 +71,14 @@ function defaultRequestIdFactory() {
  * retired turn are dropped before they can reach the app or replace the
  * accepted capture turn. `reset()` fences a new connection generation so
  * fragments are never combined across reconnects.
+ *
+ * Pending-message sequencing is session-scoped and fenced by a monotonic
+ * generation: every new wakeup, input, or sleep action retires the previous
+ * sequence so its deferred frames can never send. `wakeup(text)` sends
+ * `conversation.start` then `text.input` immediately; `sleep(text)` sends
+ * `text.input` and defers `conversation.stop` until the avatar played the
+ * accepted turn (correlated through `text.accepted`) and then moved on to a
+ * different validated turn (reported through `observeAvatarTurn`).
  */
 export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const { sessionId } = options
@@ -343,6 +351,39 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     return { type: 'playback.ended', session_id: sessionId, turn_id: turnId }
   }
 
+  /**
+   * Reports a validated avatar turn observation (from the DH2D turn stripe)
+   * to the pending sleep-with-text sequence. The deferred `conversation.stop`
+   * fires only after the accepted turn itself has been observed in avatar
+   * playback and a later, different validated turn follows it; observations
+   * that arrive before the acknowledgement, and invalid or missing frames
+   * (which the playback bridge never reports), never count as the
+   * transition. No timeout or synthetic transition is ever fabricated.
+   */
+  function observeAvatarTurn(turnId: string) {
+    if (!turnId || pendingSleepStop === undefined) {
+      return
+    }
+    if (pendingSleepStop.generation !== pendingMessageGeneration) {
+      return
+    }
+    const acceptedTurnId = pendingSleepStop.acceptedTurnId
+    if (acceptedTurnId === undefined) {
+      return
+    }
+    if (!pendingSleepStop.observedAcceptedTurn) {
+      if (turnId === acceptedTurnId) {
+        pendingSleepStop.observedAcceptedTurn = true
+      }
+      return
+    }
+    if (turnId !== acceptedTurnId) {
+      const generation = pendingSleepStop.generation
+      pendingSleepStop = undefined
+      sendDeferred(generation, { type: 'conversation.stop', session_id: sessionId })
+    }
+  }
+
   function reset() {
     invalidatePendingSequence()
     conversationEnded = true
@@ -362,6 +403,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     asrSession,
     audioInput,
     playbackEnded,
+    observeAvatarTurn,
     reset,
   }
 }
