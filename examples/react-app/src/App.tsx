@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useReducer } from 'react'
 import type { DH2DSession, ComponentStatus, Avatar, Voice, DH2DPlaybackAudioStatus } from 'mtai'
 import { getShareCode, updateComponent, cancelUpdateComponent, setShareCode, setConfig, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
 import { DH2D } from './dh2d'
 import { createManualInputMessage, type ManualInputType } from './manualInput'
+import { createInitialBotTextDisplay, reduceBotTextDisplay } from './botTextWiring'
 import { advancePlaybackAnalysis, createInitialPlaybackAnalysis } from './playbackAnalysis'
 import './App.css'
 
@@ -421,7 +422,7 @@ const AvatarSelectionModal: React.FC<AvatarSelectionModalProps> = ({
 export default function App() {
   const sessionRef = useRef<DH2DSession | null>(null)
   const [status, setStatus] = useState("sleeping")
-  const [botText, setBotText] = useState("")
+  const [textDisplay, dispatchText] = useReducer(reduceBotTextDisplay, undefined, createInitialBotTextDisplay)
   const [asrText, setAsrText] = useState("")
   const [start, setStart] = useState(false)
   const [videoId, setVideoId] = useState("liruyun")
@@ -451,7 +452,7 @@ export default function App() {
   // is not part of this voice-client/DH2D demo.
   useEffect(() => undefined, []);
   useEffect(() => {
-    if (status != "talking") setBotText("")
+    if (status != "talking") dispatchText({ kind: "status_change", status })
     if (status != "listening") setAsrText("")
   }, [status])
   useEffect(() => {
@@ -552,7 +553,9 @@ export default function App() {
           left: 0,
         }}
         onAsrOutput={setAsrText}
-        onBotOutput={_ => setBotText(prev => prev + _)}
+        onBotOutput={text => dispatchText({ kind: "bot_output", text })}
+        onSubtitleOutput={text => dispatchText({ kind: "audio_text", text })}
+        onFinalAssistantText={content => dispatchText({ kind: "assistant_message_record", content })}
         onStatusChanged={setStatus}
         onAudioStatusChanged={setAudioStatus}
       />}
@@ -588,7 +591,8 @@ export default function App() {
         </div>
         <div style={{ lineHeight: "1.5" }}>
           <div><strong>Status:</strong> {status}</div>
-          <div><strong>Bot Text:</strong> {botText}</div>
+          <div><strong>Bot Text:</strong> {textDisplay.botText}</div>
+          <div><strong>Subtitle:</strong> {textDisplay.subtitleText}</div>
           <div><strong>ASR Text:</strong> {asrText}</div>
         </div>
         <div style={{ marginTop: "15px", textAlign: "left" }}>

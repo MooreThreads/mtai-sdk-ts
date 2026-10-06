@@ -21,6 +21,7 @@ import {
   type ChatMessage,
   type DH2DSession,
 } from 'mtai';
+import { dispatchBotTextMessage } from './botTextWiring';
 
 export const DH2D: FC<{
   /** Reference to access the DH2D session instance */
@@ -50,8 +51,17 @@ export const DH2D: FC<{
     /** Authentication token */
     bearerToken?: string
   },
-  /** Callback fired when the bot produces output */
+  /**
+   * Callback fired when the bot produces streamed output. Receives
+   * `bot_output` fragments; also receives `audio_text` when no
+   * `onSubtitleOutput` is provided (legacy direct-DH2D mode reports spoken
+   * bot text through `audio_text`).
+   */
   onBotOutput?: (output: string) => void;
+  /** Callback fired when the bot speaks a subtitle (`audio_text`) */
+  onSubtitleOutput?: (output: string) => void;
+  /** Callback fired when a finalized assistant message_record arrives, with the exact message content */
+  onFinalAssistantText?: (content: string) => void;
   /** Callback fired when ASR produces text from speech */
   onAsrOutput?: (output: string) => void;
   /** Callback fired when the conversation history changes */
@@ -74,6 +84,8 @@ export const DH2D: FC<{
   greetingMessage,
   openaiCompatibleLLM,
   onBotOutput,
+  onSubtitleOutput,
+  onFinalAssistantText,
   onAsrOutput,
   onHistoryChanged,
   onStatusChanged,
@@ -155,6 +167,10 @@ export const DH2D: FC<{
     });
 
     session.on('message', (message) => {
+      // Bot text wiring: streamed `bot_output` fragments, spoken
+      // `audio_text` subtitles, and finalized assistant `message_record`
+      // content are routed to dedicated callbacks (see botTextWiring.ts).
+      dispatchBotTextMessage(message, { onBotOutput, onSubtitleOutput, onFinalAssistantText });
       if (message.type === 'status_change') {
         upstreamStatus.value = message.status;
         status.value = message.status;
@@ -175,13 +191,6 @@ export const DH2D: FC<{
         if (message.sentence) {
           onAsrOutput?.(message.sentence);
         }
-      } else if (message.type === 'audio_text') {
-        // Spoken subtitle text (assistant/narrator); the legacy direct-DH2D
-        // mode also reports spoken bot text through this message.
-        onBotOutput?.(message.text);
-      } else if (message.type === 'bot_output') {
-        // Streamed LLM output, independent of TTS subtitle output.
-        onBotOutput?.(message.text);
       } else if (message.type === 'message_record') {
         appendHistory(message.message);
         if (message.message.role === 'user') {
