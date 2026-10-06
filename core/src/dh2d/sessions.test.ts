@@ -141,7 +141,7 @@ describe('createDH2DSession login gate', () => {
       const statuses: string[] = []
       const session = createDH2DSession({} as HTMLElement, {
         videoId: 'xiaomai',
-        voiceClient: { url: 'ws://client:8300', endpoint: 'http://dh2d-voice:32107' },
+        voiceClient: { interaction_endpoint: 'ws://client:8300', dh2d_endpoint: 'http://dh2d-voice:32107' },
       })
       session.on('statuschange', status => statuses.push(status))
       await waitUntil(() => statuses.includes('connected'), 'connected status without a login check')
@@ -164,7 +164,7 @@ describe('createDH2DSession login gate', () => {
       const statuses: string[] = []
       const session = createDH2DSession({} as HTMLElement, {
         videoId: 'xiaomai',
-        voiceClient: { url: 'ws://client:8300', endpoint: 'http://dh2d-voice:32107' },
+        voiceClient: { interaction_endpoint: 'ws://client:8300', dh2d_endpoint: 'http://dh2d-voice:32107' },
       })
       session.on('statuschange', status => statuses.push(status))
       await waitUntil(() => statuses.includes('connected'), 'first connected status')
@@ -254,7 +254,7 @@ describe('createDH2DSession voice-client mode', () => {
       const messages: any[] = []
       const session = createDH2DSession({} as HTMLElement, {
         videoId: 'xiaomai',
-        voiceClient: { url: 'ws://client:8300', endpoint: 'http://dh2d-voice:32107' },
+        voiceClient: { interaction_endpoint: 'ws://client:8300', dh2d_endpoint: 'http://dh2d-voice:32107' },
       })
       session.on('statuschange', status => statuses.push(status))
       session.on('message', message => messages.push(message))

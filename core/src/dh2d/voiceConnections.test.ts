@@ -182,8 +182,8 @@ function createConfig(overrides: Record<string, any> = {}) {
     pingInterval: 0,
     pingTimeout: 0,
     voiceClient: {
-      url: 'ws://client:8300',
-      endpoint: 'http://dh2d-voice:32107',
+      interaction_endpoint: 'ws://client:8300',
+      dh2d_endpoint: 'http://dh2d-voice:32107',
       sessionId: 'voice-1',
       ...voiceClient,
     },
@@ -294,7 +294,7 @@ describe('connectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { ws } = await connectReady(createConfig({ voiceClient: { url: 'ws://client:8300/voice', sessionId: 'voice-1' } }), video)
+      const { ws } = await connectReady(createConfig({ voiceClient: { interaction_endpoint: 'ws://client:8300/voice', sessionId: 'voice-1' } }), video)
       expect(ws.url).toBe('ws://client:8300/voice?mode=avatar&video_id=xiaomai')
     } finally {
       globals.restore()
@@ -424,13 +424,13 @@ describe('connectVoiceClient', () => {
     }
   })
 
-  test('exchanges the offer through the configured voiceClient endpoint, never the root endpoint', async () => {
+  test('exchanges the offer through the configured voiceClient dh2d_endpoint, never the root endpoint', async () => {
     const globals = setupGlobals()
     try {
       setConfig({ endpoint: 'http://legacy-root:32101' })
       const video = fakeVideo()
       const config = createConfig({
-        voiceClient: { url: 'ws://client:8300', endpoint: 'http://192.168.10.23:32107', sessionId: 'voice-1' },
+        voiceClient: { interaction_endpoint: 'ws://client:8300', dh2d_endpoint: 'http://192.168.10.23:32107', sessionId: 'voice-1' },
       })
       await connectReady(config, video)
       expect(fetchCalls.map(_ => _.url)).toEqual([
@@ -442,15 +442,15 @@ describe('connectVoiceClient', () => {
     }
   })
 
-  test('a url-only voiceClient config resolves the offer through the legacy root endpoint', async () => {
+  test('an interaction_endpoint-only voiceClient config resolves the offer through the legacy root endpoint', async () => {
     const globals = setupGlobals()
     try {
       setConfig({ endpoint: 'http://legacy-root:32101' })
       const video = fakeVideo()
       // Runtime compatibility: a partial config that predates the separate
-      // endpoint field carries only the websocket url.
+      // dh2d_endpoint field carries only the interaction websocket endpoint.
       const config = createConfig()
-      delete config.voiceClient.endpoint
+      delete config.voiceClient.dh2d_endpoint
       await connectReady(config, video)
       expect(fetchCalls.map(_ => _.url)).toEqual([
         'http://legacy-root:32101/api/v1/session/canonical-avatar/offer',

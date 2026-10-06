@@ -42,17 +42,19 @@ export type DH2DPlayerElements = {
  */
 export type DH2DVoiceClientConfig = {
   /**
-   * Base URL of the voice client websocket, for example `ws://localhost:8300`.
-   * A URL without a path uses the client's `/ws` endpoint.
+   * Base URL of the browser-to-local voice interaction websocket, for
+   * example `ws://localhost:8300`. A URL without a path uses the
+   * client's `/ws` endpoint.
    */
-  url: string,
+  interaction_endpoint: string,
   /**
    * HTTP endpoint of the DH2D server used for voice-client avatar
    * operations: avatar discovery and the direct WebRTC offer exchange,
    * for example `http://192.168.10.23:32107`. It is independent of the
-   * global legacy `Config.endpoint`.
+   * global legacy `Config.endpoint`; a partial runtime config that omits
+   * it falls back to that legacy endpoint.
    */
-  endpoint: string,
+  dh2d_endpoint: string,
   /**
    * Optional voice session identity; generated when omitted.
    */

@@ -133,7 +133,7 @@ async function connectOnce(
   innerAbortable.onabort(() => {
     running = false
   })
-  const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.url, config.videoId))
+  const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId))
   innerAbortable.onabort(() => {
     ws.close()
   })
@@ -257,9 +257,10 @@ async function connectOnce(
         pc.addTransceiver('video', { direction: 'recvonly' })
         pc.addTransceiver('audio', { direction: 'recvonly' })
         // The offer exchange is a voice-client avatar operation: it targets
-        // the configured voiceClient endpoint when set; a partial config
-        // that omits it falls back to the legacy root service endpoint.
-        const offerEndpoint = voiceConfig.endpoint || rootConfig().endpoint
+        // the configured `voiceClient.dh2d_endpoint` when set; a partial
+        // config that omits it falls back to the legacy root service
+        // endpoint.
+        const offerEndpoint = voiceConfig.dh2d_endpoint || rootConfig().endpoint
         const pcUrl = new URL(`${offerEndpoint}/api/v1/session/${canonicalSessionId}/offer`)
         pcUrl.protocol = pcUrl.protocol === 'https:' || pcUrl.protocol === 'wss:' ? 'https:' : 'http:'
         connectPc(pc, pcUrl.toString())
@@ -383,7 +384,7 @@ function connectionBase(
  * The voice client websocket carries the voice protocol (session handshake,
  * adapted messages, playback.ended). The canonical DH2D session id reported
  * by `dh_2d_session_ready` is used for the direct WebRTC offer exchange
- * through the configured `voiceClient.endpoint`; no DH2D command websocket
+ * through the configured `voiceClient.dh2d_endpoint`; no DH2D command websocket
  * is opened and no second avatar session is created.
  * The configured `connectTimeout` bounds each attempt so a stalled attempt
  * can never hang the connection loop.

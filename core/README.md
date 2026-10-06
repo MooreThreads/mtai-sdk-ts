@@ -29,10 +29,13 @@ You can monitor these states through the status_change event
 When the local voice client owns the digital-human session, configure
 `voiceClient` and keep the same session API. The SDK then talks to the voice
 client for voice protocol traffic and exchanges the WebRTC offer directly with
-DH2D using the canonical session id the client reports; `voiceClient.endpoint`
+DH2D using the canonical session id the client reports; `voiceClient.interaction_endpoint`
+is the browser-to-local voice interaction websocket, and `voiceClient.dh2d_endpoint`
 is the HTTP endpoint of the DH2D server used for that offer exchange and for
 avatar discovery, while the global `endpoint` stays the legacy service
-endpoint for all other requests. `wakeup`, `sleep`,
+endpoint for all other requests; a partial runtime config that omits
+`dh2d_endpoint` falls back to the global `endpoint` for those avatar
+operations. `wakeup`, `sleep`,
 and text input are translated to the client protocol, TTS subtitles are
 surfaced as `audio_text`, streamed LLM output as `bot_output`, and a
 `message_record` is derived from accumulated `bot_output` at `turn.end`.
@@ -58,7 +61,7 @@ direct-DH2D mode for verbatim bot speech.
 ```typescript
 const session = createDH2DSession(divElement, {
   videoId: 'YOUR_AVATAR_ID',
-  voiceClient: { url: 'ws://localhost:8300', endpoint: 'http://192.168.10.23:32107' },
+  voiceClient: { interaction_endpoint: 'ws://localhost:8300', dh2d_endpoint: 'http://192.168.10.23:32107' },
 })
 ```
 

@@ -105,10 +105,10 @@ describe('getAvatars', () => {
     }
   })
 
-  test('uses the configured voiceClient endpoint for discovery and posters', async () => {
+  test('uses the configured voiceClient dh2d_endpoint for discovery and posters', async () => {
     setConfig({
       endpoint: 'http://legacy.server:32101',
-      voiceClient: { url: 'https://127.0.0.1:8782', endpoint: 'http://192.168.10.23:32107' },
+      voiceClient: { interaction_endpoint: 'https://127.0.0.1:8782', dh2d_endpoint: 'http://192.168.10.23:32107' },
     })
     const fetchMock = patchFetch({ body: { xiaomai: { name: 'Xiao Mai' } } })
     try {
@@ -126,12 +126,12 @@ describe('getAvatars', () => {
     }
   })
 
-  test('falls back to the legacy endpoint when voiceClient has no endpoint', async () => {
-    // Runtime partial configs (untyped JavaScript) without voiceClient.endpoint
+  test('falls back to the legacy endpoint when voiceClient has no dh2d_endpoint', async () => {
+    // Runtime partial configs (untyped JavaScript) without voiceClient.dh2d_endpoint
     // keep the legacy avatar discovery target.
     setConfig({
       endpoint: 'http://legacy.server:32101',
-      voiceClient: { url: 'https://127.0.0.1:8782' } as any,
+      voiceClient: { interaction_endpoint: 'https://127.0.0.1:8782' } as any,
     })
     const fetchMock = patchFetch({ body: { solo: {} } })
     try {

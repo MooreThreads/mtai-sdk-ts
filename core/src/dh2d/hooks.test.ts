@@ -100,23 +100,23 @@ describe('dh2d defaultConfig voiceClient inheritance', () => {
   test('inherits voiceClient from the root config when the session config omits it', () => {
     setConfig({
       endpoint: 'http://server:32101',
-      voiceClient: { url: 'https://127.0.0.1:8782', endpoint: 'http://192.168.10.23:32107' },
+      voiceClient: { interaction_endpoint: 'https://127.0.0.1:8782', dh2d_endpoint: 'http://192.168.10.23:32107' },
     })
     const resolved = hooks.dh2d.defaultConfig()
     expect(resolved.voiceClient).toEqual(rootConfig().voiceClient)
-    expect(resolved.voiceClient?.url).toBe('https://127.0.0.1:8782')
-    expect(resolved.voiceClient?.endpoint).toBe('http://192.168.10.23:32107')
+    expect(resolved.voiceClient?.interaction_endpoint).toBe('https://127.0.0.1:8782')
+    expect(resolved.voiceClient?.dh2d_endpoint).toBe('http://192.168.10.23:32107')
   })
 
   test('an explicit session voiceClient overrides the root config', () => {
     setConfig({
       endpoint: 'http://server:32101',
-      voiceClient: { url: 'ws://global:8300', endpoint: 'http://global-dh2d:32107' },
+      voiceClient: { interaction_endpoint: 'ws://global:8300', dh2d_endpoint: 'http://global-dh2d:32107' },
     })
     const resolved = hooks.dh2d.defaultConfig({
-      voiceClient: { url: 'ws://session:8300', endpoint: 'http://session-dh2d:32107' },
+      voiceClient: { interaction_endpoint: 'ws://session:8300', dh2d_endpoint: 'http://session-dh2d:32107' },
     } as DH2DSessionConfig)
-    expect(resolved.voiceClient).toEqual({ url: 'ws://session:8300', endpoint: 'http://session-dh2d:32107' })
+    expect(resolved.voiceClient).toEqual({ interaction_endpoint: 'ws://session:8300', dh2d_endpoint: 'http://session-dh2d:32107' })
   })
 
   test('voiceClient stays unset when neither root nor session config provides it', () => {
@@ -132,7 +132,7 @@ describe('createDH2DSession voice-client mode through global config', () => {
   test('enters voice-client mode from the global config alone', async () => {
     setConfig({
       endpoint: 'http://server:32101',
-      voiceClient: { url: 'wss://127.0.0.1:8782', endpoint: 'http://dh2d.voice:32107' },
+      voiceClient: { interaction_endpoint: 'wss://127.0.0.1:8782', dh2d_endpoint: 'http://dh2d.voice:32107' },
     })
     const restoreFetch = patchFetchLoggedIn()
     const captured: ResolvedDH2DSessionConfig[] = []
@@ -144,7 +144,7 @@ describe('createDH2DSession voice-client mode through global config', () => {
       await waitUntil(() => statuses.includes('connected'), 'connected status')
       expect(patched.legacyConnectCalls).toHaveLength(0)
       expect(captured).toHaveLength(1)
-      expect(captured[0].voiceClient).toEqual({ url: 'wss://127.0.0.1:8782', endpoint: 'http://dh2d.voice:32107' })
+      expect(captured[0].voiceClient).toEqual({ interaction_endpoint: 'wss://127.0.0.1:8782', dh2d_endpoint: 'http://dh2d.voice:32107' })
       await session.close()
     } finally {
       patched.restore()
@@ -155,7 +155,7 @@ describe('createDH2DSession voice-client mode through global config', () => {
   test('an explicit per-session voiceClient overrides the global config', async () => {
     setConfig({
       endpoint: 'http://server:32101',
-      voiceClient: { url: 'wss://127.0.0.1:8782', endpoint: 'http://dh2d.voice:32107' },
+      voiceClient: { interaction_endpoint: 'wss://127.0.0.1:8782', dh2d_endpoint: 'http://dh2d.voice:32107' },
     })
     const restoreFetch = patchFetchLoggedIn()
     const captured: ResolvedDH2DSessionConfig[] = []
@@ -164,12 +164,12 @@ describe('createDH2DSession voice-client mode through global config', () => {
       const statuses: string[] = []
       const session = createDH2DSession({} as HTMLElement, {
         videoId: 'xiaomai',
-        voiceClient: { url: 'ws://192.168.10.9:8300', endpoint: 'http://192.168.10.9:32107', sessionId: 'session-voice' },
+        voiceClient: { interaction_endpoint: 'ws://192.168.10.9:8300', dh2d_endpoint: 'http://192.168.10.9:32107', sessionId: 'session-voice' },
       })
       session.on('statuschange', status => statuses.push(status))
       await waitUntil(() => statuses.includes('connected'), 'connected status')
       expect(captured).toHaveLength(1)
-      expect(captured[0].voiceClient).toEqual({ url: 'ws://192.168.10.9:8300', endpoint: 'http://192.168.10.9:32107', sessionId: 'session-voice' })
+      expect(captured[0].voiceClient).toEqual({ interaction_endpoint: 'ws://192.168.10.9:8300', dh2d_endpoint: 'http://192.168.10.9:32107', sessionId: 'session-voice' })
       await session.close()
     } finally {
       patched.restore()

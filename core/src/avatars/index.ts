@@ -18,7 +18,7 @@ function posterUrl(endpoint: string, id: string, poster: unknown): string {
  * by avatar id at `GET /api/v1/video_configs`. Each entry is normalized to
  * the SDK `Avatar` shape; poster URLs that are not already absolute are
  * replaced with the server's poster route for that avatar. When a
- * `voiceClient.endpoint` is configured, discovery and poster URLs target
+ * `voiceClient.dh2d_endpoint` is configured, discovery and poster URLs target
  * that endpoint; otherwise they use the legacy global `endpoint`.
  *
  * @returns A promise that resolves to an array of available Avatar objects
@@ -34,7 +34,7 @@ export async function getAvatars(): Promise<Avatar[]> {
     const { endpoint, voiceClient } = config()
     // Voice-client avatar discovery targets the configured voice-client DH2D
     // endpoint; without it the legacy service endpoint is used.
-    const avatarEndpoint = voiceClient?.endpoint || endpoint
+    const avatarEndpoint = voiceClient?.dh2d_endpoint || endpoint
     const response = await fetch(`${avatarEndpoint}/api/v1/video_configs`)
 
     if (!response.ok) {
