@@ -5,10 +5,12 @@ import { createAvatarFrameRequester, createAvatarFrameSampler } from "./avatarMe
 import { DH2DSessionConfig, DH2DPlayerElements, DH2DSession, ResolvedDH2DSessionConfig } from "./types";
 import { Abortable, Box } from "../types";
 import { box } from "../box";
+import { config as rootConfig } from "../config";
 
 function defaultConfig(config?: DH2DSessionConfig): ResolvedDH2DSessionConfig {
     return {
         ...config,
+        voiceClient: config?.voiceClient || rootConfig().voiceClient,
         rtcConfiguration: config?.rtcConfiguration || {},
         audioInput: config?.audioInput || false,
         sessionId: config?.sessionId || Math.random().toString(36).substring(2, 15),

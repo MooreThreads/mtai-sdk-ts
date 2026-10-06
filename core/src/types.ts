@@ -247,6 +247,12 @@ export type Config = {
    * @default 'http://localhost:32101'
    */
   endpoint: string
+  /**
+   * Optional voice client configuration shared by sessions that do not
+   * explicitly configure their own. When set, DH2D sessions default to
+   * voice-client mode; `https` URLs are upgraded to `wss` when connecting.
+   */
+  voiceClient?: import("./dh2d/types").DH2DVoiceClientConfig
 }
 
 export const DHConnectionEventTypes = ["message", "audio"] as const;
