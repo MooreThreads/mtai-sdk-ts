@@ -45,6 +45,19 @@ reported to the client as `playback.ended`.
 Input mapping in voice-client mode:
 
 - `input.text` maps to the client protocol's `text.input`.
+- `wakeup` with `text` sends `conversation.start` followed immediately by
+  `text.input` for that text (`conversation.start` is idempotent while a
+  conversation is already active, so a text-bearing wakeup is never held
+  behind a stop-then-start sequence). Without text, `wakeup` keeps its
+  existing behavior: start the conversation, or stop-then-start when a
+  conversation is currently active.
+- `sleep` with `text` sends only `text.input` and defers `conversation.stop`
+  until the avatar has finished playing that message out: the client's
+  `text.accepted` acknowledgement is correlated (by `request_id`) to the
+  accepted turn, the SDK waits until avatar playback observes that turn's
+  stripe and then any different validated turn, and only then sends exactly
+  one `conversation.stop`. Without text, `sleep` sends `conversation.stop`
+  immediately.
 - `input.bot_text` is rejected with an explicit error: the client protocol
   has no bot-authored text input (its `text.input` is strictly user text and
   its verbatim-speech path is client-internal), so bot text is never silently
@@ -74,6 +87,18 @@ lifecycle signal from the client. The signal's `session_id` and `turn_id`
 are validated against the tracked avatar turn, so a stop targeted at a
 retired or still-queued turn never retires the turn currently playing.
 
+Pending-message sequencing: at most one pending sequence exists per voice
+session. Any new `wakeup`, `input`, or `sleep` action — and any disconnect
+or reset — cancels the previous pending sequence, so a deferred
+`conversation.start` (stop-then-start wakeup) or the deferred
+`conversation.stop` of a text-bearing sleep can never fire after it was
+superseded. Acknowledgements for a retired request, and transitions for a
+turn the avatar never validated, never complete a sequence; no timeout,
+polling limit, or synthetic idle transition is ever fabricated, and
+`turn.end` is never treated as an avatar playback boundary. If the browser
+cannot report per-frame video callbacks, avatar transitions cannot be
+observed and a text-bearing sleep simply never sends its deferred stop.
+
 Microphone input: configure `audioInput: true` (default device) or pass a
 `MediaStream`. Captured audio is delivered to the voice client as an input
 `audio.chunk` control frame immediately followed by its binary payload:
@@ -93,8 +118,14 @@ const session = createDH2DSession(divElement, { audioInput: true, videoId: 'YOUR
 // wakeup the 2d digital human
 session.send({ type: 'wakeup' })
 
+// wakeup with a greeting text (voice-client mode sends conversation.start then text.input)
+session.send({ type: 'wakeup', text: '你好呀' })
+
 // tell the 2d digital human to sleep
 session.send({ type: 'sleep' })
+
+// sleep with a farewell text (voice-client mode defers conversation.stop until the avatar played it out)
+session.send({ type: 'sleep', text: '再见啦' })
 
 // set system-prompt
 session.config({ 
