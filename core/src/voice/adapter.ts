@@ -133,9 +133,12 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   }
 
   /**
-   * Retires the session-scoped pending-message sequence so its deferred
-   * sends can no longer fire. Called whenever a new wakeup, input, or sleep
-   * action begins, and on reset.
+   * Retires the session-scoped pending-message sequence explicitly.
+   * Callers that translate an SDK action into adapter calls must invalidate
+   * before their own validation (for example an input whose text turns out
+   * blank, or an input rejected for `bot_text`), so every SDK input action
+   * retires the previous sequence even when no frame follows. The adapter
+   * actions also invalidate internally, so an extra call is harmless.
    */
   function invalidatePendingSequence() {
     pendingMessageGeneration++
@@ -405,6 +408,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     playbackEnded,
     observeAvatarTurn,
     reset,
+    invalidatePendingSequence,
   }
 }
 

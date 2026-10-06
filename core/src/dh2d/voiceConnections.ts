@@ -66,8 +66,10 @@ export function voiceClientWebSocketUrl(base: string, videoId: string): string {
  *   while already active). `sleep` stops the conversation; with `text` the
  *   stop is deferred until the accepted turn's avatar playback finished (see
  *   the adapter's pending sleep sequencing).
- * - `input.text` maps to `text.input`. `input.bot_text` has no bot-authored
- *   equivalent on the frontend-to-client hop (the protocol's `text.input` is
+ * - `input.text` maps to `text.input`; every `input` action — including one
+ *   whose text is blank or that is rejected — retires the pending sequence
+ *   before anything else. `input.bot_text` has no bot-authored equivalent
+ *   on the frontend-to-client hop (the protocol's `text.input` is
  *   strictly user text and its announcement path is client-internal), so it
  *   is rejected with an explicit error instead of being silently dropped or
  *   misrouted as user text.
@@ -92,6 +94,11 @@ export async function sendVoiceClientMessage(
       frames = adapter.sleep(message.text)
       break
     case 'input': {
+      // Every SDK input action retires the pending sequence, even one whose
+      // text turns out blank or that is rejected for `bot_text`; the adapter
+      // actions invalidate internally too, so this happens before validation
+      // and the later call is a harmless no-op.
+      adapter.invalidatePendingSequence()
       const botText = typeof message.bot_text === 'string' ? message.bot_text.trim() : ''
       if (botText) {
         throw new Error(
