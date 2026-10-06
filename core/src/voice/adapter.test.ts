@@ -528,15 +528,24 @@ describe('sleep with text', () => {
     }))).toEqual([])
   })
 
-  test('text.accepted for another session or an unknown request emits no app-facing message', () => {
-    const adapter = createAdapter()
+  test('wrong-session and unknown-request acknowledgements emit no message and arm nothing', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
     const frame = (adapter.sleep('再见') as any[])[0]
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: 'other-session', request_id: frame.request_id, turn_id: 'A1',
     }))).toEqual([])
+    // Observing the candidate target and then a different valid token must
+    // never send the deferred stop for an acknowledgement that armed nothing.
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: 'unknown-request', turn_id: 'A1',
     }))).toEqual([])
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
   })
 })
 
