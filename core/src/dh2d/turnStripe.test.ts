@@ -211,14 +211,34 @@ describe('createTurnTransitionTracker', () => {
     expect(tracker.observe(['B2'])).toEqual({ endedTurnId: undefined, observedTurnId: 'B2' })
   })
 
-  test('a stale observation after an explicit media end is still rejected while another turn is current', () => {
+  test('a retired turn stays rejected after an explicit media end until reset', () => {
+    const tracker = createTurnTransitionTracker()
+    tracker.observe(['B0'])
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'B0', observedTurnId: 'A1' })
+    tracker.endCurrent()
+    // B0 and A1 are both retired; after the explicit media end cleared the
+    // current turn, re-observing either stays stale evidence for the rest
+    // of the connection/session generation: it must end and observe nothing
+    // and never re-open a turn.
+    expect(tracker.observe(['B0'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.currentTurn()).toBeUndefined()
+    // Only a tracker reset — a new connection/session generation — clears
+    // retirement, so B0 becomes observable again afterwards.
+    tracker.reset()
+    expect(tracker.observe(['B0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'B0' })
+  })
+
+  test('a retired turn stays rejected after an explicit media end even before a new turn is tracked', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
     tracker.endCurrent()
-    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A0' })
+    // A0 was retired by the explicit media end; re-observing it while no
+    // turn is tracked is still stale evidence and must never re-open it.
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
     expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
     // A0 was retired twice over (endCurrent, then the A1 transition); a late
-    // A0 frame while A1 is current must end nothing.
+    // A0 frame while A1 is current must still end nothing.
     expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
     expect(tracker.currentTurn()).toBe('A1')
   })
@@ -295,11 +315,14 @@ describe('endCurrent', () => {
     expect(tracker.endCurrent()).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
   })
 
-  test('frames after an explicit media end start a fresh generation', () => {
+  test('a new turn after an explicit media end opens the next sequence; the retired one stays rejected', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])
     tracker.endCurrent()
-    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A0' })
+    // Retirement lasts the whole generation: A0 stays rejected after the
+    // explicit media end; only a genuinely new token opens the next
+    // sequence, and its first observation emits no boundary.
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
     expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
     expect(tracker.observe(['B2'])).toEqual({ endedTurnId: 'A1', observedTurnId: 'B2' })
   })

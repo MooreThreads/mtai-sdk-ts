@@ -147,7 +147,10 @@ export type TurnTransition = {
  * signal: DH2D idle frames carry no decodable stripe, and frames with no
  * valid token (idle, corrupt, CRC-failing) or with conflicting tokens are
  * never treated as evidence — neither for a turn transition nor for the
- * idle boundary. Each turn is reported at most once per generation.
+ * idle boundary. Each turn is reported at most once per generation, and a
+ * retired turn stays rejected for the whole connection/session generation,
+ * even after an explicit media end cleared the current turn: only `reset`
+ * (a new generation) clears retirement.
  */
 export function createTurnTransitionTracker() {
   let currentTurn: string | undefined = undefined
@@ -165,12 +168,13 @@ export function createTurnTransitionTracker() {
     if (token === currentTurn) {
       return { endedTurnId: undefined, observedTurnId: token }
     }
-    if (currentTurn !== undefined && reported.has(token)) {
-      // The token's playback boundary was already confirmed, so this frame
-      // is a stale re-observation of a retired turn: it must never read as a
-      // transition away from the current turn nor replace it. While no turn
-      // is tracked (after an explicit media end) a re-observation may still
-      // open a fresh generation.
+    if (reported.has(token)) {
+      // The token's playback boundary was already confirmed in this
+      // generation, so this frame is a stale re-observation of a retired
+      // turn: it must never read as a transition away from the current
+      // turn, replace it, or re-open after an explicit media end cleared
+      // the current turn. Only `reset` — a new connection/session
+      // generation — clears retirement.
       return { endedTurnId: undefined, observedTurnId: undefined }
     }
     const previous = currentTurn

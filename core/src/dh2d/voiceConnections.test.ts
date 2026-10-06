@@ -723,6 +723,45 @@ describe('voice-client sleep with text sequencing', () => {
     }
   })
 
+  test('a stale retired turn after an explicit media end never completes the pending sleep stop', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws, connection } = await connectReady(createConfig(), video)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'sleep', text: '再见' })
+      const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
+      ws.receive(JSON.stringify({
+        type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 'A1',
+      }))
+      globals.setSample('B0')
+      globals.emitFrame()
+      globals.setSample('A1')
+      globals.emitFrame()
+      // The accepted turn A1 ends through the explicit lifecycle signal;
+      // B0 and A1 stay retired for the rest of this connection generation.
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A1' }))
+      // A stale retired B0 frame arriving after the media end must never be
+      // reported as a turn observation, so it must not complete the
+      // deferred sleep stop of A1.
+      globals.setSample('B0')
+      globals.emitFrame()
+      globals.setSample('B0')
+      globals.emitFrame()
+      let stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([])
+      // The pending sleep survives the stale frames and still completes
+      // only on a genuinely new validated turn.
+      globals.setSample('B2')
+      globals.emitFrame()
+      stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([
+        { type: 'conversation.stop', session_id: 'voice-1' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('never sends conversation.stop while the accepted turn keeps playing', async () => {
     const globals = setupGlobals()
     try {
