@@ -89,6 +89,18 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
    * before sending so an interrupted sequence can never emit a frame.
    */
   let pendingMessageGeneration = 0
+  /**
+   * The single session-scoped pending sleep-with-text sequence:
+   * `text.input` was sent and `conversation.stop` is deferred until the
+   * avatar has played the accepted turn and then moved on to a different
+   * validated turn (see `observeAvatarTurn`).
+   */
+  let pendingSleepStop: {
+    generation: number,
+    requestId: string,
+    acceptedTurnId: string | undefined,
+    observedAcceptedTurn: boolean,
+  } | undefined = undefined
   /** Accumulated bot_output fragments per `session_id + turn_id`. */
   const fragments = new Map<string, string[]>()
   /** Turns that already emitted their derived message_record. */
@@ -120,6 +132,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   function invalidatePendingSequence() {
     pendingMessageGeneration++
     pendingWakeupStart = false
+    pendingSleepStop = undefined
   }
 
   /** Sends a deferred frame only while its generation is still current. */
@@ -209,6 +222,25 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         }
         return [statusMessage('talking')]
       }
+      case 'text.accepted': {
+        if (event.session_id !== sessionId) return []
+        // Correlates the accepted turn for the pending sleep-with-text
+        // sequence. Internal only: no app-facing message is derived from
+        // `text.accepted`, and acknowledgements for another session, an
+        // unknown request id, or a retired generation never arm the
+        // sequence. A duplicate acknowledgement keeps the first turn.
+        if (
+          pendingSleepStop !== undefined
+          && pendingSleepStop.generation === pendingMessageGeneration
+          && pendingSleepStop.acceptedTurnId === undefined
+          && event.request_id === pendingSleepStop.requestId
+          && typeof event.turn_id === 'string'
+          && event.turn_id
+        ) {
+          pendingSleepStop.acceptedTurnId = event.turn_id
+        }
+        return []
+      }
       case 'conversation.state': {
         if (event.session_id !== sessionId) return []
         const ended = event.state === 'ended'
@@ -255,8 +287,22 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     return [{ type: 'conversation.stop', session_id: sessionId }]
   }
 
-  function sleep(): VoiceClientFrame[] {
+  function sleep(text?: string): VoiceClientFrame[] {
     invalidatePendingSequence()
+    const userText = messageText(text)
+    if (userText !== undefined) {
+      // Text-bearing sleep sends only the text; `conversation.stop` is
+      // deferred until the avatar played the accepted turn out (see
+      // `observeAvatarTurn`).
+      const requestId = newRequestId()
+      pendingSleepStop = {
+        generation: pendingMessageGeneration,
+        requestId,
+        acceptedTurnId: undefined,
+        observedAcceptedTurn: false,
+      }
+      return [{ type: 'text.input', session_id: sessionId, request_id: requestId, text: userText }]
+    }
     return [{ type: 'conversation.stop', session_id: sessionId }]
   }
 

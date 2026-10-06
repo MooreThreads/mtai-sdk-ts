@@ -792,6 +792,25 @@ describe('sendVoiceClientMessage', () => {
     ])
   })
 
+  test('sleep with text sends text.input only and defers the stop', async () => {
+    const { ws, adapter } = setup()
+    await sendVoiceClientMessage(ws as any, adapter, { type: 'sleep', text: '再见' })
+    const frames = ws.sent.map((d: string) => JSON.parse(d))
+    expect(frames).toHaveLength(1)
+    expect(frames[0].type).toBe('text.input')
+    expect(frames[0].session_id).toBe('voice-1')
+    expect(frames[0].text).toBe('再见')
+    expect(typeof frames[0].request_id).toBe('string')
+  })
+
+  test('sleep with blank text keeps the immediate conversation.stop', async () => {
+    const { ws, adapter } = setup()
+    await sendVoiceClientMessage(ws as any, adapter, { type: 'sleep', text: '  ' })
+    expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
+      { type: 'conversation.stop', session_id: 'voice-1' },
+    ])
+  })
+
   test('text input sends text.input with request_id', async () => {
     const { ws, adapter } = setup()
     await sendVoiceClientMessage(ws as any, adapter, { type: 'input', text: 'hello' })

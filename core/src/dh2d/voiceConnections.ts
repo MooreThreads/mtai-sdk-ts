@@ -89,7 +89,7 @@ export async function sendVoiceClientMessage(
       frames = adapter.wakeup(message.text)
       break
     case 'sleep':
-      frames = adapter.sleep()
+      frames = adapter.sleep(message.text)
       break
     case 'input': {
       const botText = typeof message.bot_text === 'string' ? message.bot_text.trim() : ''

@@ -491,6 +491,55 @@ describe('asr_session maps to the conversation lifecycle that owns listening', (
   })
 })
 
+describe('sleep with text', () => {
+  test('sleep with text sends only text.input and defers the stop', () => {
+    const adapter = createAdapter()
+    const frames = adapter.sleep('再见') as any[]
+    expect(frames).toHaveLength(1)
+    expect(frames[0].type).toBe('text.input')
+    expect(frames[0].session_id).toBe(sessionId)
+    expect(frames[0].text).toBe('再见')
+    expect(typeof frames[0].request_id).toBe('string')
+    expect(frames[0].request_id.length).toBeGreaterThan(0)
+  })
+
+  test('sleep with blank text keeps the immediate conversation.stop', () => {
+    const adapter = createAdapter()
+    expect(adapter.sleep('  ')).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+  })
+
+  test('sleep with text interrupts a pending wakeup start', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    adapter.wakeup()
+    adapter.sleep('再见')
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
+    expect(sent).toEqual([])
+  })
+
+  test('text.accepted for the sleep text emits no app-facing message', () => {
+    const adapter = createAdapter()
+    const frame = adapter.sleep('再见') as any
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
+    }))).toEqual([])
+  })
+
+  test('text.accepted for another session or an unknown request emits no app-facing message', () => {
+    const adapter = createAdapter()
+    const frame = adapter.sleep('再见') as any
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: 'other-session', request_id: frame.request_id, turn_id: 'A1',
+    }))).toEqual([])
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: 'unknown-request', turn_id: 'A1',
+    }))).toEqual([])
+  })
+})
+
 describe('pending message sequencing interruption', () => {
   function armPendingWakeupStart(adapter: ReturnType<typeof createAdapter>) {
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
