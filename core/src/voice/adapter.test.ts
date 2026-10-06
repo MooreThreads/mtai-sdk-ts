@@ -557,7 +557,7 @@ describe('pending message sequencing interruption', () => {
     expect(sent).toEqual([])
   })
 
-  test('a new asr_session start interrupts a pending wakeup start', () => {
+  test('a new asr_session start does not interrupt a pending wakeup start', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     armPendingWakeupStart(adapter)
@@ -565,7 +565,9 @@ describe('pending message sequencing interruption', () => {
       { type: 'conversation.start', session_id: sessionId },
     ])
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
-    expect(sent).toEqual([])
+    expect(sent).toEqual([
+      { type: 'conversation.start', session_id: sessionId },
+    ])
   })
 
   test('reset interrupts a pending wakeup start', () => {
@@ -700,6 +702,33 @@ describe('sleep with text waits for the avatar turn transition', () => {
     adapter.textInput('hold on')
     adapter.observeAvatarTurn('A1')
     adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('a new asr_session start does not interrupt the pending sleep sequence', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    expect(adapter.asrSession('start')).toEqual([
+      { type: 'conversation.start', session_id: sessionId },
+    ])
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sentStops(sent)).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+  })
+
+  test('an asr_session stop interrupts the pending sleep sequence like a sleep', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingSleep(adapter)
+    expect(adapter.asrSession('stop')).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    // The immediate stop was returned; no deferred stop may follow.
     expect(sent).toEqual([])
   })
 

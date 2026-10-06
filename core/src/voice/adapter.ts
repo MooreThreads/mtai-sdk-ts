@@ -325,13 +325,13 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   /**
    * Maps an SDK `asr_session` control to the client conversation lifecycle
    * that owns listening: `start` opens listening (`conversation.start`, the
-   * client ignores it while already listening) and `stop` ends listening
-   * (`conversation.stop`, also cancelling any wakeup start still queued
-   * behind a pending stop-then-start sequence).
+   * client ignores it while already listening) and never cancels pending
+   * sequencing; `stop` ends listening (`conversation.stop`) and, acting
+   * exactly like a text-less sleep, retires the pending sequence.
    */
   function asrSession(command: 'start' | 'stop'): VoiceClientFrame[] {
-    invalidatePendingSequence()
     if (command === 'stop') {
+      invalidatePendingSequence()
       return [{ type: 'conversation.stop', session_id: sessionId }]
     }
     return [{ type: 'conversation.start', session_id: sessionId }]
