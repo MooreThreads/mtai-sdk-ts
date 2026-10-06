@@ -6,7 +6,7 @@ import { connectPc } from "../pc"
 import { Abortable, DHOutputMessageType, Diff, Logger, DHConnectionEventTypes, DHConnectionEvents } from "../types"
 import { config as rootConfig } from "../config"
 import { calculateRms, createAudioActivityMessageBuilder, createAudioActivityReporter, createAudioActivityTracker } from "./audioActivity"
-import { DH2DSessionConfig } from "./types"
+import { ResolvedDH2DSessionConfig } from "./types"
 import { DH2DPlayerElements } from "./types"
 import { DH2DConnection } from "./types"
 import { DH2DPlaybackAudioStatus } from "./playback"
@@ -159,7 +159,7 @@ function startAudioActivityMonitoring(
     return cleanup
 }
 
-export async function connect(logger: Logger, elements: DH2DPlayerElements, config: Required<DH2DSessionConfig>, abortable: Abortable): Promise<DH2DConnection> {
+export async function connect(logger: Logger, elements: DH2DPlayerElements, config: ResolvedDH2DSessionConfig, abortable: Abortable): Promise<DH2DConnection> {
     const { endpoint } = rootConfig()
     const rootLogger = logger.push((_, ...args) => _('[connect]', ...args))
     let videoVisible = false
@@ -364,7 +364,7 @@ export async function untilFailed(
     logger: Logger,
     connection: DH2DConnection,
     elements: DH2DPlayerElements,
-    config: Required<DH2DSessionConfig>,
+    config: ResolvedDH2DSessionConfig,
     connectionSeq: number,
     onAudioStatus: (_: DH2DPlaybackAudioStatus) => void,
     abortable: Abortable,
@@ -395,6 +395,10 @@ export async function untilFailed(
             }
         })
         const audioPc = connection.audioPc
+        // The voice-client protocol carries no DH2D transport diagnostics;
+        // stats, ping, and audio-activity reports stay on the direct DH2D
+        // connection only.
+        const voiceClientMode = config.voiceClient != null
         if (audioPc) {
             audioPc.addEventListener("connectionstatechange", () => {
                 if (!running) return
@@ -404,7 +408,7 @@ export async function untilFailed(
                     resolve()
                 }
             })
-        } else {
+        } else if (!voiceClientMode) {
             let numFrames = 0
             const statTask = setInterval(async () => {
                 if (!running) return
@@ -426,7 +430,18 @@ export async function untilFailed(
             }, 200)
             dispose.push(() => clearInterval(statTask))
         }
-        dispose.push(startAudioActivityMonitoring(logger, connection, elements, connectionSeq, onAudioStatus))
+        if (!voiceClientMode) {
+            dispose.push(startAudioActivityMonitoring(logger, connection, elements, connectionSeq, onAudioStatus))
+        } else {
+            onAudioStatus({
+                state: 'unavailable',
+                rms: 0,
+                audioActive: false,
+                silentForMs: 0,
+                connectionSeq,
+                activitySeq: 0,
+            })
+        }
         const reconnectInterval = config.reconnectInterval
         if (reconnectInterval > 0) {
             let status = 'sleeping'
@@ -487,7 +502,7 @@ export async function untilFailed(
                 }
             })
         }
-        const pingInterval = config.pingInterval
+        const pingInterval = voiceClientMode ? 0 : config.pingInterval
         const pingTimeout = config.pingTimeout
         if (pingInterval > 0 && pingTimeout > 0) {
             const pong: Record<string, () => void> = {}

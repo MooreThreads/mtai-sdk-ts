@@ -170,7 +170,17 @@ export const DH2D: FC<{
         } else if (message.completed) {
           status.value = 'sleeping';
         }
+      } else if (message.type === 'asr_process') {
+        // Streamed ASR transcript for wakeup-driven conversations.
+        if (message.sentence) {
+          onAsrOutput?.(message.sentence);
+        }
       } else if (message.type === 'audio_text') {
+        // Spoken subtitle text (assistant/narrator); the legacy direct-DH2D
+        // mode also reports spoken bot text through this message.
+        onBotOutput?.(message.text);
+      } else if (message.type === 'bot_output') {
+        // Streamed LLM output, independent of TTS subtitle output.
         onBotOutput?.(message.text);
       } else if (message.type === 'message_record') {
         appendHistory(message.message);

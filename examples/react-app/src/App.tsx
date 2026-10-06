@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { DH2DSession, ComponentStatus, Avatar, Voice, DH2DPlaybackAudioStatus } from 'mtai'
-import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
+import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, setConfig, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
 import { DH2D } from './dh2d'
 import { createManualInputMessage, type ManualInputType } from './manualInput'
 import { advancePlaybackAnalysis, createInitialPlaybackAnalysis } from './playbackAnalysis'

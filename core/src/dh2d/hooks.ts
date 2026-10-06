@@ -1,10 +1,12 @@
 import { connect, disconnect, untilFailed } from "./connections";
 import { connectPc } from "../pc";
-import { DH2DSessionConfig, DH2DPlayerElements, DH2DSession } from "./types";
+import { connectVoiceClient, disconnectVoiceClient, VoiceClientConnection } from "./voiceConnections";
+import { createAvatarFrameRequester, createAvatarFrameSampler } from "./avatarMedia";
+import { DH2DSessionConfig, DH2DPlayerElements, DH2DSession, ResolvedDH2DSessionConfig } from "./types";
 import { Abortable, Box } from "../types";
 import { box } from "../box";
 
-function defaultConfig(config?: DH2DSessionConfig): Required<DH2DSessionConfig> {
+function defaultConfig(config?: DH2DSessionConfig): ResolvedDH2DSessionConfig {
     return {
         ...config,
         rtcConfiguration: config?.rtcConfiguration || {},
@@ -95,6 +97,10 @@ export const dh2dHooks = {
     disconnect,
     untilFailed,
     connectPc,
+    connectVoiceClient,
+    disconnectVoiceClient,
+    createAvatarFrameRequester,
+    createAvatarFrameSampler,
     beforeConnectingSession: untilSessionCountLessThanOrEqualTo(0),
     afterClosingSession,
 }

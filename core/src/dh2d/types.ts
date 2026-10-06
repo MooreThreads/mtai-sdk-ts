@@ -36,6 +36,23 @@ export type DH2DPlayerElements = {
   cover?: HTMLCanvasElement
 }
 /**
+ * Voice-client avatar mode: the SDK talks to the local voice client for
+ * voice protocol traffic and exchanges the WebRTC offer directly with DH2D
+ * using the canonical session id reported by `dh_2d_session_ready`.
+ */
+export type DH2DVoiceClientConfig = {
+  /**
+   * Base URL of the voice client websocket, for example `ws://localhost:8300`.
+   * A URL without a path uses the client's `/ws` endpoint.
+   */
+  url: string,
+  /**
+   * Optional voice session identity; generated when omitted.
+   */
+  sessionId?: string,
+}
+
+/**
  * Configuration options for a session.
  */
 export type DH2DSessionConfig = {
@@ -94,6 +111,18 @@ export type DH2DSessionConfig = {
    * @default 5 * 1000 (5 seconds)
    */
   pingTimeout?: number
+
+  /**
+   * Opt-in voice-client avatar mode. When set, the session connects to the
+   * voice client websocket with `mode=avatar&video_id` instead of opening a
+   * DH2D command websocket; the client owns the native DH2D session.
+   */
+  voiceClient?: DH2DVoiceClientConfig
+}
+
+/** A `DH2DSessionConfig` with all defaults applied; `voiceClient` stays optional. */
+export type ResolvedDH2DSessionConfig = Required<Omit<DH2DSessionConfig, 'voiceClient'>> & {
+  voiceClient?: DH2DVoiceClientConfig,
 }
 
 export type DH2DSessionEvents = DHConnectionEvents & {

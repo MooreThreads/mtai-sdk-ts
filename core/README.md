@@ -24,6 +24,25 @@ The digital human can be in one of several states:
 
 You can monitor these states through the status_change event
 
+## Voice-client avatar mode (opt-in)
+
+When the local voice client owns the digital-human session, configure
+`voiceClient` and keep the same session API. The SDK then talks to the voice
+client for voice protocol traffic and exchanges the WebRTC offer directly with
+DH2D using the canonical session id the client reports; `wakeup`, `sleep`,
+and text input are translated to the client protocol, TTS subtitles are
+surfaced as `audio_text`, streamed LLM output as `bot_output`, and a
+`message_record` is derived from accumulated `bot_output` at `turn.end`.
+Avatar playback boundaries are decoded from the DH2D video turn stripe and
+reported to the client as `playback.ended`.
+
+```typescript
+const session = createDH2DSession(divElement, {
+  videoId: 'YOUR_AVATAR_ID',
+  voiceClient: { url: 'ws://localhost:8300' },
+})
+```
+
 ## Integrate Digital Human
 
 ```typescript
