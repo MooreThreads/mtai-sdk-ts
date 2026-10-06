@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { DH2DSession, ComponentStatus, Avatar, Voice, DH2DPlaybackAudioStatus } from 'mtai'
-import { getShareCode, observeComponents, updateComponent, cancelUpdateComponent, setShareCode, setConfig, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
+import { getShareCode, updateComponent, cancelUpdateComponent, setShareCode, setConfig, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
 import { DH2D } from './dh2d'
 import { createManualInputMessage, type ManualInputType } from './manualInput'
 import { advancePlaybackAnalysis, createInitialPlaybackAnalysis } from './playbackAnalysis'
@@ -428,7 +428,7 @@ export default function App() {
   const [showShareModal, setShowShareModal] = useState(false)
   const [showComponentsModal, setShowComponentsModal] = useState(false)
   const [shareCode, setShareCodeState] = useState("")
-  const [components, setComponents] = useState<ComponentStatus[]>([])
+  const [components] = useState<ComponentStatus[]>([])
   const [showLlmModelsModal, setShowLlmModelsModal] = useState(false)
   const [showTtsVoicesModal, setShowTtsVoicesModal] = useState(false)
   const [showAvatarSelectionModal, setShowAvatarSelectionModal] = useState(false)
@@ -447,7 +447,9 @@ export default function App() {
   })
   const [playbackAnalysis, setPlaybackAnalysis] = useState(createInitialPlaybackAnalysis)
 
-  useEffect(() => observeComponents(setComponents), []);
+  // Component management belongs to the legacy localhost:32101 service and
+  // is not part of this voice-client/DH2D demo.
+  useEffect(() => undefined, []);
   useEffect(() => {
     if (status != "talking") setBotText("")
     if (status != "listening") setAsrText("")
@@ -476,13 +478,13 @@ export default function App() {
     const avatars = await getAvatars();
     console.log('Avatars:', avatars);
     setAvatars(avatars);
+    if (avatars.length > 0) setVideoId(current =>
+      avatars.some(avatar => avatar.id === current) ? current : avatars[0].id);
   };
 
   useEffect(() => {
     const fetchData = async () => {
       await Promise.all([
-        fetchLlmModels(),
-        fetchTtsVoices(),
         fetchAvatars()
       ]);
     };

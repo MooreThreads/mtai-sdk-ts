@@ -150,7 +150,10 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             send = notConnected
             return
         }
-        if (!await isLoggedIn()) {
+        // Voice-client mode authenticates and allocates the DH2D session
+        // through the local voice client. The legacy DH2D /logged_in gate is
+        // not part of that path and is absent from the voice-enabled server.
+        if (realConfig.voiceClient == null && !await isLoggedIn()) {
             rootLogger.error("unauthorized")
             emitStatus("failed")
             send = notConnected
@@ -208,7 +211,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                     send = notConnected
                     return
                 }
-                if (!await isLoggedIn()) {
+                if (realConfig.voiceClient == null && !await isLoggedIn()) {
                     rootLogger.error("unauthorized")
                     emitStatus("failed")
                     playback.markAudioStatusUnavailable(connectionSeq)
