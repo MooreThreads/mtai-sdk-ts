@@ -80,6 +80,15 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   let conversationEnded = true
   let captureTurnId: string | undefined = undefined
   let pendingWakeupStart = false
+  /** Generation captured when the pending wakeup start was armed. */
+  let pendingWakeupStartGeneration = 0
+  /**
+   * Monotonic generation of the session-scoped pending-message sequence.
+   * Every new wakeup, input, or sleep action — and every reset — retires the
+   * previous sequence; deferred sends capture the generation and recheck it
+   * before sending so an interrupted sequence can never emit a frame.
+   */
+  let pendingMessageGeneration = 0
   /** Accumulated bot_output fragments per `session_id + turn_id`. */
   const fragments = new Map<string, string[]>()
   /** Turns that already emitted their derived message_record. */
@@ -96,6 +105,29 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
 
   function statusMessage(status: (typeof DHStatus)[number]): DHOutputMessage {
     return { type: 'status_change', status }
+  }
+
+  /** Normalized user text: a non-blank string, or undefined. */
+  function messageText(text: unknown): string | undefined {
+    return typeof text === 'string' && text.trim() ? text : undefined
+  }
+
+  /**
+   * Retires the session-scoped pending-message sequence so its deferred
+   * sends can no longer fire. Called whenever a new wakeup, input, or sleep
+   * action begins, and on reset.
+   */
+  function invalidatePendingSequence() {
+    pendingMessageGeneration++
+    pendingWakeupStart = false
+  }
+
+  /** Sends a deferred frame only while its generation is still current. */
+  function sendDeferred(generation: number, frame: VoiceClientFrame) {
+    if (generation !== pendingMessageGeneration) {
+      return
+    }
+    onClientSend?.(frame)
   }
 
   function ingest(event: VoiceClientEvent): DHOutputMessage[] {
@@ -184,8 +216,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         if (ended) {
           captureTurnId = undefined
           if (pendingWakeupStart) {
+            const generation = pendingWakeupStartGeneration
             pendingWakeupStart = false
-            onClientSend?.({ type: 'conversation.start', session_id: sessionId })
+            sendDeferred(generation, { type: 'conversation.start', session_id: sessionId })
           }
           return [statusMessage('sleeping')]
         }
@@ -203,19 +236,22 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   }
 
   function wakeup(): VoiceClientFrame[] {
+    invalidatePendingSequence()
     if (conversationEnded && !pendingWakeupStart) {
       return [{ type: 'conversation.start', session_id: sessionId }]
     }
     pendingWakeupStart = true
+    pendingWakeupStartGeneration = pendingMessageGeneration
     return [{ type: 'conversation.stop', session_id: sessionId }]
   }
 
   function sleep(): VoiceClientFrame[] {
-    pendingWakeupStart = false
+    invalidatePendingSequence()
     return [{ type: 'conversation.stop', session_id: sessionId }]
   }
 
   function textInput(text: string): VoiceClientFrame {
+    invalidatePendingSequence()
     return { type: 'text.input', session_id: sessionId, request_id: newRequestId(), text }
   }
 
@@ -227,8 +263,8 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
    * behind a pending stop-then-start sequence).
    */
   function asrSession(command: 'start' | 'stop'): VoiceClientFrame[] {
+    invalidatePendingSequence()
     if (command === 'stop') {
-      pendingWakeupStart = false
       return [{ type: 'conversation.stop', session_id: sessionId }]
     }
     return [{ type: 'conversation.start', session_id: sessionId }]
@@ -252,9 +288,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   }
 
   function reset() {
+    invalidatePendingSequence()
     conversationEnded = true
     captureTurnId = undefined
-    pendingWakeupStart = false
     fragments.clear()
     finalizedTurns.clear()
   }

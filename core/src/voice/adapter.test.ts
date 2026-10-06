@@ -448,6 +448,44 @@ describe('asr_session maps to the conversation lifecycle that owns listening', (
   })
 })
 
+describe('pending message sequencing interruption', () => {
+  function armPendingWakeupStart(adapter: ReturnType<typeof createAdapter>) {
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    expect(adapter.wakeup()).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+  }
+
+  test('a new text input interrupts a pending wakeup start', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingWakeupStart(adapter)
+    adapter.textInput('new input')
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
+    expect(sent).toEqual([])
+  })
+
+  test('a new asr_session start interrupts a pending wakeup start', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingWakeupStart(adapter)
+    expect(adapter.asrSession('start')).toEqual([
+      { type: 'conversation.start', session_id: sessionId },
+    ])
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
+    expect(sent).toEqual([])
+  })
+
+  test('reset interrupts a pending wakeup start', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    armPendingWakeupStart(adapter)
+    adapter.reset()
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
+    expect(sent).toEqual([])
+  })
+})
+
 describe('other client events', () => {
   test('dh_2d_session_ready is surfaced and produces no app message', () => {
     const adapter = createAdapter()
