@@ -105,6 +105,46 @@ describe('getAvatars', () => {
     }
   })
 
+  test('uses the configured voiceClient endpoint for discovery and posters', async () => {
+    setConfig({
+      endpoint: 'http://legacy.server:32101',
+      voiceClient: { url: 'https://127.0.0.1:8782', endpoint: 'http://192.168.10.23:32107' },
+    })
+    const fetchMock = patchFetch({ body: { xiaomai: { name: 'Xiao Mai' } } })
+    try {
+      const avatars = await getAvatars()
+      expect(fetchMock.calls).toEqual(['http://192.168.10.23:32107/api/v1/video_configs'])
+      expect(avatars).toEqual([
+        {
+          id: 'xiaomai',
+          name: 'Xiao Mai',
+          poster: 'http://192.168.10.23:32107/api/v1/video_configs/xiaomai/poster',
+        },
+      ])
+    } finally {
+      fetchMock.restore()
+    }
+  })
+
+  test('falls back to the legacy endpoint when voiceClient has no endpoint', async () => {
+    // Runtime partial configs (untyped JavaScript) without voiceClient.endpoint
+    // keep the legacy avatar discovery target.
+    setConfig({
+      endpoint: 'http://legacy.server:32101',
+      voiceClient: { url: 'https://127.0.0.1:8782' } as any,
+    })
+    const fetchMock = patchFetch({ body: { solo: {} } })
+    try {
+      const avatars = await getAvatars()
+      expect(fetchMock.calls).toEqual(['http://legacy.server:32101/api/v1/video_configs'])
+      expect(avatars).toEqual([
+        { id: 'solo', poster: 'http://legacy.server:32101/api/v1/video_configs/solo/poster' },
+      ])
+    } finally {
+      fetchMock.restore()
+    }
+  })
+
   test('throws with status details on HTTP failure', async () => {
     const fetchMock = patchFetch({ ok: false, status: 503, statusText: 'Service Unavailable' })
     try {

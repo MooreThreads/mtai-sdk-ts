@@ -1,4 +1,5 @@
 import { abortable, withChild } from '../abortable'
+import { setConfig } from '../config'
 import { createLogger } from '../log'
 import { hooks } from '../hooks'
 import {
@@ -168,6 +169,7 @@ const logger = createLogger({
 })
 
 function createConfig(overrides: Record<string, any> = {}) {
+  const { voiceClient, ...rest } = overrides
   return {
     sessionId: 'unused',
     audioInput: false,
@@ -179,8 +181,13 @@ function createConfig(overrides: Record<string, any> = {}) {
     maxAudioVideoDurationDifference: 0,
     pingInterval: 0,
     pingTimeout: 0,
-    voiceClient: { url: 'ws://client:8300', sessionId: 'voice-1', ...overrides.voiceClient },
-    ...overrides,
+    voiceClient: {
+      url: 'ws://client:8300',
+      endpoint: 'http://dh2d-voice:32107',
+      sessionId: 'voice-1',
+      ...voiceClient,
+    },
+    ...rest,
   } as any
 }
 
@@ -407,12 +414,30 @@ describe('connectVoiceClient', () => {
         { kind: 'audio', direction: 'recvonly' },
       ])
       expect(fetchCalls).toEqual([{
-        url: 'http://localhost:32101/api/v1/session/canonical-avatar/offer',
+        url: 'http://dh2d-voice:32107/api/v1/session/canonical-avatar/offer',
         init: expect.objectContaining({ method: 'POST' }),
       }])
       expect(pc.remoteDescription).toEqual({ type: 'answer', sdp: 'answer-sdp' })
       expect(video.srcObject).toEqual({ id: 's' })
     } finally {
+      globals.restore()
+    }
+  })
+
+  test('exchanges the offer through the configured voiceClient endpoint, never the root endpoint', async () => {
+    const globals = setupGlobals()
+    try {
+      setConfig({ endpoint: 'http://legacy-root:32101' })
+      const video = fakeVideo()
+      const config = createConfig({
+        voiceClient: { url: 'ws://client:8300', endpoint: 'http://192.168.10.23:32107', sessionId: 'voice-1' },
+      })
+      await connectReady(config, video)
+      expect(fetchCalls.map(_ => _.url)).toEqual([
+        'http://192.168.10.23:32107/api/v1/session/canonical-avatar/offer',
+      ])
+    } finally {
+      setConfig({ endpoint: 'http://localhost:32101' })
       globals.restore()
     }
   })

@@ -251,6 +251,9 @@ export type Config = {
    * Optional voice client configuration shared by sessions that do not
    * explicitly configure their own. When set, DH2D sessions default to
    * voice-client mode; `https` URLs are upgraded to `wss` when connecting.
+   * `voiceClient.endpoint` routes the voice-client avatar HTTP operations
+   * (avatar discovery and the WebRTC offer exchange) while this top-level
+   * `endpoint` stays the legacy service endpoint for all other requests.
    */
   voiceClient?: import("./dh2d/types").DH2DVoiceClientConfig
 }

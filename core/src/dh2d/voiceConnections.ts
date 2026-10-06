@@ -2,7 +2,6 @@ import { withChild } from "../abortable"
 import { events } from "../events"
 import { hooks } from "../hooks"
 import { connectPc } from "../pc"
-import { config as rootConfig } from "../config"
 import { Abortable, DHConnectionEventTypes, DHConnectionEvents, DHInputMessage, Diff, Logger } from "../types"
 import { createVoiceMessageAdapter, VoiceClientFrame, VoiceMessageAdapter } from "../voice/adapter"
 import { createVoiceMicrophone } from "../voice/microphone"
@@ -126,7 +125,6 @@ async function connectOnce(
   config: ResolvedDH2DSessionConfig,
   innerAbortable: Abortable,
 ): Promise<VoiceClientConnection> {
-  const { endpoint } = rootConfig()
   const voiceConfig = config.voiceClient!
   const attemptLogger = logger.push((_, ...args) => _(`[attempt:${time}]`, ...args))
   attemptLogger.log('enter')
@@ -257,7 +255,10 @@ async function connectOnce(
         sessionLogger.log('avatar session ready, exchanging offer directly')
         pc.addTransceiver('video', { direction: 'recvonly' })
         pc.addTransceiver('audio', { direction: 'recvonly' })
-        const pcUrl = new URL(`${endpoint}/api/v1/session/${canonicalSessionId}/offer`)
+        // The offer exchange is a voice-client avatar operation: it targets
+        // the configured voiceClient endpoint, never the legacy root
+        // service endpoint.
+        const pcUrl = new URL(`${voiceConfig.endpoint}/api/v1/session/${canonicalSessionId}/offer`)
         pcUrl.protocol = pcUrl.protocol === 'https:' || pcUrl.protocol === 'wss:' ? 'https:' : 'http:'
         connectPc(pc, pcUrl.toString())
           .then(() => {
@@ -379,8 +380,9 @@ function connectionBase(
  *
  * The voice client websocket carries the voice protocol (session handshake,
  * adapted messages, playback.ended). The canonical DH2D session id reported
- * by `dh_2d_session_ready` is used for the direct WebRTC offer exchange; no
- * DH2D command websocket is opened and no second avatar session is created.
+ * by `dh_2d_session_ready` is used for the direct WebRTC offer exchange
+ * through the configured `voiceClient.endpoint`; no DH2D command websocket
+ * is opened and no second avatar session is created.
  * The configured `connectTimeout` bounds each attempt so a stalled attempt
  * can never hang the connection loop.
  */

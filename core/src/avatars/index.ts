@@ -17,7 +17,9 @@ function posterUrl(endpoint: string, id: string, poster: unknown): string {
  * The server exposes avatar (video) configurations as a single object keyed
  * by avatar id at `GET /api/v1/video_configs`. Each entry is normalized to
  * the SDK `Avatar` shape; poster URLs that are not already absolute are
- * replaced with the server's poster route for that avatar.
+ * replaced with the server's poster route for that avatar. When a
+ * `voiceClient.endpoint` is configured, discovery and poster URLs target
+ * that endpoint; otherwise they use the legacy global `endpoint`.
  *
  * @returns A promise that resolves to an array of available Avatar objects
  * @throws Error if the request fails or returns a non-200 status
@@ -29,8 +31,11 @@ function posterUrl(endpoint: string, id: string, poster: unknown): string {
  * ```
  */
 export async function getAvatars(): Promise<Avatar[]> {
-    const { endpoint } = config()
-    const response = await fetch(`${endpoint}/api/v1/video_configs`)
+    const { endpoint, voiceClient } = config()
+    // Voice-client avatar discovery targets the configured voice-client DH2D
+    // endpoint; without it the legacy service endpoint is used.
+    const avatarEndpoint = voiceClient?.endpoint || endpoint
+    const response = await fetch(`${avatarEndpoint}/api/v1/video_configs`)
 
     if (!response.ok) {
         throw new Error(`Failed to fetch avatars: ${response.status} ${response.statusText}`)
@@ -51,7 +56,7 @@ export async function getAvatars(): Promise<Avatar[]> {
         avatars.push({
             id,
             ...(name !== undefined ? { name } : {}),
-            poster: posterUrl(endpoint, id, record.poster),
+            poster: posterUrl(avatarEndpoint, id, record.poster),
         })
     }
     return avatars

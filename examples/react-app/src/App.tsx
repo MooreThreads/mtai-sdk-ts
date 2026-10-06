@@ -7,8 +7,8 @@ import { advancePlaybackAnalysis, createInitialPlaybackAnalysis } from './playba
 import './App.css'
 
 setConfig({
-  endpoint: 'http://192.168.10.23:32107',
-  voiceClient: { url: 'https://127.0.0.1:8782' },
+  endpoint: 'http://localhost:32101',
+  voiceClient: { url: 'https://127.0.0.1:8782', endpoint: 'http://192.168.10.23:32107' },
 })
 interface ModalProps {
   isOpen: boolean;

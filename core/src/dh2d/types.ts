@@ -47,6 +47,13 @@ export type DH2DVoiceClientConfig = {
    */
   url: string,
   /**
+   * HTTP endpoint of the DH2D server used for voice-client avatar
+   * operations: avatar discovery and the direct WebRTC offer exchange,
+   * for example `http://192.168.10.23:32107`. It is independent of the
+   * global legacy `Config.endpoint`.
+   */
+  endpoint: string,
+  /**
    * Optional voice session identity; generated when omitted.
    */
   sessionId?: string,
