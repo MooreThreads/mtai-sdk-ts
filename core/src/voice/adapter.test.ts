@@ -334,6 +334,49 @@ describe('SDK actions translate to client frames', () => {
     ])
   })
 
+  test('wakeup with text sends conversation.start then text.input, never a stop', () => {
+    const adapter = createAdapter()
+    const frames = adapter.wakeup('你好') as any[]
+    expect(frames).toHaveLength(2)
+    expect(frames[0]).toEqual({ type: 'conversation.start', session_id: sessionId })
+    expect(frames[1].type).toBe('text.input')
+    expect(frames[1].session_id).toBe(sessionId)
+    expect(frames[1].text).toBe('你好')
+    expect(typeof frames[1].request_id).toBe('string')
+    expect(frames[1].request_id.length).toBeGreaterThan(0)
+    expect(frames.some(frame => frame.type === 'conversation.stop')).toBe(false)
+  })
+
+  test('wakeup with text never stops even while the conversation is active', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    expect((adapter.wakeup('你好') as any[]).map(frame => frame.type)).toEqual([
+      'conversation.start', 'text.input',
+    ])
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
+    expect(sent).toEqual([])
+  })
+
+  test('wakeup with blank text keeps the no-text wakeup behavior', () => {
+    const adapter = createAdapter()
+    expect(adapter.wakeup('   ')).toEqual([
+      { type: 'conversation.start', session_id: sessionId },
+    ])
+  })
+
+  test('wakeup with text interrupts a pending wakeup start', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    adapter.wakeup()
+    expect((adapter.wakeup('你好') as any[]).map(frame => frame.type)).toEqual([
+      'conversation.start', 'text.input',
+    ])
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
+    expect(sent).toEqual([])
+  })
+
   test('a second wakeup while a stop-then-start is pending does not double start', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))

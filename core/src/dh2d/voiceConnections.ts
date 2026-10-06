@@ -61,7 +61,11 @@ export function voiceClientWebSocketUrl(base: string, videoId: string): string {
  * given open websocket.
  *
  * - `wakeup` performs the stop-then-start sequence through the adapter when a
- *   conversation is active; `sleep` stops the conversation.
+ *   conversation is active; with `text` it instead sends `conversation.start`
+   * followed immediately by `text.input` (`conversation.start` is idempotent
+ *   while already active). `sleep` stops the conversation; with `text` the
+ *   stop is deferred until the accepted turn's avatar playback finished (see
+ *   the adapter's pending sleep sequencing).
  * - `input.text` maps to `text.input`. `input.bot_text` has no bot-authored
  *   equivalent on the frontend-to-client hop (the protocol's `text.input` is
  *   strictly user text and its announcement path is client-internal), so it
@@ -82,7 +86,7 @@ export async function sendVoiceClientMessage(
   let frames: VoiceClientFrame[] = []
   switch (message.type) {
     case 'wakeup':
-      frames = adapter.wakeup()
+      frames = adapter.wakeup(message.text)
       break
     case 'sleep':
       frames = adapter.sleep()

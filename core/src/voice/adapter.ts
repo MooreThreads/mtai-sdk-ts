@@ -235,8 +235,18 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     return { type: 'session.start', session_id: sessionId, protocol_version: PROTOCOL_VERSION }
   }
 
-  function wakeup(): VoiceClientFrame[] {
+  function wakeup(text?: string): VoiceClientFrame[] {
     invalidatePendingSequence()
+    const userText = messageText(text)
+    if (userText !== undefined) {
+      // Text-bearing wakeup always opens the conversation immediately:
+      // `conversation.start` is idempotent while a conversation is already
+      // active, so the text is never held behind a stop-then-start sequence.
+      return [
+        { type: 'conversation.start', session_id: sessionId },
+        { type: 'text.input', session_id: sessionId, request_id: newRequestId(), text: userText },
+      ]
+    }
     if (conversationEnded && !pendingWakeupStart) {
       return [{ type: 'conversation.start', session_id: sessionId }]
     }

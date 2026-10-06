@@ -753,6 +753,37 @@ describe('sendVoiceClientMessage', () => {
     ])
   })
 
+  test('wakeup with text sends conversation.start then text.input', async () => {
+    const { ws, adapter } = setup()
+    await sendVoiceClientMessage(ws as any, adapter, { type: 'wakeup', text: '你好' })
+    const frames = ws.sent.map((d: string) => JSON.parse(d))
+    expect(frames).toHaveLength(2)
+    expect(frames[0]).toEqual({ type: 'conversation.start', session_id: 'voice-1' })
+    expect(frames[1].type).toBe('text.input')
+    expect(frames[1].session_id).toBe('voice-1')
+    expect(frames[1].text).toBe('你好')
+    expect(typeof frames[1].request_id).toBe('string')
+    expect(frames[1].request_id.length).toBeGreaterThan(0)
+  })
+
+  test('wakeup with text sends both frames even while the conversation is active', async () => {
+    const { ws, adapter } = setup()
+    adapter.ingest({ type: 'conversation.state', session_id: 'voice-1', state: 'voice' })
+    await sendVoiceClientMessage(ws as any, adapter, { type: 'wakeup', text: '你好' })
+    expect(ws.sent.map((d: string) => JSON.parse(d)).map((f: any) => f.type)).toEqual([
+      'conversation.start', 'text.input',
+    ])
+  })
+
+  test('wakeup with blank text keeps the no-text wakeup behavior', async () => {
+    const { ws, adapter } = setup()
+    adapter.ingest({ type: 'conversation.state', session_id: 'voice-1', state: 'voice' })
+    await sendVoiceClientMessage(ws as any, adapter, { type: 'wakeup', text: '   ' })
+    expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
+      { type: 'conversation.stop', session_id: 'voice-1' },
+    ])
+  })
+
   test('sleep sends conversation.stop', async () => {
     const { ws, adapter } = setup()
     await sendVoiceClientMessage(ws as any, adapter, { type: 'sleep' })
