@@ -230,6 +230,29 @@ describe('createTurnTransitionTracker', () => {
     expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'A0', observedTurnId: 'A1' })
   })
 
+  test('CRC-valid non-alphanumeric tokens never count as observations', () => {
+    const tracker = createTurnTransitionTracker()
+    // Two characters, CRC-decodable, but not ASCII alphanumeric: such
+    // payloads must never be evidence of a turn, a transition, or idle.
+    expect(tracker.observe(['!?'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.observe(['\x00\x01'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.observe(['A\x7f'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.currentTurn()).toBeUndefined()
+    // A non-alphanumeric repetition next to a valid one is filtered out
+    // like a corrupted repetition, leaving the valid token observable.
+    expect(tracker.observe(['A1', '!?'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
+  })
+
+  test('a turn token is exactly two ASCII alphanumeric characters', () => {
+    const tracker = createTurnTransitionTracker()
+    expect(tracker.observe(['A'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.observe(['A1B'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.observe([''])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    // Lowercase letters and digits are alphanumeric.
+    expect(tracker.observe(['a1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'a1' })
+    expect(tracker.observe(['Z9'])).toEqual({ endedTurnId: 'a1', observedTurnId: 'Z9' })
+  })
+
   test('transitions chain across turns', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])

@@ -29,9 +29,9 @@ export type AvatarPlaybackOptions = {
   onPlaybackEnded: (_: string) => void,
   /**
    * Called with every validated current-turn observation from stripe
-   * decoding — including repeats of the current turn. Invalid, missing, or
-   * CRC-failing frames are never reported, so they never read as idle or as
-   * a transition.
+   * decoding — including repeats of the current turn. Invalid, missing,
+   * CRC-failing, or non-alphanumeric frames are never reported, so they
+   * never read as idle or as a transition.
    */
   onTurnObserved?: (_: string) => void,
 }

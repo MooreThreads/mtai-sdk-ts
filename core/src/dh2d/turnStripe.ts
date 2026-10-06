@@ -25,6 +25,9 @@ export const TURN_STRIPE_HEIGHT = 8
 /** Luminance threshold separating black (0) from white (1) cells. */
 export const TURN_STRIPE_THRESHOLD = 128
 
+/** A valid turn token: exactly two ASCII alphanumeric characters. */
+const TURN_TOKEN_PATTERN = /^[0-9A-Za-z]{2}$/
+
 /** CRC-16/CCITT-FALSE: polynomial 0x1021, initial value 0xffff, no reflection. */
 export function crc16(payload: Uint8Array): number {
   let crc = 0xffff
@@ -137,19 +140,21 @@ export type TurnTransition = {
  *
  * A validated transition from turn A to a different valid turn B confirms
  * that A's avatar playback finished; the previous turn is reported, never
- * the newly observed one. The A→idle boundary is reported only through the
- * explicit `endCurrent` signal: DH2D idle frames carry no decodable stripe,
- * and frames with no valid token (idle, corrupt, CRC-failing) or with
- * conflicting tokens are never treated as evidence — neither for a turn
- * transition nor for the idle boundary. Each turn is reported at most once
- * per generation.
+ * the newly observed one. A turn token counts as valid only when it is
+ * exactly two ASCII alphanumeric characters: a CRC-valid but
+ * non-alphanumeric payload is not a turn and must never be evidence. The
+ * A→idle boundary is reported only through the explicit `endCurrent`
+ * signal: DH2D idle frames carry no decodable stripe, and frames with no
+ * valid token (idle, corrupt, CRC-failing) or with conflicting tokens are
+ * never treated as evidence — neither for a turn transition nor for the
+ * idle boundary. Each turn is reported at most once per generation.
  */
 export function createTurnTransitionTracker() {
   let currentTurn: string | undefined = undefined
   const reported = new Set<string>()
 
   function observe(tokens: string[]): TurnTransition {
-    const valid = [...new Set(tokens)].filter(token => typeof token === 'string' && token.length === 2)
+    const valid = [...new Set(tokens)].filter(token => typeof token === 'string' && TURN_TOKEN_PATTERN.test(token))
     if (valid.length !== 1) {
       // No token, or conflicting tokens: the frame is not evidence of a
       // validated transition or of the current turn. Undecodable frames are
