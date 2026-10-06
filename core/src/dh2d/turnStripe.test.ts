@@ -188,6 +188,41 @@ describe('createTurnTransitionTracker', () => {
     expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
   })
 
+  test('a stale observation of a retired turn never reads as a transition', () => {
+    const tracker = createTurnTransitionTracker()
+    tracker.observe(['B0'])
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: 'B0', observedTurnId: 'A1' })
+    // B0's playback boundary was already confirmed; its late re-observation
+    // is stale evidence: it must end nothing, observe nothing, and never
+    // replace the current turn.
+    expect(tracker.observe(['B0'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.currentTurn()).toBe('A1')
+  })
+
+  test('after a stale observation the current turn stays observable and transitions still fire', () => {
+    const tracker = createTurnTransitionTracker()
+    tracker.observe(['B0'])
+    tracker.observe(['A1'])
+    tracker.observe(['B0'])
+    // Same current-token observations remain usable (they arm pending sleep).
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
+    // A genuinely new turn still completes the transition exactly once.
+    expect(tracker.observe(['B2'])).toEqual({ endedTurnId: 'A1', observedTurnId: 'B2' })
+    expect(tracker.observe(['B2'])).toEqual({ endedTurnId: undefined, observedTurnId: 'B2' })
+  })
+
+  test('a stale observation after an explicit media end is still rejected while another turn is current', () => {
+    const tracker = createTurnTransitionTracker()
+    tracker.observe(['A0'])
+    tracker.endCurrent()
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A0' })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined, observedTurnId: 'A1' })
+    // A0 was retired twice over (endCurrent, then the A1 transition); a late
+    // A0 frame while A1 is current must end nothing.
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined, observedTurnId: undefined })
+    expect(tracker.currentTurn()).toBe('A1')
+  })
+
   test('a frame with conflicting tokens is ignored', () => {
     const tracker = createTurnTransitionTracker()
     tracker.observe(['A0'])

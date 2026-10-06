@@ -160,6 +160,14 @@ export function createTurnTransitionTracker() {
     if (token === currentTurn) {
       return { endedTurnId: undefined, observedTurnId: token }
     }
+    if (currentTurn !== undefined && reported.has(token)) {
+      // The token's playback boundary was already confirmed, so this frame
+      // is a stale re-observation of a retired turn: it must never read as a
+      // transition away from the current turn nor replace it. While no turn
+      // is tracked (after an explicit media end) a re-observation may still
+      // open a fresh generation.
+      return { endedTurnId: undefined, observedTurnId: undefined }
+    }
     const previous = currentTurn
     currentTurn = token
     if (previous === undefined || reported.has(previous)) {

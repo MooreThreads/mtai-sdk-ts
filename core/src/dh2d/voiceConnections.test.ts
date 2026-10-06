@@ -689,6 +689,40 @@ describe('voice-client sleep with text sequencing', () => {
     }
   })
 
+  test('a stale turn observation never completes the pending sleep stop', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws, connection } = await connectReady(createConfig(), video)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'sleep', text: '再见' })
+      const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
+      ws.receive(JSON.stringify({
+        type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 'A1',
+      }))
+      globals.setSample('B0')
+      globals.emitFrame()
+      globals.setSample('A1')
+      globals.emitFrame()
+      // B0's boundary was already confirmed by the A1 transition; the late
+      // stale B0 frame must never read as a transition away from A1.
+      globals.setSample('B0')
+      globals.emitFrame()
+      globals.setSample('A1')
+      globals.emitFrame()
+      let stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([])
+      // Only a genuinely new turn completes the sleep.
+      globals.setSample('B2')
+      globals.emitFrame()
+      stops = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'conversation.stop')
+      expect(stops).toEqual([
+        { type: 'conversation.stop', session_id: 'voice-1' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('never sends conversation.stop while the accepted turn keeps playing', async () => {
     const globals = setupGlobals()
     try {
