@@ -442,6 +442,25 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('a url-only voiceClient config resolves the offer through the legacy root endpoint', async () => {
+    const globals = setupGlobals()
+    try {
+      setConfig({ endpoint: 'http://legacy-root:32101' })
+      const video = fakeVideo()
+      // Runtime compatibility: a partial config that predates the separate
+      // endpoint field carries only the websocket url.
+      const config = createConfig()
+      delete config.voiceClient.endpoint
+      await connectReady(config, video)
+      expect(fetchCalls.map(_ => _.url)).toEqual([
+        'http://legacy-root:32101/api/v1/session/canonical-avatar/offer',
+      ])
+    } finally {
+      setConfig({ endpoint: 'http://localhost:32101' })
+      globals.restore()
+    }
+  })
+
   test('adapts client events to app messages and binary frames to audio events', async () => {
     const globals = setupGlobals()
     try {

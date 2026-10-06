@@ -1,4 +1,5 @@
 import { withChild } from "../abortable"
+import { config as rootConfig } from "../config"
 import { events } from "../events"
 import { hooks } from "../hooks"
 import { connectPc } from "../pc"
@@ -256,9 +257,10 @@ async function connectOnce(
         pc.addTransceiver('video', { direction: 'recvonly' })
         pc.addTransceiver('audio', { direction: 'recvonly' })
         // The offer exchange is a voice-client avatar operation: it targets
-        // the configured voiceClient endpoint, never the legacy root
-        // service endpoint.
-        const pcUrl = new URL(`${voiceConfig.endpoint}/api/v1/session/${canonicalSessionId}/offer`)
+        // the configured voiceClient endpoint when set; a partial config
+        // that omits it falls back to the legacy root service endpoint.
+        const offerEndpoint = voiceConfig.endpoint || rootConfig().endpoint
+        const pcUrl = new URL(`${offerEndpoint}/api/v1/session/${canonicalSessionId}/offer`)
         pcUrl.protocol = pcUrl.protocol === 'https:' || pcUrl.protocol === 'wss:' ? 'https:' : 'http:'
         connectPc(pc, pcUrl.toString())
           .then(() => {
