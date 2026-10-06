@@ -66,10 +66,11 @@ function defaultRequestIdFactory() {
  * fragments keyed by `session_id + turn_id`, the current conversation state,
  * the accepted capture turn, and any pending wakeup stop-then-start sequence.
  * Turns are fenced at `turn.end`: duplicate terminal events never produce
- * duplicate records, and late `assistant.text` fragments or `audio.chunk`
- * subtitles from a retired turn are dropped before they can reach the app.
- * `reset()` fences a new connection generation so fragments are never
- * combined across reconnects.
+ * duplicate records, and late `assistant.text` fragments, `audio.chunk`
+ * subtitles, ASR events, or `capture.start`/`capture.stop` controls from a
+ * retired turn are dropped before they can reach the app or replace the
+ * accepted capture turn. `reset()` fences a new connection generation so
+ * fragments are never combined across reconnects.
  */
 export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const { sessionId } = options
@@ -86,6 +87,13 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
 
   const turnKey = (turnId: unknown) => `${sessionId}\u0000${turnId}`
 
+  /** True when the event names a turn that already saw `turn.end`. */
+  const isRetiredTurn = (event: VoiceClientEvent) => (
+    typeof event.turn_id === 'string'
+    && !!event.turn_id
+    && finalizedTurns.has(turnKey(event.turn_id))
+  )
+
   function statusMessage(status: (typeof DHStatus)[number]): DHOutputMessage {
     return { type: 'status_change', status }
   }
@@ -98,6 +106,10 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       case 'asr.partial':
       case 'asr.final': {
         if (event.session_id !== sessionId) return []
+        if (isRetiredTurn(event)) {
+          // The turn is retired; late ASR must never reach the app.
+          return []
+        }
         const text = typeof event.text === 'string' ? event.text : ''
         return [{ type: 'asr_process', sentence: text, completed: event.type === 'asr.final' }]
       }
@@ -140,6 +152,11 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       }
       case 'capture.start': {
         if (event.session_id !== sessionId) return []
+        if (isRetiredTurn(event)) {
+          // The turn is retired; a late capture.start must neither replace
+          // the accepted capture turn nor emit a listening status.
+          return []
+        }
         if (typeof event.turn_id === 'string' && event.turn_id) {
           captureTurnId = event.turn_id
         }
@@ -149,6 +166,11 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         if (event.session_id !== sessionId) return []
         if (captureTurnId === event.turn_id) {
           captureTurnId = undefined
+        }
+        if (isRetiredTurn(event)) {
+          // The turn is retired; release the matching capture turn above but
+          // never emit a talking status for it.
+          return []
         }
         if (conversationEnded) {
           return []
@@ -197,6 +219,21 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     return { type: 'text.input', session_id: sessionId, request_id: newRequestId(), text }
   }
 
+  /**
+   * Maps an SDK `asr_session` control to the client conversation lifecycle
+   * that owns listening: `start` opens listening (`conversation.start`, the
+   * client ignores it while already listening) and `stop` ends listening
+   * (`conversation.stop`, also cancelling any wakeup start still queued
+   * behind a pending stop-then-start sequence).
+   */
+  function asrSession(command: 'start' | 'stop'): VoiceClientFrame[] {
+    if (command === 'stop') {
+      pendingWakeupStart = false
+      return [{ type: 'conversation.stop', session_id: sessionId }]
+    }
+    return [{ type: 'conversation.start', session_id: sessionId }]
+  }
+
   function audioInput(bytes: Uint8Array): VoiceAudioInput | null {
     if (!captureTurnId) {
       return null
@@ -230,6 +267,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     wakeup,
     sleep,
     textInput,
+    asrSession,
     audioInput,
     playbackEnded,
     reset,

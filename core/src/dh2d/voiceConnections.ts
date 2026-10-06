@@ -58,9 +58,21 @@ export function voiceClientWebSocketUrl(base: string, videoId: string): string {
 
 /**
  * Translates an SDK input message into voice client protocol frames on the
- * given open websocket. `config`, `ping`, and `asr_session` have no
- * client-protocol equivalent and are ignored; `wakeup` performs the
- * stop-then-start sequence through the adapter when a conversation is active.
+ * given open websocket.
+ *
+ * - `wakeup` performs the stop-then-start sequence through the adapter when a
+ *   conversation is active; `sleep` stops the conversation.
+ * - `input.text` maps to `text.input`. `input.bot_text` has no bot-authored
+ *   equivalent on the frontend-to-client hop (the protocol's `text.input` is
+ *   strictly user text and its announcement path is client-internal), so it
+ *   is rejected with an explicit error instead of being silently dropped or
+ *   misrouted as user text.
+ * - `asr_session` retains its documented listening-control semantics through
+ *   the conversation lifecycle that owns listening in the client protocol:
+ *   `start` opens listening, `stop` ends it. `should_respond: false` has no
+ *   client-protocol equivalent (ASR finals in an active conversation always
+ *   generate a response) and is rejected with an explicit error.
+ * - `config` and `ping` have no client-protocol equivalent and are ignored.
  */
 export async function sendVoiceClientMessage(
   ws: WebSocket,
@@ -75,11 +87,32 @@ export async function sendVoiceClientMessage(
     case 'sleep':
       frames = adapter.sleep()
       break
-    case 'input':
+    case 'input': {
+      const botText = typeof message.bot_text === 'string' ? message.bot_text.trim() : ''
+      if (botText) {
+        throw new Error(
+          'voice client mode cannot send input bot_text: the client protocol has no bot-authored text input; use text instead or the legacy direct-DH2D mode',
+        )
+      }
       if (message.text && message.text.trim()) {
         frames = [adapter.textInput(message.text)]
       }
       break
+    }
+    case 'asr_session': {
+      if (message.command !== 'start' && message.command !== 'stop') {
+        throw new Error(
+          `voice client mode cannot map asr_session command ${JSON.stringify(message.command)}: expected 'start' or 'stop'`,
+        )
+      }
+      if (message.should_respond === false) {
+        throw new Error(
+          'voice client mode cannot map asr_session should_respond=false: ASR finals in an active conversation always generate a response',
+        )
+      }
+      frames = adapter.asrSession(message.command)
+      break
+    }
     default:
       break
   }
@@ -238,7 +271,14 @@ async function connectOnce(
         // Explicit playback lifecycle end: the A-to-idle boundary. DH2D idle
         // frames are undecodable, so the boundary comes from this
         // protocol-safe signal and is never inferred from invalid stripes.
-        avatarPlayback?.notifyMediaEnded()
+        // The signal is validated against this connection's voice session
+        // and the currently tracked avatar turn: a stop targeted at another
+        // session or at a retired/queued turn must never retire the tracked
+        // turn.
+        if (message.session_id === undefined || message.session_id === adapter.sessionId) {
+          const turnId = typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : undefined
+          avatarPlayback?.notifyMediaEnded(turnId)
+        }
       }
       for (const adapted of adapter.ingest(message)) {
         evt.emit('message', adapted)

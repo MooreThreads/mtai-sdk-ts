@@ -89,9 +89,16 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
      * Reports the current turn's playback end on an explicit lifecycle or
      * media-end signal (the A→idle boundary). Idle frames are undecodable,
      * so this boundary is never inferred from stripe decoding; invalid
-     * stripes still never emit.
+     * stripes still never emit. When `turnId` names the turn the signal
+     * targets, it is validated against the currently tracked turn: a stop
+     * targeted at a retired, queued, or otherwise different turn must never
+     * retire the tracked one. A signal without a turn id ends the tracked
+     * turn (turn-agnostic lifecycle end).
      */
-    notifyMediaEnded() {
+    notifyMediaEnded(turnId?: string) {
+      if (turnId !== undefined && tracker.currentTurn() !== turnId) {
+        return
+      }
       const { endedTurnId } = tracker.endCurrent()
       if (endedTurnId !== undefined) {
         options.onPlaybackEnded(endedTurnId)

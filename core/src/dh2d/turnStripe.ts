@@ -174,10 +174,15 @@ export function createTurnTransitionTracker() {
     return { endedTurnId: previous }
   }
 
+  /** The currently tracked turn, or undefined while none is tracked. */
+  function currentTurnId(): string | undefined {
+    return currentTurn
+  }
+
   function reset() {
     currentTurn = undefined
     reported.clear()
   }
 
-  return { observe, endCurrent, reset }
+  return { observe, endCurrent, currentTurn: currentTurnId, reset }
 }

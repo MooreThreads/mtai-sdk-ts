@@ -34,6 +34,34 @@ describe('asr events become asr_process', () => {
       { type: 'asr_process', sentence: '你好', completed: true },
     ])
   })
+
+  test('stale asr.partial from a retired turn never reaches the app', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
+    expect(adapter.ingest(event({
+      type: 'asr.partial', session_id: sessionId, turn_id: 't1', text: 'late',
+    }))).toEqual([])
+  })
+
+  test('stale asr.final from a retired turn never reaches the app', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
+    expect(adapter.ingest(event({
+      type: 'asr.final', session_id: sessionId, turn_id: 't1', text: 'late',
+    }))).toEqual([])
+  })
+
+  test('asr events without a turn id are not fenced', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
+    expect(adapter.ingest(event({
+      type: 'asr.final', session_id: sessionId, text: '你好',
+    }))).toEqual([
+      { type: 'asr_process', sentence: '你好', completed: true },
+    ])
+  })
 })
 
 describe('assistant.text becomes bot_output and accumulates per turn', () => {
@@ -213,6 +241,63 @@ describe('status events become status_change', () => {
   })
 })
 
+describe('retired-turn fencing of capture events', () => {
+  function retiredTurn(adapter: ReturnType<typeof createAdapter>, turnId: string) {
+    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: turnId, text: 'x' }))
+    adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: turnId }))
+  }
+
+  test('late capture.start for a retired turn never replaces the accepted capture turn', () => {
+    const adapter = createAdapter()
+    retiredTurn(adapter, 't1')
+    adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't2' }))
+    expect(adapter.ingest(event({
+      type: 'capture.start', session_id: sessionId, turn_id: 't1',
+    }))).toEqual([])
+    expect(adapter.audioInput(new Uint8Array([1]))).toEqual(expect.objectContaining({
+      control: expect.objectContaining({ turn_id: 't2' }),
+    }))
+  })
+
+  test('late capture.start for a retired turn emits no listening status', () => {
+    const adapter = createAdapter()
+    retiredTurn(adapter, 't1')
+    expect(adapter.ingest(event({
+      type: 'capture.start', session_id: sessionId, turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('late capture.stop for a retired turn emits no talking status', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    retiredTurn(adapter, 't1')
+    expect(adapter.ingest(event({
+      type: 'capture.stop', session_id: sessionId, turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('late capture.stop for a retired turn releases only the matching capture turn', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't1' }))
+    retiredTurn(adapter, 't1')
+    adapter.ingest(event({ type: 'capture.stop', session_id: sessionId, turn_id: 't1' }))
+    expect(adapter.audioInput(new Uint8Array([1]))).toBeNull()
+  })
+
+  test('late capture.stop for a retired turn keeps a newer capture turn accepted', () => {
+    const adapter = createAdapter()
+    retiredTurn(adapter, 't1')
+    adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't2' }))
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    expect(adapter.ingest(event({
+      type: 'capture.stop', session_id: sessionId, turn_id: 't1',
+    }))).toEqual([])
+    expect(adapter.audioInput(new Uint8Array([1]))).toEqual(expect.objectContaining({
+      control: expect.objectContaining({ turn_id: 't2' }),
+    }))
+  })
+})
+
 describe('SDK actions translate to client frames', () => {
   test('startFrame produces session.start with protocol version 2', () => {
     const adapter = createAdapter()
@@ -324,6 +409,42 @@ describe('SDK actions translate to client frames', () => {
   test('config frames are ignored', () => {
     const adapter = createAdapter()
     expect(adapter.wakeup()).toBeDefined()
+  })
+})
+
+describe('asr_session maps to the conversation lifecycle that owns listening', () => {
+  test('asr_session start sends conversation.start', () => {
+    const adapter = createAdapter()
+    expect(adapter.asrSession('start')).toEqual([
+      { type: 'conversation.start', session_id: sessionId },
+    ])
+  })
+
+  test('asr_session start sends conversation.start even while the conversation is active', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    expect(adapter.asrSession('start')).toEqual([
+      { type: 'conversation.start', session_id: sessionId },
+    ])
+  })
+
+  test('asr_session stop sends conversation.stop', () => {
+    const adapter = createAdapter()
+    expect(adapter.asrSession('stop')).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+  })
+
+  test('asr_session stop cancels a pending wakeup start', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    adapter.wakeup()
+    expect(adapter.asrSession('stop')).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
+    expect(sent).toEqual([])
   })
 })
 

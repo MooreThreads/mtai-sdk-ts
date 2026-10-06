@@ -211,6 +211,17 @@ describe('createTurnTransitionTracker', () => {
     expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined })
     expect(tracker.observe(['A2']).endedTurnId).toBe('A1')
   })
+
+  test('currentTurn exposes the tracked turn without retiring it', () => {
+    const tracker = createTurnTransitionTracker()
+    expect(tracker.currentTurn()).toBeUndefined()
+    tracker.observe(['A0'])
+    expect(tracker.currentTurn()).toBe('A0')
+    tracker.observe(['A1'])
+    expect(tracker.currentTurn()).toBe('A1')
+    tracker.endCurrent()
+    expect(tracker.currentTurn()).toBeUndefined()
+  })
 })
 
 describe('endCurrent', () => {

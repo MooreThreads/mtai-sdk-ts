@@ -267,6 +267,62 @@ describe('createAvatarPlayback notifyMediaEnded', () => {
     playback.notifyMediaEnded()
     expect(ended).toEqual([])
   })
+
+  test('a media end naming a retired turn never retires the tracked turn', () => {
+    const frames = createManualFrameSource()
+    const ended: string[] = []
+    let image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: turnId => ended.push(turnId),
+    })
+    playback.start()
+    frames.emitFrame()
+    image = stripeImageData('A1')
+    frames.emitFrame()
+    expect(ended).toEqual(['A0'])
+    // A stale lifecycle stop still targeting the retired A0 must never
+    // retire the tracked A1.
+    playback.notifyMediaEnded('A0')
+    expect(ended).toEqual(['A0'])
+    playback.notifyMediaEnded('A1')
+    expect(ended).toEqual(['A0', 'A1'])
+  })
+
+  test('a media end naming an unknown or queued turn never retires the tracked turn', () => {
+    const frames = createManualFrameSource()
+    const ended: string[] = []
+    const image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: turnId => ended.push(turnId),
+    })
+    playback.start()
+    frames.emitFrame()
+    playback.notifyMediaEnded('B2')
+    expect(ended).toEqual([])
+    // The tracked turn is still retired exactly once by a matching stop.
+    playback.notifyMediaEnded('A0')
+    expect(ended).toEqual(['A0'])
+  })
+
+  test('a media end without a current tracked turn emits nothing', () => {
+    const frames = createManualFrameSource()
+    const ended: string[] = []
+    const image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: turnId => ended.push(turnId),
+    })
+    playback.start()
+    frames.emitFrame()
+    playback.notifyMediaEnded('A0')
+    playback.notifyMediaEnded('A0')
+    expect(ended).toEqual(['A0'])
+  })
 })
 
 describe('createAvatarFrameRequester', () => {

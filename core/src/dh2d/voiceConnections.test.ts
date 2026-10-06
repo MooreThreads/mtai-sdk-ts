@@ -501,16 +501,103 @@ describe('connectVoiceClient', () => {
       globals.setSample('A0')
       globals.emitFrame()
       // DH2D idle frames are undecodable, so the A-to-idle boundary comes
-      // from the explicit protocol lifecycle signal, never from frames.
-      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'client-t1' }))
+      // from the explicit protocol lifecycle signal naming the tracked
+      // turn, never from frames.
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A0' }))
       let playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
       expect(playbackFrames).toEqual([
         { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
       ])
-      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'client-t1' }))
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A0' }))
       globals.setSample(null)
       globals.emitFrame()
       playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('a playback.stop for a retired turn never retires the currently tracked turn', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig(), video)
+      globals.setSample('A0')
+      globals.emitFrame()
+      globals.setSample('A1')
+      globals.emitFrame()
+      // The stripe transition retired A0 and the tracker now holds A1; a
+      // late stop still targeting A0 must not retire A1.
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A0' }))
+      let playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+      ])
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A1' }))
+      playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A1' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('a playback.stop for a queued turn never retires the currently tracked turn', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig(), video)
+      globals.setSample('A0')
+      globals.emitFrame()
+      // A stop naming a turn that is not the tracked one (for example a
+      // queued turn) must not end the tracked turn's playback.
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))
+      let playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([])
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A0' }))
+      playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('a playback.stop for another voice session is ignored', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig(), video)
+      globals.setSample('A0')
+      globals.emitFrame()
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-2', turn_id: 'A0' }))
+      let playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([])
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A0' }))
+      playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('a playback.stop without a turn id still ends the tracked turn', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig(), video)
+      globals.setSample('A0')
+      globals.emitFrame()
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1' }))
+      const playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
       expect(playbackFrames).toEqual([
         { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
       ])
@@ -639,11 +726,68 @@ describe('sendVoiceClientMessage', () => {
     expect(typeof frame.request_id).toBe('string')
   })
 
-  test('config, ping and asr_session frames are ignored', async () => {
+  test('input with bot_text is rejected instead of silently dropped', async () => {
+    const { ws, adapter } = setup()
+    await expect(sendVoiceClientMessage(ws as any, adapter, {
+      type: 'input', bot_text: 'I will say exactly this text.',
+    })).rejects.toThrow(/bot_text/)
+    expect(ws.sent).toEqual([])
+  })
+
+  test('input with text and bot_text sends no frame before failing', async () => {
+    const { ws, adapter } = setup()
+    await expect(sendVoiceClientMessage(ws as any, adapter, {
+      type: 'input', text: 'hello', bot_text: 'verbatim',
+    })).rejects.toThrow(/bot_text/)
+    expect(ws.sent).toEqual([])
+  })
+
+  test('asr_session start maps to conversation.start', async () => {
+    const { ws, adapter } = setup()
+    await sendVoiceClientMessage(ws as any, adapter, { type: 'asr_session', command: 'start' })
+    expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
+      { type: 'conversation.start', session_id: 'voice-1' },
+    ])
+  })
+
+  test('asr_session stop maps to conversation.stop', async () => {
+    const { ws, adapter } = setup()
+    await sendVoiceClientMessage(ws as any, adapter, { type: 'asr_session', command: 'stop' })
+    expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
+      { type: 'conversation.stop', session_id: 'voice-1' },
+    ])
+  })
+
+  test('asr_session with should_respond true maps to conversation lifecycle', async () => {
+    const { ws, adapter } = setup()
+    await sendVoiceClientMessage(ws as any, adapter, {
+      type: 'asr_session', command: 'start', should_respond: true,
+    })
+    expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
+      { type: 'conversation.start', session_id: 'voice-1' },
+    ])
+  })
+
+  test('asr_session with should_respond false is rejected instead of silently dropped', async () => {
+    const { ws, adapter } = setup()
+    await expect(sendVoiceClientMessage(ws as any, adapter, {
+      type: 'asr_session', command: 'start', should_respond: false,
+    })).rejects.toThrow(/should_respond/)
+    expect(ws.sent).toEqual([])
+  })
+
+  test('asr_session with an unknown command is rejected', async () => {
+    const { ws, adapter } = setup()
+    await expect(sendVoiceClientMessage(ws as any, adapter, {
+      type: 'asr_session', command: 'nonsense' as any,
+    })).rejects.toThrow(/asr_session/)
+    expect(ws.sent).toEqual([])
+  })
+
+  test('config and ping frames are ignored', async () => {
     const { ws, adapter } = setup()
     await sendVoiceClientMessage(ws as any, adapter, { type: 'config' } as any)
     await sendVoiceClientMessage(ws as any, adapter, { type: 'ping', timestamp: 'now' } as any)
-    await sendVoiceClientMessage(ws as any, adapter, { type: 'asr_session', command: 'start' })
     expect(ws.sent).toEqual([])
   })
 })

@@ -36,6 +36,22 @@ surfaced as `audio_text`, streamed LLM output as `bot_output`, and a
 Avatar playback boundaries are decoded from the DH2D video turn stripe and
 reported to the client as `playback.ended`.
 
+Input mapping in voice-client mode:
+
+- `input.text` maps to the client protocol's `text.input`.
+- `input.bot_text` is rejected with an explicit error: the client protocol
+  has no bot-authored text input (its `text.input` is strictly user text and
+  its verbatim-speech path is client-internal), so bot text is never silently
+  dropped nor misrouted as user text. Use `input.text` or the legacy
+direct-DH2D mode for verbatim bot speech.
+- `asr_session` keeps its documented listening-control semantics through the
+  conversation lifecycle that owns listening in the client protocol:
+  `command: 'start'` opens listening (`conversation.start`) and
+  `command: 'stop'` ends it (`conversation.stop`). `should_respond: false`
+  has no client-protocol equivalent (ASR finals in an active conversation
+  always generate a response) and is rejected with an explicit error.
+- `config` and `ping` have no client-protocol equivalent and are ignored.
+
 ```typescript
 const session = createDH2DSession(divElement, {
   videoId: 'YOUR_AVATAR_ID',
@@ -48,7 +64,9 @@ different turn B reports `playback.ended` for A. The A→idle boundary (the
 last turn of a playback sequence returning to idle) is never guessed from
 frames — DH2D idle frames are undecodable and invalid stripes must not emit
 — it is reported only on the explicit, protocol-safe `playback.stop`
-lifecycle signal from the client.
+lifecycle signal from the client. The signal's `session_id` and `turn_id`
+are validated against the tracked avatar turn, so a stop targeted at a
+retired or still-queued turn never retires the turn currently playing.
 
 Microphone input: configure `audioInput: true` (default device) or pass a
 `MediaStream`. Captured audio is delivered to the voice client as an input
