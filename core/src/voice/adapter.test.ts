@@ -576,6 +576,55 @@ describe('pending message sequencing interruption', () => {
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
     expect(sent).toEqual([])
   })
+
+  test('a plain text input never defers a conversation.stop, even after its acknowledgement', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    const frame = adapter.textInput('hello') as any
+    adapter.wakeup()
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
+    }))
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('a newer input retires an earlier input acknowledgement', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    const first = adapter.textInput('first') as any
+    adapter.textInput('second')
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: first.request_id, turn_id: 'A1',
+    }))
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('a sleep with text retires a preceding input, so its acknowledgement arms nothing', () => {
+    const sent: any[] = []
+    const adapter = createAdapter(frame => sent.push(frame))
+    const input = adapter.textInput('hello') as any
+    adapter.sleep('再见')
+    adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: input.request_id, turn_id: 'A1',
+    }))
+    adapter.observeAvatarTurn('A1')
+    adapter.observeAvatarTurn('B2')
+    expect(sent).toEqual([])
+  })
+
+  test('no-text wakeup and no-text sleep keep their immediate frames', () => {
+    const adapter = createAdapter()
+    expect(adapter.wakeup()).toEqual([
+      { type: 'conversation.start', session_id: sessionId },
+    ])
+    expect(adapter.sleep()).toEqual([
+      { type: 'conversation.stop', session_id: sessionId },
+    ])
+  })
 })
 
 describe('sleep with text waits for the avatar turn transition', () => {
