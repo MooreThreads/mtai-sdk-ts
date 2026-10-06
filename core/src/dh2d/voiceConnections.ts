@@ -5,6 +5,7 @@ import { connectPc } from "../pc"
 import { config as rootConfig } from "../config"
 import { Abortable, DHConnectionEventTypes, DHConnectionEvents, DHInputMessage, Diff, Logger } from "../types"
 import { createVoiceMessageAdapter, VoiceClientFrame, VoiceMessageAdapter } from "../voice/adapter"
+import { createVoiceMicrophone } from "../voice/microphone"
 import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from "./types"
 import { createAvatarPlayback } from "./avatarMedia"
 
@@ -20,6 +21,12 @@ export type VoiceClientConnection = DH2DConnection & {
   readonly voice: VoiceMessageAdapter,
   /** Stops avatar playback observation. */
   readonly stopPlayback: () => void,
+  /**
+   * Fences this connection generation: detaches the client websocket
+   * callbacks, stops the microphone pipeline, and clears the video source,
+   * so traffic from a retired connection can never reach the app.
+   */
+  readonly dispose: () => void,
 }
 
 function generateVoiceSessionId() {
@@ -51,9 +58,9 @@ export function voiceClientWebSocketUrl(base: string, videoId: string): string {
 
 /**
  * Translates an SDK input message into voice client protocol frames on the
- * given websocket. `config`, `ping`, and `asr_session` have no client-protocol
- * equivalent and are ignored; `wakeup` performs the stop-then-start sequence
- * through the adapter when a conversation is active.
+ * given open websocket. `config`, `ping`, and `asr_session` have no
+ * client-protocol equivalent and are ignored; `wakeup` performs the
+ * stop-then-start sequence through the adapter when a conversation is active.
  */
 export async function sendVoiceClientMessage(
   ws: WebSocket,
@@ -105,22 +112,59 @@ async function connectOnce(
   const evt = events<DHConnectionEvents>()
   let canonicalSessionId: string | undefined = undefined
   let sessionLogger = attemptLogger
+  let avatarPlayback: ReturnType<typeof createAvatarPlayback> | undefined = undefined
+  let stopMicrophone: (() => void) | undefined = undefined
+  let disposed = false
+
+  // The native websocket throws on send() while still CONNECTING, so every
+  // client-protocol frame is sent through this gate: frames produced before
+  // OPEN queue in order behind the session handshake.
+  const outbound: (string | Uint8Array)[] = []
+  const sendFrame = (data: string | Uint8Array) => {
+    if (!running || disposed) {
+      return
+    }
+    if (ws.readyState !== WebSocket.OPEN) {
+      outbound.push(data)
+      return
+    }
+    ws.send(data)
+  }
+
   const adapter = createVoiceMessageAdapter({
     sessionId: voiceConfig.sessionId || generateVoiceSessionId(),
-    onClientSend: frame => {
-      if (running) {
-        ws.send(JSON.stringify(frame))
-      }
-    },
+    onClientSend: frame => sendFrame(JSON.stringify(frame)),
   })
 
-  const failure = new Promise<never>((_, reject) => {
+  const wsCloseHandlers: (() => void)[] = []
+  ws.onclose = () => {
+    for (const handler of [...wsCloseHandlers]) {
+      handler()
+    }
+  }
+  const wsOpen = new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve()
+    wsCloseHandlers.push(() => reject(new Error('connection closed')))
     innerAbortable.onabort(() => reject(new Error('connection aborted')))
-    ws.onclose = () => {
-      if (running) {
+  })
+  // The session handshake keeps its order as the first control frame by
+  // waiting for the socket to reach OPEN.
+  const handshakeReady = wsOpen.then(() => {
+    if (!running || disposed) {
+      return
+    }
+    ws.send(JSON.stringify(adapter.startFrame()))
+    for (const data of outbound.splice(0)) {
+      ws.send(data)
+    }
+  })
+  const failure = new Promise<never>((_, reject) => {
+    wsCloseHandlers.push(() => {
+      if (running && !disposed) {
         reject(new Error('connection closed'))
       }
-    }
+    })
+    innerAbortable.onabort(() => reject(new Error('connection aborted')))
   })
 
   const videoReady = new Promise<void>(resolve => {
@@ -164,7 +208,7 @@ async function connectOnce(
 
   const avatarReady = new Promise<void>((resolve, reject) => {
     ws.onmessage = (event: MessageEvent) => {
-      if (!running) return
+      if (!running || disposed) return
       if (typeof event.data !== 'string') {
         // Output PCM follows its audio.chunk control frame; avatar playback
         // audio arrives through the WebRTC media path instead.
@@ -190,18 +234,61 @@ async function connectOnce(
           .catch(reject)
         return
       }
+      if (message.type === 'playback.stop') {
+        // Explicit playback lifecycle end: the A-to-idle boundary. DH2D idle
+        // frames are undecodable, so the boundary comes from this
+        // protocol-safe signal and is never inferred from invalid stripes.
+        avatarPlayback?.notifyMediaEnded()
+      }
       for (const adapted of adapter.ingest(message)) {
         evt.emit('message', adapted)
       }
     }
   })
 
-  // The websocket buffers sends made before the connection is open, so the
-  // session handshake keeps its order as the first control frame.
-  ws.send(JSON.stringify(adapter.startFrame()))
+  // Microphone PCM wiring: `audioInput` captures through the Web Audio API
+  // and delivers each batch to the client as an input `audio.chunk` control
+  // frame immediately followed by its binary PCM payload. The adapter only
+  // accepts batches while a capture turn is active.
+  let microphoneReady: Promise<void> = Promise.resolve()
+  if (config.audioInput) {
+    const microphone = createVoiceMicrophone({
+      audioInput: config.audioInput,
+      logger: attemptLogger,
+      onPcm: pcm => {
+        const batch = adapter.audioInput(pcm)
+        if (!batch) {
+          return
+        }
+        sendFrame(JSON.stringify(batch.control))
+        sendFrame(batch.binary)
+      },
+    })
+    stopMicrophone = microphone.stop
+    innerAbortable.onabort(microphone.stop)
+    microphoneReady = microphone.ready
+  }
+
+  // Fences this connection generation. Detaching the websocket callbacks and
+  // stopping the microphone prevents stale callbacks and queued events from a
+  // retired connection from reaching the app; the video source is cleared so
+  // no retired stream keeps rendering.
+  const dispose = () => {
+    if (disposed) {
+      return
+    }
+    disposed = true
+    running = false
+    stopMicrophone?.()
+    ws.onopen = null
+    ws.onclose = null
+    ws.onmessage = null
+    elements.video.srcObject = null
+  }
+  innerAbortable.onabort(dispose)
 
   await Promise.race([
-    Promise.all([avatarReady, videoReady]),
+    Promise.all([avatarReady, videoReady, handshakeReady, microphoneReady]),
     failure,
   ])
 
@@ -212,20 +299,19 @@ async function connectOnce(
       requestFrame: frameRequester,
       sampleFrame: hooks.dh2d.createAvatarFrameSampler(elements.video),
       onPlaybackEnded: turnId => {
-        if (running) {
-          ws.send(JSON.stringify(adapter.playbackEnded(turnId)))
-        }
+        sendFrame(JSON.stringify(adapter.playbackEnded(turnId)))
       },
     })
+    avatarPlayback = playback
     playback.start()
     return {
-      ...connectionBase(ws, pc, canonicalSessionId, adapter, playback.stop),
+      ...connectionBase(ws, pc, canonicalSessionId, adapter, playback.stop, dispose),
       ...(({ on, off }) => ({ on, off }))(evt),
     }
   }
   sessionLogger.warn('requestVideoFrameCallback unavailable; avatar turn decoding disabled')
   return {
-    ...connectionBase(ws, pc, canonicalSessionId, adapter, () => undefined),
+    ...connectionBase(ws, pc, canonicalSessionId, adapter, () => undefined, dispose),
     ...(({ on, off }) => ({ on, off }))(evt),
   }
 }
@@ -236,6 +322,7 @@ function connectionBase(
   canonicalSessionId: string | undefined,
   adapter: VoiceMessageAdapter,
   stopPlayback: () => void,
+  dispose: () => void,
 ): Diff<VoiceClientConnection, { on: unknown, off: unknown }> {
   return {
     get ws() { return ws },
@@ -243,6 +330,7 @@ function connectionBase(
     get sessionId() { return canonicalSessionId ?? '' },
     voice: adapter,
     stopPlayback,
+    dispose,
   }
 }
 
@@ -253,6 +341,8 @@ function connectionBase(
  * adapted messages, playback.ended). The canonical DH2D session id reported
  * by `dh_2d_session_ready` is used for the direct WebRTC offer exchange; no
  * DH2D command websocket is opened and no second avatar session is created.
+ * The configured `connectTimeout` bounds each attempt so a stalled attempt
+ * can never hang the connection loop.
  */
 export async function connectVoiceClient(
   logger: Logger,
@@ -266,7 +356,18 @@ export async function connectVoiceClient(
   const rootLogger = logger.push((_, ...args) => _('[voice-connect]', ...args))
   for (let i = 0; ; i++) {
     try {
-      return await withChild(abortable, inner => connectOnce(i, rootLogger, elements, config, inner))
+      return await withChild(abortable, async innerAbortable => {
+        const tasks: Promise<VoiceClientConnection>[] = [
+          connectOnce(i, rootLogger, elements, config, innerAbortable),
+        ]
+        const connectTimeout = config.connectTimeout
+        if (connectTimeout > 0) {
+          tasks.push(new Promise<VoiceClientConnection>((_, reject) => {
+            setTimeout(() => reject(new Error(`connect timeout after ${connectTimeout}ms`)), connectTimeout)
+          }))
+        }
+        return await Promise.race(tasks)
+      })
     } catch (e: any) {
       rootLogger.error(e)
       if (e.message === 'connection aborted') {
@@ -279,19 +380,22 @@ export async function connectVoiceClient(
 
 export async function disconnectVoiceClient(
   logger: Logger,
-  connection: DH2DConnection & Partial<Pick<VoiceClientConnection, 'voice' | 'stopPlayback'>>,
+  connection: DH2DConnection & Partial<Pick<VoiceClientConnection, 'voice' | 'stopPlayback' | 'dispose'>>,
   elements: DH2DPlayerElements,
   abortable: Abortable,
 ) {
   logger = logger.push((_, ...args) => _('[voice-disconnect]', ...args))
   logger.log('enter')
-  void elements
   void abortable
   try {
+    // Fence the retired connection first: no stale websocket callback,
+    // microphone batch, or queued event may reach the app afterwards.
+    connection.dispose?.()
     connection.stopPlayback?.()
     connection.voice?.reset()
     connection.ws.close()
     connection.pc.close()
+    elements.video.srcObject = null
     for (const event of DHConnectionEventTypes) {
       connection.off(event)
     }

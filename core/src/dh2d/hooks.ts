@@ -1,6 +1,6 @@
 import { connect, disconnect, untilFailed } from "./connections";
 import { connectPc } from "../pc";
-import { connectVoiceClient, disconnectVoiceClient, VoiceClientConnection } from "./voiceConnections";
+import { connectVoiceClient, disconnectVoiceClient } from "./voiceConnections";
 import { createAvatarFrameRequester, createAvatarFrameSampler } from "./avatarMedia";
 import { DH2DSessionConfig, DH2DPlayerElements, DH2DSession, ResolvedDH2DSessionConfig } from "./types";
 import { Abortable, Box } from "../types";

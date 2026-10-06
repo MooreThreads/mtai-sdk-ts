@@ -97,13 +97,14 @@ export function decodeTurnStripe(luma: ArrayLike<number>, width: number): TurnSt
 }
 
 /**
- * Extract the top-left 64x8 luminance grid from RGBA `ImageData`-like video
- * frame pixels, ready for `decodeTurnStripe`.
+ * Extract the luminance of the topmost 8 rows across the full frame width
+ * from RGBA `ImageData`-like video frame pixels, ready for
+ * `decodeTurnStripe` (which decodes every 64-pixel repetition).
  */
 export function stripeLumaFromImageData(image: { data: ArrayLike<number>, width: number, height: number }): number[] {
   const luma: number[] = []
   for (let y = 0; y < TURN_STRIPE_HEIGHT; y++) {
-    for (let x = 0; x < TURN_STRIPE_WIDTH; x++) {
+    for (let x = 0; x < image.width; x++) {
       const i = (y * image.width + x) * 4
       const r = image.data[i]
       const g = image.data[i + 1]
@@ -125,11 +126,14 @@ export type TurnTransition = {
 /**
  * Validates avatar turn transitions across decoded frames.
  *
- * Only a validated transition from turn A to a different valid turn B
- * confirms that A's avatar playback finished; the previous turn is reported,
- * never the newly observed one. Frames with no valid token (idle, corrupt,
- * CRC-failing) and duplicate transitions confirm nothing. Each turn is
- * reported at most once per generation.
+ * A validated transition from turn A to a different valid turn B confirms
+ * that A's avatar playback finished; the previous turn is reported, never
+ * the newly observed one. The A→idle boundary is reported only through the
+ * explicit `endCurrent` signal: DH2D idle frames carry no decodable stripe,
+ * and frames with no valid token (idle, corrupt, CRC-failing) or with
+ * conflicting tokens are never treated as evidence — neither for a turn
+ * transition nor for the idle boundary. Each turn is reported at most once
+ * per generation.
  */
 export function createTurnTransitionTracker() {
   let currentTurn: string | undefined = undefined
@@ -139,7 +143,7 @@ export function createTurnTransitionTracker() {
     const valid = [...new Set(tokens)].filter(token => typeof token === 'string' && token.length === 2)
     if (valid.length !== 1) {
       // No token, or conflicting tokens: the frame is not evidence of a
-      // validated transition.
+      // validated transition. Undecodable frames are never read as idle.
       return { endedTurnId: undefined }
     }
     const token = valid[0]
@@ -155,10 +159,25 @@ export function createTurnTransitionTracker() {
     return { endedTurnId: previous }
   }
 
+  /**
+   * Explicitly signals the end of the current turn's playback (the A→idle
+   * boundary). Because idle frames are undecodable, this boundary must come
+   * from an explicit lifecycle/media-end signal, never from frame decoding.
+   */
+  function endCurrent(): TurnTransition {
+    const previous = currentTurn
+    currentTurn = undefined
+    if (previous === undefined || reported.has(previous)) {
+      return { endedTurnId: undefined }
+    }
+    reported.add(previous)
+    return { endedTurnId: previous }
+  }
+
   function reset() {
     currentTurn = undefined
     reported.clear()
   }
 
-  return { observe, reset }
+  return { observe, endCurrent, reset }
 }

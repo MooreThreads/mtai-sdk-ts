@@ -134,6 +134,25 @@ describe('stripeLumaFromImageData', () => {
     expect(luma.length).toBe(64 * 8)
     expect(luma).toEqual(region.flat())
   })
+
+  test('extracts every repetition across the full top-row width', () => {
+    const region = stripeRegion('B7')
+    const width = 192
+    const data = new Uint8ClampedArray(width * 8 * 4)
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < width; x++) {
+        const value = region[y][x % 64]
+        const i = (y * width + x) * 4
+        data[i] = value
+        data[i + 1] = value
+        data[i + 2] = value
+        data[i + 3] = 255
+      }
+    }
+    const luma = stripeLumaFromImageData({ data, width, height: 8 } as ImageData)
+    expect(luma.length).toBe(width * 8)
+    expect(decodeTurnStripe(luma, width).tokens).toEqual(['B7', 'B7', 'B7'])
+  })
 })
 
 describe('createTurnTransitionTracker', () => {
@@ -191,6 +210,37 @@ describe('createTurnTransitionTracker', () => {
     tracker.reset()
     expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined })
     expect(tracker.observe(['A2']).endedTurnId).toBe('A1')
+  })
+})
+
+describe('endCurrent', () => {
+  test('an explicit media end reports the current turn exactly once', () => {
+    const tracker = createTurnTransitionTracker()
+    tracker.observe(['A0'])
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: 'A0' })
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: undefined })
+  })
+
+  test('an explicit media end without a current turn emits nothing', () => {
+    const tracker = createTurnTransitionTracker()
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: undefined })
+  })
+
+  test('frames after an explicit media end start a fresh generation', () => {
+    const tracker = createTurnTransitionTracker()
+    tracker.observe(['A0'])
+    tracker.endCurrent()
+    expect(tracker.observe(['A0'])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe(['A1'])).toEqual({ endedTurnId: undefined })
+    expect(tracker.observe(['B2'])).toEqual({ endedTurnId: 'A1' })
+  })
+
+  test('invalid frames never emit and never substitute for an explicit media end', () => {
+    const tracker = createTurnTransitionTracker()
+    tracker.observe(['A0'])
+    expect(tracker.observe([])).toEqual({ endedTurnId: undefined })
+    expect(tracker.endCurrent()).toEqual({ endedTurnId: 'A0' })
+    expect(tracker.observe([])).toEqual({ endedTurnId: undefined })
   })
 })
 

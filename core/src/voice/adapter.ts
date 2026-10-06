@@ -65,9 +65,11 @@ function defaultRequestIdFactory() {
  * The adapter keeps per-session and per-turn state: accumulated `bot_output`
  * fragments keyed by `session_id + turn_id`, the current conversation state,
  * the accepted capture turn, and any pending wakeup stop-then-start sequence.
- * Duplicate terminal events never produce duplicate records and late events
- * from retired turns are ignored. `reset()` fences a new connection
- * generation so fragments are never combined across reconnects.
+ * Turns are fenced at `turn.end`: duplicate terminal events never produce
+ * duplicate records, and late `assistant.text` fragments or `audio.chunk`
+ * subtitles from a retired turn are dropped before they can reach the app.
+ * `reset()` fences a new connection generation so fragments are never
+ * combined across reconnects.
  */
 export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const { sessionId } = options
@@ -101,15 +103,21 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       }
       case 'assistant.text': {
         if (event.session_id !== sessionId || typeof event.turn_id !== 'string') return []
-        const text = typeof event.text === 'string' ? event.text : ''
         const key = turnKey(event.turn_id)
-        if (!finalizedTurns.has(key)) {
-          fragments.set(key, [...(fragments.get(key) || []), text])
+        if (finalizedTurns.has(key)) {
+          // The turn is retired; a late fragment must never reach the app.
+          return []
         }
+        const text = typeof event.text === 'string' ? event.text : ''
+        fragments.set(key, [...(fragments.get(key) || []), text])
         return [{ type: 'bot_output', text }]
       }
       case 'audio.chunk': {
         if (event.session_id !== sessionId) return []
+        if (typeof event.turn_id === 'string' && finalizedTurns.has(turnKey(event.turn_id))) {
+          // The turn is retired; late subtitles must never reach the app.
+          return []
+        }
         const subtitles = Array.isArray(event.subtitles) ? event.subtitles : []
         return subtitles
           .filter(segment => segment && (segment.source === 'main' || segment.source === 'narrator')

@@ -99,6 +99,26 @@ describe('audio.chunk subtitles become audio_text in segment order', () => {
       subtitles: [{ source: 'unexpected', text: 'x' }] as any,
     }))).toEqual([])
   })
+
+  test('late subtitles from a retired turn never reach the app', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: 'late spoken' }],
+    }))).toEqual([])
+  })
+
+  test('subtitles without a turn id are not fenced', () => {
+    const adapter = createAdapter()
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId,
+      subtitles: [{ source: 'main', text: 'hi' }],
+    }))).toEqual([
+      { type: 'audio_text', text: 'hi' },
+    ])
+  })
 })
 
 describe('turn.end derives message_record from accumulated bot_output', () => {
@@ -131,11 +151,11 @@ describe('turn.end derives message_record from accumulated bot_output', () => {
     ])
   })
 
-  test('late fragments from a retired turn produce no second record', () => {
+  test('late assistant.text from a retired turn never reaches the app', () => {
     const adapter = createAdapter()
     adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'late' }))
+    expect(adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'late' }))).toEqual([])
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([])
   })
 

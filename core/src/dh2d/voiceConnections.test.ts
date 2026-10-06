@@ -25,16 +25,38 @@ class FakeEventTarget {
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = []
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+  static readonly CLOSED = 3
   readonly url: string
   readonly sent: any[] = []
-  onmessage: ((event: { data: any }) => void) | undefined
+  readonly prematureSends: any[] = []
+  readyState = FakeWebSocket.CONNECTING
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: any }) => void) | null = null
+  onclose: (() => void) | null = null
   closed = false
   constructor(url: string) {
     this.url = url
     FakeWebSocket.instances.push(this)
   }
-  send(data: any) { this.sent.push(data) }
-  close() { this.closed = true }
+  send(data: any) {
+    if (this.readyState !== FakeWebSocket.OPEN) {
+      this.prematureSends.push(data)
+      throw new Error(`premature websocket send while readyState=${this.readyState}`)
+    }
+    this.sent.push(data)
+  }
+  open() {
+    if (this.readyState === FakeWebSocket.CONNECTING) {
+      this.readyState = FakeWebSocket.OPEN
+      this.onopen?.()
+    }
+  }
+  close() {
+    this.closed = true
+    this.readyState = FakeWebSocket.CLOSED
+  }
   receive(data: string | ArrayBuffer) { this.onmessage?.({ data }) }
 }
 
@@ -57,6 +79,50 @@ class FakeRTCPeerConnection extends FakeEventTarget {
   async setLocalDescription() { }
   async setRemoteDescription(description: any) { this.remoteDescription = description }
   close() { this.closed = true }
+}
+
+class FakeMicrophoneStream {
+  static instances: FakeMicrophoneStream[] = []
+  readonly audioTracks: { stop: jest.Mock }[]
+  constructor() {
+    this.audioTracks = [{ stop: jest.fn() }]
+    FakeMicrophoneStream.instances.push(this)
+  }
+  getAudioTracks() { return this.audioTracks }
+}
+
+class FakeMicrophoneAudioContext {
+  static instances: FakeMicrophoneAudioContext[] = []
+  readonly sampleRate: number
+  state: 'running' | 'closed' = 'running'
+  closed = false
+  processor: {
+    bufferSize: number
+    onaudioprocess: ((event: any) => void) | undefined
+    connect: jest.Mock
+    disconnect: jest.Mock
+  } | undefined
+  source: { connect: jest.Mock; disconnect: jest.Mock } | undefined
+  gain: { gain: { value: number }; connect: jest.Mock; disconnect: jest.Mock } | undefined
+  readonly destination = {}
+  constructor(sampleRate: number) {
+    this.sampleRate = sampleRate
+    FakeMicrophoneAudioContext.instances.push(this)
+  }
+  createMediaStreamSource() {
+    this.source = { connect: jest.fn(), disconnect: jest.fn() }
+    return this.source
+  }
+  createScriptProcessor(bufferSize: number) {
+    this.processor = { bufferSize, onaudioprocess: undefined, connect: jest.fn(), disconnect: jest.fn() }
+    return this.processor
+  }
+  createGain() {
+    this.gain = { gain: { value: 1 }, connect: jest.fn(), disconnect: jest.fn() }
+    return this.gain
+  }
+  async resume() { this.state = 'running' }
+  async close() { this.closed = true; this.state = 'closed' }
 }
 
 const fetchCalls: { url: string, init: any }[] = []
@@ -124,13 +190,29 @@ function setupGlobals() {
   const originalFetch = (globalThis as any).fetch
   const originalRequester = hooks.dh2d.createAvatarFrameRequester
   const originalSampler = hooks.dh2d.createAvatarFrameSampler
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const originalAudioContext = (globalThis as any).AudioContext
   FakeWebSocket.instances = []
   FakeRTCPeerConnection.instances = []
+  FakeMicrophoneStream.instances = []
+  FakeMicrophoneAudioContext.instances = []
   fetchCalls.length = 0
   let frameCallback: (() => void) | undefined
   let sampledImage: ImageData | null = null
+  let microphoneSampleRate = 16000
+  let getUserMedia: jest.Mock = jest.fn(async () => new FakeMicrophoneStream())
   ;(globalThis as any).WebSocket = FakeWebSocket
   ;(globalThis as any).RTCPeerConnection = FakeRTCPeerConnection
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { mediaDevices: { getUserMedia: (...args: any[]) => getUserMedia(...args) } },
+    writable: true,
+    configurable: true,
+  })
+  ;(globalThis as any).AudioContext = class extends FakeMicrophoneAudioContext {
+    constructor() {
+      super(microphoneSampleRate)
+    }
+  }
   ;(globalThis as any).fetch = async (url: any, init: any) => {
     fetchCalls.push({ url: String(url), init })
     return { json: async () => ({ type: 'answer', sdp: 'answer-sdp' }) }
@@ -142,32 +224,51 @@ function setupGlobals() {
   hooks.dh2d.createAvatarFrameSampler = () => () => sampledImage
   const emitFrame = () => frameCallback?.()
   const setSample = (token: string | null) => { sampledImage = token ? stripeImageData(token) : null }
+  const triggerMicrophone = (samples: Float32Array) => {
+    const context = FakeMicrophoneAudioContext.instances[FakeMicrophoneAudioContext.instances.length - 1]
+    context.processor!.onaudioprocess!({
+      inputBuffer: { getChannelData: () => samples },
+    })
+  }
+  const setMicrophoneSampleRate = (rate: number) => { microphoneSampleRate = rate }
+  const setGetUserMedia = (mock: jest.Mock) => { getUserMedia = mock }
   const restore = () => {
-    ;(globalThis as any).WebSocket = originalWebSocket
+    (globalThis as any).WebSocket = originalWebSocket
     ;(globalThis as any).RTCPeerConnection = originalPc
     ;(globalThis as any).fetch = originalFetch
+    ;(globalThis as any).AudioContext = originalAudioContext
+    if (originalNavigator) {
+      Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    }
     hooks.dh2d.createAvatarFrameRequester = originalRequester
     hooks.dh2d.createAvatarFrameSampler = originalSampler
   }
-  return { emitFrame, setSample, restore }
+  return {
+    emitFrame, setSample, triggerMicrophone, setMicrophoneSampleRate, setGetUserMedia, restore,
+  }
 }
 
-async function connectReady(config: any, video: any, frames: { emitFrame: () => void, setSample: (t: string | null) => void }) {
+const flushMicrotasks = async (times = 8) => {
+  for (let i = 0; i < times; i++) {
+    await Promise.resolve()
+  }
+}
+
+async function connectReady(config: any, video: any) {
   const scope = abortable()
   const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, config, child))
-  await Promise.resolve()
-  await Promise.resolve()
+  await flushMicrotasks()
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+  ws.open()
+  await flushMicrotasks()
   ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
-  await Promise.resolve()
-  await Promise.resolve()
+  await flushMicrotasks()
   const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
   pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
   pc.dispatch('track', { track: { kind: 'audio' }, streams: [{ id: 's' }] })
   video.dispatch('canplay')
   const connection = await connecting
-  void frames
-  return { connection, ws, pc }
+  return { connection, ws, pc, scope }
 }
 
 describe('connectVoiceClient', () => {
@@ -175,7 +276,7 @@ describe('connectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { ws } = await connectReady(createConfig(), video, globals)
+      const { ws } = await connectReady(createConfig(), video)
       expect(ws.url).toBe('ws://client:8300/ws?mode=avatar&video_id=xiaomai')
     } finally {
       globals.restore()
@@ -186,9 +287,41 @@ describe('connectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { ws } = await connectReady(createConfig({ voiceClient: { url: 'ws://client:8300/voice', sessionId: 'voice-1' } }), video, globals)
+      const { ws } = await connectReady(createConfig({ voiceClient: { url: 'ws://client:8300/voice', sessionId: 'voice-1' } }), video)
       expect(ws.url).toBe('ws://client:8300/voice?mode=avatar&video_id=xiaomai')
     } finally {
+      globals.restore()
+    }
+  })
+
+  test('waits for the websocket OPEN before sending the session handshake', async () => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+      await flushMicrotasks()
+      const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+      expect(ws.readyState).toBe(FakeWebSocket.CONNECTING)
+      // A premature send throws on the native websocket, so nothing may be
+      // sent before OPEN; a premature send also leaves no sent frames.
+      expect(ws.sent).toEqual([])
+      ws.open()
+      await flushMicrotasks()
+      expect(ws.prematureSends).toEqual([])
+      expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
+        { type: 'session.start', session_id: 'voice-1', protocol_version: 2 },
+      ])
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
+      await flushMicrotasks()
+      const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
+      pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [{ id: 's' }] })
+      video.dispatch('canplay')
+      const connection = await connecting
+      await disconnectVoiceClient(logger, connection, { video }, abortable())
+    } finally {
+      scope.abort()
       globals.restore()
     }
   })
@@ -197,7 +330,7 @@ describe('connectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { ws } = await connectReady(createConfig(), video, globals)
+      const { ws } = await connectReady(createConfig(), video)
       expect(JSON.parse(ws.sent[0])).toEqual({
         type: 'session.start', session_id: 'voice-1', protocol_version: 2,
       })
@@ -209,11 +342,65 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('preserves the configured connectTimeout so a stalled attempt cannot hang', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const config = createConfig({ connectTimeout: 50 })
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, config, child))
+      await flushMicrotasks()
+      const first = FakeWebSocket.instances[0]
+      first.open()
+      await flushMicrotasks()
+      // The socket is open but dh_2d_session_ready never arrives: the
+      // attempt must fail on the configured timeout instead of hanging.
+      jest.advanceTimersByTime(51)
+      await flushMicrotasks()
+      // The failure follows the standard retry backoff with a second attempt.
+      jest.advanceTimersByTime(2000)
+      await flushMicrotasks()
+      expect(FakeWebSocket.instances.length).toBe(2)
+      scope.abort()
+      await expect(connecting).rejects.toThrow('connection aborted')
+    } finally {
+      jest.useRealTimers()
+      scope.abort()
+      globals.restore()
+    }
+  })
+
+  test('a microphone acquisition failure fails the connection attempt and retries', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    globals.setGetUserMedia(jest.fn()
+      .mockRejectedValueOnce(new Error('no microphone'))
+      .mockResolvedValue(new FakeMicrophoneStream()))
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const config = createConfig({ audioInput: true })
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, config, child))
+      await flushMicrotasks()
+      expect(FakeWebSocket.instances.length).toBe(1)
+      jest.advanceTimersByTime(2000)
+      await flushMicrotasks()
+      expect(FakeWebSocket.instances.length).toBe(2)
+      scope.abort()
+      await expect(connecting).rejects.toThrow('connection aborted')
+    } finally {
+      jest.useRealTimers()
+      scope.abort()
+      globals.restore()
+    }
+  })
+
   test('exchanges the offer directly with the canonical DH2D session', async () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { connection, pc } = await connectReady(createConfig(), video, globals)
+      const { connection, pc } = await connectReady(createConfig(), video)
       expect(connection.sessionId).toBe('canonical-avatar')
       expect(pc.transceivers).toEqual([
         { kind: 'video', direction: 'recvonly' },
@@ -234,7 +421,7 @@ describe('connectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { connection, ws } = await connectReady(createConfig(), video, globals)
+      const { connection, ws } = await connectReady(createConfig(), video)
       const messages: any[] = []
       const audio: any[] = []
       connection.on('message', m => messages.push(m))
@@ -258,7 +445,7 @@ describe('connectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { connection, ws } = await connectReady(createConfig(), video, globals)
+      const { connection, ws } = await connectReady(createConfig(), video)
       const messages: any[] = []
       connection.on('message', m => messages.push(m))
       ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-2', turn_id: 't1', text: 'hi' }))
@@ -274,7 +461,7 @@ describe('connectVoiceClient', () => {
     hooks.dh2d.createAvatarFrameRequester = () => null as any
     try {
       const video = fakeVideo()
-      const { connection } = await connectReady(createConfig(), video, globals)
+      const { connection } = await connectReady(createConfig(), video)
       expect(connection.sessionId).toBe('canonical-avatar')
       expect(typeof connection.stopPlayback).toBe('function')
       connection.stopPlayback()
@@ -288,7 +475,7 @@ describe('connectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { ws } = await connectReady(createConfig(), video, globals)
+      const { ws } = await connectReady(createConfig(), video)
       globals.setSample('A0')
       globals.emitFrame()
       globals.setSample('A0')
@@ -305,11 +492,124 @@ describe('connectVoiceClient', () => {
       globals.restore()
     }
   })
+
+  test('an explicit playback.stop lifecycle signal ends the current turn without stripe evidence', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig(), video)
+      globals.setSample('A0')
+      globals.emitFrame()
+      // DH2D idle frames are undecodable, so the A-to-idle boundary comes
+      // from the explicit protocol lifecycle signal, never from frames.
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'client-t1' }))
+      let playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+      ])
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'client-t1' }))
+      globals.setSample(null)
+      globals.emitFrame()
+      playbackFrames = ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(playbackFrames).toEqual([
+        { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+})
+
+describe('voice-client microphone input', () => {
+  test('no microphone is opened when audio input is disabled', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      await connectReady(createConfig(), video)
+      expect(FakeMicrophoneAudioContext.instances.length).toBe(0)
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('sends microphone PCM as audio.chunk control followed by binary only during capture', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig({ audioInput: true }), video)
+      globals.triggerMicrophone(new Float32Array([0, 0.5, -0.5, 1]))
+      // Without an accepted capture turn nothing is sent.
+      expect(ws.sent.length).toBe(1)
+      ws.receive(JSON.stringify({ type: 'capture.start', session_id: 'voice-1', turn_id: 't1' }))
+      globals.triggerMicrophone(new Float32Array([0, 0.5, -0.5, 1]))
+      expect(ws.sent.length).toBe(3)
+      expect(JSON.parse(ws.sent[1])).toEqual({
+        type: 'audio.chunk', direction: 'input',
+        session_id: 'voice-1', turn_id: 't1', byte_count: 8,
+      })
+      expect(ws.sent[2]).toBeInstanceOf(Uint8Array)
+      expect(Array.from(ws.sent[2] as Uint8Array)).toEqual([0, 0, 0, 0x40, 0x01, 0xc0, 0xff, 0x7f])
+      ws.receive(JSON.stringify({ type: 'capture.stop', session_id: 'voice-1', turn_id: 't1' }))
+      globals.triggerMicrophone(new Float32Array([0.5]))
+      expect(ws.sent.length).toBe(3)
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('resamples the microphone to 16 kHz PCM16', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      globals.setMicrophoneSampleRate(48000)
+      const { ws } = await connectReady(createConfig({ audioInput: true }), video)
+      ws.receive(JSON.stringify({ type: 'capture.start', session_id: 'voice-1', turn_id: 't1' }))
+      globals.triggerMicrophone(new Float32Array([0, 9, 9, 0.5, 9, 9]))
+      expect(ws.sent.length).toBe(3)
+      expect(JSON.parse(ws.sent[1])).toEqual({
+        type: 'audio.chunk', direction: 'input',
+        session_id: 'voice-1', turn_id: 't1', byte_count: 4,
+      })
+      expect(Array.from(ws.sent[2] as Uint8Array)).toEqual([0, 0, 0, 0x40])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('uses a provided MediaStream without getUserMedia and keeps its tracks alive on disconnect', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const stream = new FakeMicrophoneStream()
+      const { connection } = await connectReady(
+        createConfig({ audioInput: stream as unknown as MediaStream }), video)
+      await disconnectVoiceClient(logger, connection, { video }, abortable())
+      expect(stream.audioTracks[0].stop).not.toHaveBeenCalled()
+      expect(FakeMicrophoneAudioContext.instances[0].closed).toBe(true)
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('stops the acquired microphone stream on disconnect', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { connection } = await connectReady(createConfig({ audioInput: true }), video)
+      const stream = FakeMicrophoneStream.instances[0]
+      await disconnectVoiceClient(logger, connection, { video }, abortable())
+      expect(stream.audioTracks[0].stop).toHaveBeenCalled()
+      expect(FakeMicrophoneAudioContext.instances[0].closed).toBe(true)
+    } finally {
+      globals.restore()
+    }
+  })
 })
 
 describe('sendVoiceClientMessage', () => {
   function setup() {
     const ws = new FakeWebSocket('ws://client:8300/ws')
+    ws.open()
     const adapter = createVoiceMessageAdapter({ sessionId: 'voice-1' })
     return { ws, adapter }
   }
@@ -353,7 +653,7 @@ describe('disconnectVoiceClient', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { connection, ws, pc } = await connectReady(createConfig(), video, globals)
+      const { connection, ws, pc } = await connectReady(createConfig(), video)
       globals.setSample('A0')
       globals.emitFrame()
       await disconnectVoiceClient(logger, connection, { video }, abortable())
@@ -363,6 +663,30 @@ describe('disconnectVoiceClient', () => {
       expect(playbackFrames).toEqual([])
       expect(ws.closed).toBe(true)
       expect(pc.closed).toBe(true)
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('fences stale connection callbacks, drops queued events, and clears the video source', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { connection, ws } = await connectReady(createConfig(), video)
+      const messages: any[] = []
+      const audio: any[] = []
+      connection.on('message', m => messages.push(m))
+      connection.on('audio', a => audio.push(a))
+      expect(video.srcObject).toEqual({ id: 's' })
+      await disconnectVoiceClient(logger, connection, { video }, abortable())
+      // Late traffic from the retired connection must never reach the app.
+      ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-1', turn_id: 't1', text: 'late' }))
+      ws.receive(new ArrayBuffer(8))
+      globals.setSample('B2')
+      globals.emitFrame()
+      expect(messages).toEqual([])
+      expect(audio).toEqual([])
+      expect(video.srcObject).toBeNull()
     } finally {
       globals.restore()
     }

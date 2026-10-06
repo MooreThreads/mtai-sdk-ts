@@ -4,7 +4,6 @@ import {
   decodeTurnStripe,
   stripeLumaFromImageData,
   TURN_STRIPE_HEIGHT,
-  TURN_STRIPE_WIDTH,
 } from "./turnStripe"
 
 export type AvatarFrameRequester = {
@@ -16,7 +15,7 @@ export type AvatarFrameRequester = {
 }
 
 export type AvatarFrameSampler = {
-  /** Samples the current frame's top-left stripe region, or null when unavailable. */
+  /** Samples the current frame's top stripe rows across the full width, or null when unavailable. */
   (): ImageData | null,
 }
 
@@ -36,7 +35,11 @@ export type AvatarPlaybackOptions = {
  * validated transition confirms the previous turn's playback boundary.
  *
  * DH2D's audio/video synchronization guarantee makes a validated turn
- * transition the playback boundary; no audio-drain algorithm is used.
+ * transition the playback boundary; no audio-drain algorithm is used. The
+ * A→idle boundary — the last turn of a playback sequence returning to idle —
+ * cannot be decoded from frames (idle stripes are undecodable and invalid
+ * stripes must never emit), so it is reported only through the explicit
+ * `notifyMediaEnded` lifecycle/media-end signal.
  */
 export function createAvatarPlayback(options: AvatarPlaybackOptions) {
   const logger = options.logger
@@ -51,7 +54,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
     try {
       const image = options.sampleFrame()
       if (image != null) {
-        const { tokens } = decodeTurnStripe(stripeLumaFromImageData(image), TURN_STRIPE_WIDTH)
+        const { tokens } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
         const { endedTurnId } = tracker.observe(tokens)
         if (endedTurnId !== undefined) {
           options.onPlaybackEnded(endedTurnId)
@@ -82,13 +85,28 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       cancelFrame?.()
       cancelFrame = undefined
     },
+    /**
+     * Reports the current turn's playback end on an explicit lifecycle or
+     * media-end signal (the A→idle boundary). Idle frames are undecodable,
+     * so this boundary is never inferred from stripe decoding; invalid
+     * stripes still never emit.
+     */
+    notifyMediaEnded() {
+      const { endedTurnId } = tracker.endCurrent()
+      if (endedTurnId !== undefined) {
+        options.onPlaybackEnded(endedTurnId)
+      }
+    },
   }
 }
 
 /**
  * Creates a production `AvatarFrameSampler` for a `<video>` element playing
- * the DH2D avatar stream. Only the fixed top-left 64x8 stripe region is ever
- * copied; no per-frame canvas allocation happens after creation.
+ * the DH2D avatar stream. The sampler copies the topmost 8 rows across the
+ * full video width so every 64-pixel stripe repetition is decoded — a
+ * damaged first copy then still leaves the repeated copies as evidence.
+ * No per-frame canvas allocation happens after creation; the canvas is only
+ * re-sized when the video dimensions change.
  */
 export function createAvatarFrameSampler(video: HTMLVideoElement): AvatarFrameSampler {
   let canvas: HTMLCanvasElement | undefined
@@ -97,17 +115,24 @@ export function createAvatarFrameSampler(video: HTMLVideoElement): AvatarFrameSa
     if (typeof document === 'undefined') {
       return null
     }
-    if (!canvas) {
-      canvas = document.createElement('canvas')
-      canvas.width = TURN_STRIPE_WIDTH
-      canvas.height = TURN_STRIPE_HEIGHT
-      context = canvas.getContext('2d') ?? undefined
-    }
-    if (!context || !video.videoWidth || !video.videoHeight) {
+    const width = video.videoWidth
+    if (!width) {
       return null
     }
-    context.drawImage(video, 0, 0, TURN_STRIPE_WIDTH, TURN_STRIPE_HEIGHT, 0, 0, TURN_STRIPE_WIDTH, TURN_STRIPE_HEIGHT)
-    return context.getImageData(0, 0, TURN_STRIPE_WIDTH, TURN_STRIPE_HEIGHT)
+    if (!canvas) {
+      canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = TURN_STRIPE_HEIGHT
+      context = canvas.getContext('2d') ?? undefined
+    } else if (canvas.width !== width) {
+      canvas.width = width
+      canvas.height = TURN_STRIPE_HEIGHT
+    }
+    if (!context) {
+      return null
+    }
+    context.drawImage(video, 0, 0, width, TURN_STRIPE_HEIGHT, 0, 0, width, TURN_STRIPE_HEIGHT)
+    return context.getImageData(0, 0, width, TURN_STRIPE_HEIGHT)
   }
 }
 

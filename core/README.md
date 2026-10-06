@@ -43,6 +43,21 @@ const session = createDH2DSession(divElement, {
 })
 ```
 
+Playback boundaries: a validated stripe transition from turn A to a
+different turn B reports `playback.ended` for A. The A→idle boundary (the
+last turn of a playback sequence returning to idle) is never guessed from
+frames — DH2D idle frames are undecodable and invalid stripes must not emit
+— it is reported only on the explicit, protocol-safe `playback.stop`
+lifecycle signal from the client.
+
+Microphone input: configure `audioInput: true` (default device) or pass a
+`MediaStream`. Captured audio is delivered to the voice client as an input
+`audio.chunk` control frame immediately followed by its binary payload:
+mono PCM16 little-endian at 16 kHz, sent only while a capture turn is
+accepted. Disconnecting a voice-client session fences the retired
+connection: late websocket events, microphone batches, and stripe evidence
+are dropped, and the video element's stream is cleared.
+
 ## Integrate Digital Human
 
 ```typescript
