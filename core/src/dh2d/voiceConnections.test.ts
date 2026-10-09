@@ -499,6 +499,34 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('a typed input acknowledgement becomes talking and the ended conversation sleeps, never sleep_talking', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { connection, ws } = await connectReady(createConfig(), video)
+      const messages: any[] = []
+      connection.on('message', m => messages.push(m))
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: '你好' })
+      const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
+      ws.receive(JSON.stringify({ type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 't1' }))
+      ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-1', turn_id: 't1', text: '答' }))
+      ws.receive(JSON.stringify({ type: 'audio.chunk', session_id: 'voice-1', turn_id: 't1', subtitles: [{ source: 'main', text: '答' }] }))
+      ws.receive(JSON.stringify({ type: 'turn.end', session_id: 'voice-1', turn_id: 't1' }))
+      ws.receive(JSON.stringify({ type: 'conversation.state', session_id: 'voice-1', state: 'ended' }))
+      expect(messages).toEqual([
+        { type: 'status_change', status: 'talking' },
+        { type: 'bot_output', text: '答' },
+        { type: 'audio_text', text: '答' },
+        { type: 'message_record', message: { role: 'assistant', content: '答' } },
+        { type: 'status_change', status: 'sleeping' },
+      ])
+      const statuses = messages.filter(m => m.type === 'status_change').map(m => m.status)
+      expect(statuses).not.toContain('sleep_talking')
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('connects without playback decoding when requestVideoFrameCallback is unavailable', async () => {
     const globals = setupGlobals()
     const originalRequester = hooks.dh2d.createAvatarFrameRequester

@@ -241,6 +241,180 @@ describe('status events become status_change', () => {
   })
 })
 
+describe('typed input acknowledgements become talking', () => {
+  test('text.accepted for a current typed input becomes talking', () => {
+    const adapter = createAdapter()
+    const frame = adapter.textInput('你好') as any
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
+    }))).toEqual([
+      { type: 'status_change', status: 'talking' },
+    ])
+  })
+
+  test('text.accepted for a wakeup typed input becomes talking', () => {
+    const adapter = createAdapter()
+    const frames = adapter.wakeup('你好') as any[]
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frames[1].request_id, turn_id: 't1',
+    }))).toEqual([
+      { type: 'status_change', status: 'talking' },
+    ])
+  })
+
+  test('a duplicate text.accepted reports talking only once', () => {
+    const adapter = createAdapter()
+    const frame = adapter.textInput('你好') as any
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
+    }))).toEqual([
+      { type: 'status_change', status: 'talking' },
+    ])
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('text.accepted for an unknown request id emits no status', () => {
+    const adapter = createAdapter()
+    adapter.textInput('你好')
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: 'not-ours', turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('text.accepted without a turn id emits no status', () => {
+    const adapter = createAdapter()
+    const frame = adapter.textInput('你好') as any
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id,
+    }))).toEqual([])
+  })
+
+  test('text.accepted for a wrong session emits no status', () => {
+    const adapter = createAdapter()
+    const frame = adapter.textInput('你好') as any
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: 'other-session', request_id: frame.request_id, turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('text.accepted after a newer action retired the request emits no status', () => {
+    const adapter = createAdapter()
+    const first = adapter.textInput('first') as any
+    adapter.textInput('second')
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: first.request_id, turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('text.accepted after reset emits no status', () => {
+    const adapter = createAdapter()
+    const frame = adapter.textInput('你好') as any
+    adapter.reset()
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('text.accepted for a retired turn emits no status', () => {
+    const adapter = createAdapter()
+    const frame = adapter.textInput('你好') as any
+    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
+    }))).toEqual([])
+  })
+
+  test('asr_session start keeps the current typed request acknowledged as talking', () => {
+    const adapter = createAdapter()
+    const frame = adapter.textInput('你好') as any
+    adapter.asrSession('start')
+    expect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
+    }))).toEqual([
+      { type: 'status_change', status: 'talking' },
+    ])
+  })
+})
+
+describe('status derivation boundaries', () => {
+  test('assistant.text, audio.start, and audio.chunk invent no status_change', () => {
+    const adapter = createAdapter()
+    const messages = [
+      ...adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'hi' })),
+      ...adapter.ingest(event({ type: 'audio.start', session_id: sessionId, turn_id: 't1' })),
+      ...adapter.ingest(event({
+        type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+        subtitles: [{ source: 'main', text: 'spoken' }],
+      })),
+    ]
+    expect(messages).toEqual([
+      { type: 'bot_output', text: 'hi' },
+      { type: 'audio_text', text: 'spoken' },
+    ])
+  })
+
+  test('conversation.state text is mode metadata and emits no status_change', () => {
+    const adapter = createAdapter()
+    expect(adapter.ingest(event({
+      type: 'conversation.state', session_id: sessionId, state: 'text',
+    }))).toEqual([])
+  })
+
+  test('turn.end changes no status', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'hi' }))
+    expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([
+      { type: 'message_record', message: { role: 'assistant', content: 'hi' } },
+    ])
+  })
+
+  test('reset returns the status lifecycle to sleeping', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't1' }))
+    adapter.reset()
+    // The adapter is sleeping again: a late capture.stop from the retired
+    // connection generation never reports talking.
+    expect(adapter.ingest(event({
+      type: 'capture.stop', session_id: sessionId, turn_id: 't1',
+    }))).toEqual([])
+    expect(adapter.ingest(event({
+      type: 'conversation.state', session_id: sessionId, state: 'ended',
+    }))).toEqual([
+      { type: 'status_change', status: 'sleeping' },
+    ])
+  })
+
+  test('the full lifecycle never emits sleep_talking', () => {
+    const adapter = createAdapter()
+    const statuses: string[] = []
+    const collect = (messages: ReturnType<typeof adapter.ingest>) => {
+      for (const message of messages) {
+        if (message.type === 'status_change') {
+          statuses.push(message.status)
+        }
+      }
+    }
+    collect(adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'text' })))
+    collect(adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't1' })))
+    collect(adapter.ingest(event({ type: 'asr.final', session_id: sessionId, turn_id: 't1', text: '问' })))
+    collect(adapter.ingest(event({ type: 'capture.stop', session_id: sessionId, turn_id: 't1' })))
+    const typed = adapter.textInput('再问一句') as any
+    collect(adapter.ingest(event({
+      type: 'text.accepted', session_id: sessionId, request_id: typed.request_id, turn_id: 't2',
+    })))
+    collect(adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't2', text: '答' })))
+    collect(adapter.ingest(event({ type: 'audio.chunk', session_id: sessionId, turn_id: 't2', subtitles: [{ source: 'main', text: '答' }] })))
+    collect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't2' })))
+    collect(adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' })))
+    expect(statuses).toEqual(['listening', 'talking', 'talking', 'sleeping'])
+    expect(statuses).not.toContain('sleep_talking')
+  })
+})
+
 describe('retired-turn fencing of capture events', () => {
   function retiredTurn(adapter: ReturnType<typeof createAdapter>, turnId: string) {
     adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: turnId, text: 'x' }))
@@ -520,12 +694,14 @@ describe('sleep with text', () => {
     expect(sent).toEqual([])
   })
 
-  test('text.accepted for the sleep text emits no app-facing message', () => {
+  test('text.accepted for the sleep text becomes talking', () => {
     const adapter = createAdapter()
     const frame = (adapter.sleep('再见') as any[])[0]
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
-    }))).toEqual([])
+    }))).toEqual([
+      { type: 'status_change', status: 'talking' },
+    ])
   })
 
   test('wrong-session and unknown-request acknowledgements emit no message and arm nothing', () => {

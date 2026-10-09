@@ -65,6 +65,13 @@ function defaultRequestIdFactory() {
  * The adapter keeps per-session and per-turn state: accumulated `bot_output`
  * fragments keyed by `session_id + turn_id`, the current conversation state,
  * the accepted capture turn, and any pending wakeup stop-then-start sequence.
+ * Statuses transform strictly: `capture.start` reports `listening`, and
+ * `capture.stop` or the acknowledgement of the current generation's typed
+ * input (`text.accepted`) reports `talking`; only `conversation.state:ended`
+ * reports `sleeping`. No other event invents or changes a status —
+ * `assistant.text`/`audio.*` frames, `turn.end`, and non-ended
+ * `conversation.state` modes preserve the current active status — and
+ * `sleep_talking` is never emitted.
  * Turns are fenced at `turn.end`: duplicate terminal events never produce
  * duplicate records, and late `assistant.text` fragments, `audio.chunk`
  * subtitles, ASR events, or `capture.start`/`capture.stop` controls from a
@@ -113,6 +120,15 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const fragments = new Map<string, string[]>()
   /** Turns that already emitted their derived message_record. */
   const finalizedTurns = new Set<string>()
+  /**
+   * Request id of the current generation's typed input, if any. A
+   * `text.accepted` acknowledgement for exactly this request — while its
+   * generation is still current, its turn id is present, and the turn is
+   * not retired — reports the accepted typed turn as `talking`, once per
+   * request. Acknowledgements for other sessions, unknown or retired
+   * requests, or retired turns never report a status.
+   */
+  let typedRequestId: string | undefined = undefined
 
   const turnKey = (turnId: unknown) => `${sessionId}\u0000${turnId}`
 
@@ -144,6 +160,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     pendingMessageGeneration++
     pendingWakeupStart = false
     pendingSleepStop = undefined
+    typedRequestId = undefined
   }
 
   /** Sends a deferred frame only while its generation is still current. */
@@ -237,9 +254,10 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         if (event.session_id !== sessionId) return []
         // Correlates the accepted turn for the pending sleep-with-text
         // sequence. Internal only: no app-facing message is derived from
-        // `text.accepted`, and acknowledgements for another session, an
-        // unknown request id, or a retired generation never arm the
-        // sequence. A duplicate acknowledgement keeps the first turn.
+        // `text.accepted` for the sleep sequencing itself, and
+        // acknowledgements for another session, an unknown request id, or a
+        // retired generation never arm the sequence. A duplicate
+        // acknowledgement keeps the first turn.
         if (
           pendingSleepStop !== undefined
           && pendingSleepStop.generation === pendingMessageGeneration
@@ -249,6 +267,20 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
           && event.turn_id
         ) {
           pendingSleepStop.acceptedTurnId = event.turn_id
+        }
+        // The acknowledgement of the current typed input reports the
+        // accepted typed turn as `talking` — once per request. Wrong
+        // sessions, unknown or retired requests, missing turn ids, retired
+        // turns, and duplicates never report a status.
+        if (
+          typedRequestId !== undefined
+          && event.request_id === typedRequestId
+          && typeof event.turn_id === 'string'
+          && !!event.turn_id
+          && !isRetiredTurn(event)
+        ) {
+          typedRequestId = undefined
+          return [statusMessage('talking')]
         }
         return []
       }
@@ -285,9 +317,11 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       // Text-bearing wakeup always opens the conversation immediately:
       // `conversation.start` is idempotent while a conversation is already
       // active, so the text is never held behind a stop-then-start sequence.
+      const requestId = newRequestId()
+      typedRequestId = requestId
       return [
         { type: 'conversation.start', session_id: sessionId },
-        { type: 'text.input', session_id: sessionId, request_id: newRequestId(), text: userText },
+        { type: 'text.input', session_id: sessionId, request_id: requestId, text: userText },
       ]
     }
     if (conversationEnded && !pendingWakeupStart) {
@@ -306,6 +340,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       // deferred until the avatar played the accepted turn out (see
       // `observeAvatarTurn`).
       const requestId = newRequestId()
+      typedRequestId = requestId
       pendingSleepStop = {
         generation: pendingMessageGeneration,
         requestId,
@@ -319,7 +354,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
 
   function textInput(text: string): VoiceClientFrame {
     invalidatePendingSequence()
-    return { type: 'text.input', session_id: sessionId, request_id: newRequestId(), text }
+    const requestId = newRequestId()
+    typedRequestId = requestId
+    return { type: 'text.input', session_id: sessionId, request_id: requestId, text }
   }
 
   /**
