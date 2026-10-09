@@ -1,5 +1,4 @@
 import { DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, EventSource, UnionEqual } from "../types";
-import { DH2DPlayback } from "./playback";
 
 /**
  * Represents a connection to the server.
@@ -157,10 +156,6 @@ export type DH2DSession = EventSource<DH2DSessionEvents> & {
    * The current status of the session.
    */
   readonly status: typeof DH2DSessionStatus[number]
-  /**
-   * The current local playback analysis state for the remote audio stream.
-   */
-  readonly playback: DH2DPlayback
 
   /**
    * Sends a configuration message to the server.

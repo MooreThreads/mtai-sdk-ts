@@ -85,7 +85,7 @@ function patchSessionHooks(captureVoiceConfig: (config: ResolvedDH2DSessionConfi
     throw new Error('legacy connect must not be used in voice-client mode')
   }) as any
   hooks.dh2d.disconnectVoiceClient = (async () => undefined) as typeof disconnectVoiceClient
-  hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, _seq: any, _cb: any, scope: any) =>
+  hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, scope: any) =>
     new Promise<void>(resolve => scope.onabort(() => resolve()))) as any
   return {
     restore,
@@ -193,7 +193,7 @@ describe('createDH2DSession voice-client mode through global config', () => {
     }) as typeof connectVoiceClient
     hooks.dh2d.connect = (async () => fixture.connection) as any
     hooks.dh2d.disconnect = async () => undefined
-    hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, _seq: any, _cb: any, scope: any) =>
+    hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, scope: any) =>
       new Promise<void>(resolve => scope.onabort(() => resolve()))) as any
     try {
       const statuses: string[] = []

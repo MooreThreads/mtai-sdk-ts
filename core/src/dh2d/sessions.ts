@@ -6,8 +6,6 @@ import { hooks } from "../hooks"
 import { Abortable, Box, DHInputMessage, DHOutputMessage } from "../types"
 import { DH2DConnection, DH2DSession, DH2DSessionEvents, DH2DSessionEventTypes, DH2DSessionStatus } from "./types"
 import { DH2DSessionConfig, DH2DPlayerElements } from "./types"
-import { nextConnectionSeq } from "./audioActivity"
-import { createDH2DPlayback } from "./playback"
 import { sendVoiceClientMessage, VoiceClientConnection } from "./voiceConnections"
 
 
@@ -83,7 +81,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         configMsg = message
         await send(message)
     }
-    const playback = createDH2DPlayback()
 
     let closed = false
     let connRef: DH2DConnection | undefined = undefined
@@ -92,7 +89,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         get sessionId() { return realConfig.sessionId },
         get videoId() { return realConfig.videoId },
         get status() { return status },
-        get playback() { return playback },
         get send() { return send },
         get config() { return sendConfig },
         close: async () => {
@@ -138,7 +134,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
 
     const completed = (async () => {
         let sessionLogger = rootLogger
-        let connectionSeq = 0
         function emitStatus(_status: typeof DH2DSessionStatus[number]) {
             sessionLogger.log(`status changing from ${status} to ${_status}`)
             status = _status
@@ -159,8 +154,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             send = notConnected
             return
         }
-        connectionSeq = nextConnectionSeq(connectionSeq)
-        playback.resetAudioStatus(connectionSeq)
         const voiceClientMode = realConfig.voiceClient != null
         const connectHook = voiceClientMode ? hooks.dh2d.connectVoiceClient : hooks.dh2d.connect
         const disconnectHook: (logger: ReturnType<typeof hooks.logger.push>, connection: DH2DConnection, elements: DH2DPlayerElements, abortable: Abortable) => Promise<void> =
@@ -171,7 +164,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         try {
             if (aborted) {
                 emitStatus("closed")
-                playback.markAudioStatusUnavailable(connectionSeq)
                 send = notConnected
                 return
             }
@@ -186,7 +178,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             }
             if (aborted) {
                 emitStatus("closed")
-                playback.markAudioStatusUnavailable(connectionSeq)
                 send = notConnected
                 await withChild(rootAbortable, (_) => disconnectHook(sessionLogger, connection, player, _))
                 return
@@ -198,8 +189,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                     connection,
                     player,
                     realConfig,
-                    connectionSeq,
-                    playback.setAudioStatus,
                     _,
                 ))
                 emitStatus("reconnecting")
@@ -207,19 +196,15 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 await withChild(rootAbortable, _ => disconnectHook(sessionLogger, connection, player, _))
                 if (aborted) {
                     emitStatus("closed")
-                    playback.markAudioStatusUnavailable(connectionSeq)
                     send = notConnected
                     return
                 }
                 if (realConfig.voiceClient == null && !await isLoggedIn()) {
                     rootLogger.error("unauthorized")
                     emitStatus("failed")
-                    playback.markAudioStatusUnavailable(connectionSeq)
                     send = notConnected
                     return
                 }
-                connectionSeq = nextConnectionSeq(connectionSeq)
-                playback.resetAudioStatus(connectionSeq)
                 connection = await withChild(rootAbortable, _ => connectHook(rootLogger, player, realConfig, _))
                 realConfig.sessionId = connection.sessionId
                 sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
@@ -233,7 +218,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 drainMessage(connection)
             }
         } finally {
-            playback.markAudioStatusUnavailable(connectionSeq)
             emitStatus("closed")
             send = notConnected
             disconnectHook(sessionLogger, connection, player, abortable())

@@ -247,7 +247,7 @@ describe('createDH2DSession voice-client mode', () => {
       voiceDisconnectCalls++
       fixture.stopPlayback()
     }) as typeof disconnectVoiceClient
-    hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, _seq: any, _cb: any, scope: any) =>
+    hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, scope: any) =>
       new Promise<void>(resolve => scope.onabort(() => resolve()))) as any
     try {
       const statuses: string[] = []
@@ -299,7 +299,7 @@ describe('createDH2DSession voice-client mode', () => {
       return fixture.connection
     }) as any
     hooks.dh2d.disconnect = async () => undefined
-    hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, _seq: any, _cb: any, scope: any) =>
+    hooks.dh2d.untilFailed = ((_logger: any, _connection: any, _elements: any, _config: any, scope: any) =>
       new Promise<void>(resolve => scope.onabort(() => resolve()))) as any
     try {
       const statuses: string[] = []
@@ -317,6 +317,39 @@ describe('createDH2DSession voice-client mode', () => {
       await session.close()
     } finally {
       restoreHooks()
+      restoreFetch()
+    }
+  })
+})
+
+describe('createDH2DSession audio monitoring removal', () => {
+  test('exposes no playback audio status and passes no audio-status wiring to untilFailed', async () => {
+    const restoreFetch = patchFetchLoggedIn()
+    const { restore } = patchHooks()
+    const fixture = voiceConnectionFixture(false)
+    const untilFailedCalls: any[][] = []
+    hooks.dh2d.getOrCreatePlayer = () => ({ video: {} } as any)
+    hooks.dh2d.beforeConnectingSession = async () => undefined
+    hooks.dh2d.connect = (async () => fixture.connection) as any
+    hooks.dh2d.disconnect = async () => undefined
+    hooks.dh2d.untilFailed = ((...args: any[]) => {
+      untilFailedCalls.push(args)
+      return new Promise<void>(resolve => args[4].onabort(() => resolve()))
+    }) as any
+    try {
+      const statuses: string[] = []
+      const session = createDH2DSession({} as HTMLElement, { videoId: 'liruyun' })
+      session.on('statuschange', status => statuses.push(status))
+      await waitUntil(() => untilFailedCalls.length > 0, 'untilFailed invocation')
+      expect((session as any).playback).toBeUndefined()
+      expect(untilFailedCalls[0]).toHaveLength(5)
+      for (const arg of untilFailedCalls[0]) {
+        expect(typeof arg).not.toBe('function')
+      }
+      await session.close()
+      expect(statuses[statuses.length - 1]).toBe('closed')
+    } finally {
+      restore()
       restoreFetch()
     }
   })

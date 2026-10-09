@@ -1,16 +1,38 @@
-import { useState, useRef, useEffect, useReducer } from 'react'
-import type { DH2DSession, ComponentStatus, Avatar, Voice, DH2DPlaybackAudioStatus } from 'mtai'
+import { useState, useRef, useEffect, useReducer, useCallback } from 'react'
+import type { DH2DSession, ComponentStatus, Avatar, Voice } from 'mtai'
 import { getShareCode, updateComponent, cancelUpdateComponent, setShareCode, setConfig, getLlmModels, getTtsVoices, getAvatars } from 'mtai'
 import { DH2D } from './dh2d'
 import { createManualInputMessage, type ManualInputType } from './manualInput'
 import { createInitialBotTextDisplay, reduceBotTextDisplay } from './botTextWiring'
-import { advancePlaybackAnalysis, createInitialPlaybackAnalysis } from './playbackAnalysis'
+import { NA, fetchLatestSpeculation } from './telemetryMetrics'
+import type { LatestSpeculation } from './telemetryMetrics'
 import './App.css'
 
+// Deployed voice-client frontend: derive the cube hostname from the browser
+// location so the same build works from any address the browser used, and
+// never fall back to a workstation/pkg endpoint. 8782 is the local voice
+// client (wss for the interaction websocket); 8784 is the cube-local HTTPS
+// reverse proxy in front of the DH2D service, so both avatar HTTP operations
+// (discovery + WebRTC offer exchange) and the interaction endpoint stay
+// same-origin-scheme HTTPS and avoid mixed-content blocking.
+const deployHost = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : '127.0.0.1'
 setConfig({
-  endpoint: 'http://localhost:32101',
-  voiceClient: { interaction_endpoint: 'https://127.0.0.1:8782', dh2d_endpoint: 'http://192.168.10.23:32107' },
+  endpoint: `https://${deployHost}:8784`,
+  voiceClient: {
+    interaction_endpoint: `https://${deployHost}:8782`,
+    dh2d_endpoint: `https://${deployHost}:8784`,
+  },
 })
+// Read-only turn telemetry lives on the remote production MVP voice server
+// (aibook-api.mthreads.com:8795) — NOT on the cube host's 8782 client or
+// 8784 DH2D proxy. The origin is explicit per deployment via
+// VITE_VOICE_TELEMETRY_ORIGIN; the fallback is the actual production
+// telemetry API origin. Telemetry is unauthenticated diagnostics; the fetch
+// sends no credentials or secrets, and the server allow-lists this
+// frontend's origin explicitly. Fetched on mount and on demand (Refresh
+// button); no polling.
+const TELEMETRY_API_ORIGIN: string = import.meta.env.VITE_VOICE_TELEMETRY_ORIGIN || 'https://aibook-api.mthreads.com:8795'
+const TELEMETRY_TURNS_URL = `${TELEMETRY_API_ORIGIN}/telemetry/turns?limit=10`
 interface ModalProps {
   isOpen: boolean;
   title: string;
@@ -438,15 +460,22 @@ export default function App() {
   const [avatars, setAvatars] = useState<Avatar[]>([])
   const [inputType, setInputType] = useState<ManualInputType>('wakeup')
   const [inputText, setInputText] = useState('')
-  const [audioStatus, setAudioStatus] = useState<DH2DPlaybackAudioStatus>({
-    state: 'pending',
-    rms: 0,
-    audioActive: false,
-    silentForMs: 0,
-    connectionSeq: 0,
-    activitySeq: 0,
-  })
-  const [playbackAnalysis, setPlaybackAnalysis] = useState(createInitialPlaybackAnalysis)
+  const [speculation, setSpeculation] = useState<LatestSpeculation | null>(null)
+  const speculationRequestRef = useRef(0)
+  // Plain HTTP refresh of the telemetry metric (no SDK lifecycle, no
+  // polling, no retry): latest-wins, so a slower earlier refresh can never
+  // override a newer one, and results after unmount are dropped. A null
+  // result (fetch/CORS/network/payload failure) renders as N/A.
+  const refreshSpeculation = useCallback(() => {
+    const request = ++speculationRequestRef.current
+    void fetchLatestSpeculation(TELEMETRY_TURNS_URL).then((latest) => {
+      if (request === speculationRequestRef.current) setSpeculation(latest)
+    })
+  }, [])
+  useEffect(() => {
+    refreshSpeculation()
+    return () => { speculationRequestRef.current += 1 }
+  }, [refreshSpeculation])
 
   // Component management belongs to the legacy localhost:32101 service and
   // is not part of this voice-client/DH2D demo.
@@ -455,13 +484,6 @@ export default function App() {
     if (status != "talking") dispatchText({ kind: "status_change", status })
     if (status != "listening") setAsrText("")
   }, [status])
-  useEffect(() => {
-    setPlaybackAnalysis((current) => advancePlaybackAnalysis(current, {
-      status,
-      audioStatus,
-      nowMs: Date.now(),
-    }))
-  }, [audioStatus, status])
 
   const fetchLlmModels = async () => {
     const models = await getLlmModels();
@@ -513,7 +535,6 @@ export default function App() {
     await sessionRef.current.send(createManualInputMessage(inputType, inputText))
     setInputText('')
   }
-  const audioLevel = Math.min(audioStatus.rms / 0.12, 1)
 
   return (
     <div style={{
@@ -557,7 +578,6 @@ export default function App() {
         onSubtitleOutput={text => dispatchText({ kind: "audio_text", text })}
         onFinalAssistantText={content => dispatchText({ kind: "assistant_message_record", content })}
         onStatusChanged={setStatus}
-        onAudioStatusChanged={setAudioStatus}
       />}
       <div style={{
         backgroundColor: "white", 
@@ -595,35 +615,28 @@ export default function App() {
           <div><strong>Subtitle:</strong> {textDisplay.subtitleText}</div>
           <div><strong>ASR Text:</strong> {asrText}</div>
         </div>
-        <div style={{ marginTop: "15px", textAlign: "left" }}>
-          <div style={{ fontWeight: "600", marginBottom: "6px" }}>Playback Audio</div>
-          <div style={{
-            width: "240px",
-            height: "10px",
-            borderRadius: "999px",
-            backgroundColor: "#e9ecef",
-            overflow: "hidden",
-            marginBottom: "8px"
-          }}>
-            <div style={{
-              width: `${audioLevel * 100}%`,
-              height: "100%",
-              backgroundColor: audioStatus.audioActive ? "#20c997" : "#adb5bd",
-              transition: "width 120ms linear, background-color 120ms linear"
-            }} />
+        <div style={{ marginTop: '15px', textAlign: 'left' }}>
+          <div style={{ fontWeight: '600', marginBottom: '6px' }}>
+            Speculation head-start — latest completed server turn
           </div>
-          <div><strong>Monitor:</strong> {audioStatus.state}</div>
-          <div><strong>RMS:</strong> {audioStatus.rms.toFixed(4)}</div>
-          <div><strong>Audio Active:</strong> {String(audioStatus.audioActive)}</div>
-          <div><strong>Silent For:</strong> {audioStatus.silentForMs} ms</div>
-          <div>
-            <strong>Silence400→Listening:</strong>{' '}
-            {playbackAnalysis.latestListeningError !== null
-              ? `error: ${playbackAnalysis.latestListeningError}`
-              : playbackAnalysis.latestListeningDelayMs === null
-                ? 'pending'
-                : `${playbackAnalysis.latestListeningDelayMs} ms`}
-          </div>
+          <div><strong>Value:</strong> {speculation?.valueText ?? NA}</div>
+          <div><strong>Session:</strong> {speculation?.sessionId ?? NA}</div>
+          <div><strong>Turn:</strong> {speculation?.turnId ?? NA}</div>
+          <button
+            onClick={refreshSpeculation}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: '#0d6efd',
+              color: 'white',
+              border: 'none',
+              borderRadius: '5px',
+              cursor: 'pointer',
+              fontWeight: '500',
+              marginTop: '8px'
+            }}
+          >
+            Refresh
+          </button>
         </div>
         <form
           onSubmit={(event) => {
