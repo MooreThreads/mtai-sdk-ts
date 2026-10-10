@@ -149,6 +149,36 @@ describe('audio.chunk subtitles become audio_text in segment order', () => {
   })
 })
 
+describe('zero-byte JSON-only segment-end markers (audio.chunk segment_end)', () => {
+  test('marker metadata emits subtitles only and invents no status_change', () => {
+    const adapter = createAdapter()
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      byte_count: 4, output_byte_offset: 4, output_byte_count: 0,
+      wire_payload_byte_count: 0, segment_end: true,
+      subtitles: [{ source: 'narrator', text: '\u6211\u5148\u67e5\u4e00\u4e0b\u3002' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '\u6211\u5148\u67e5\u4e00\u4e0b\u3002' },
+    ])
+  })
+
+  test('segment_end never finalizes the turn or changes typed status sequencing', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'hi' }))
+    adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      byte_count: 4, output_byte_offset: 4, output_byte_count: 0,
+      wire_payload_byte_count: 0, segment_end: true,
+    }))
+    // The turn is still live: turn.end remains the single terminal that
+    // derives the message_record.
+    expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([
+      { type: 'message_record', message: { role: 'assistant', content: 'hi' } },
+    ])
+    expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([])
+  })
+})
+
 describe('turn.end derives message_record from accumulated bot_output', () => {
   test('joined fragments become one assistant message_record', () => {
     const adapter = createAdapter()
