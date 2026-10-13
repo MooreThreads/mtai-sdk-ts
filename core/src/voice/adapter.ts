@@ -120,6 +120,8 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const fragments = new Map<string, string[]>()
   /** Turns that already emitted their derived message_record. */
   const finalizedTurns = new Set<string>()
+  /** Accumulated spoken subtitle text per live turn for Electron's replacement UI. */
+  const audioTextByTurn = new Map<string, string>()
   /**
    * Request id of the current generation's typed input, if any. A
    * `text.accepted` acknowledgement for exactly this request — while its
@@ -207,7 +209,17 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         return subtitles
           .filter(segment => segment && (segment.source === 'main' || segment.source === 'narrator')
             && typeof segment.text === 'string')
-          .map(segment => ({ type: 'audio_text', text: segment.text }) as DHOutputMessage)
+          .map(segment => {
+            // Electron replaces its subtitle text on each callback, so expose
+            // the complete spoken prefix rather than only this chunk's token.
+            if (typeof event.turn_id !== 'string' || !event.turn_id) {
+              return { type: 'audio_text', text: segment.text } as DHOutputMessage
+            }
+            const key = turnKey(event.turn_id)
+            const accumulated = `${audioTextByTurn.get(key) || ''}${segment.text}`
+            audioTextByTurn.set(key, accumulated)
+            return { type: 'audio_text', text: accumulated } as DHOutputMessage
+          })
       }
       case 'turn.end': {
         if (event.session_id !== sessionId || typeof event.turn_id !== 'string') return []
@@ -218,6 +230,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         finalizedTurns.add(key)
         const joined = (fragments.get(key) || []).join('')
         fragments.delete(key)
+        audioTextByTurn.delete(key)
         if (!joined) {
           return []
         }
@@ -429,6 +442,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     conversationEnded = true
     captureTurnId = undefined
     fragments.clear()
+    audioTextByTurn.clear()
     finalizedTurns.clear()
   }
 

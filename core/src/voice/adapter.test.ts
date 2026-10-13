@@ -99,7 +99,7 @@ describe('assistant.text becomes bot_output and accumulates per turn', () => {
 })
 
 describe('audio.chunk subtitles become audio_text in segment order', () => {
-  test('main and narrator segments are emitted in order', () => {
+  test('main and narrator segments emit accumulated text for Electron replacement UI', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
       type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
@@ -109,7 +109,13 @@ describe('audio.chunk subtitles become audio_text in segment order', () => {
       ],
     }))).toEqual([
       { type: 'audio_text', text: '回答内容' },
-      { type: 'audio_text', text: '我先查一下。' },
+      { type: 'audio_text', text: '回答内容我先查一下。' },
+    ])
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '继续。' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '回答内容我先查一下。继续。' },
     ])
   })
 
@@ -145,6 +151,66 @@ describe('audio.chunk subtitles become audio_text in segment order', () => {
       subtitles: [{ source: 'main', text: 'hi' }],
     }))).toEqual([
       { type: 'audio_text', text: 'hi' },
+    ])
+  })
+})
+
+describe('accumulated audio_text is fenced by session, turn, and lifecycle', () => {
+  test('subtitles from another session neither emit nor pollute this session turn', () => {
+    const adapter = createAdapter()
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: 'voice-session-other', turn_id: 't1',
+      subtitles: [{ source: 'main', text: '别的会话' }],
+    }))).toEqual([])
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '本会话' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '本会话' },
+    ])
+  })
+
+  test('turn.end clears accumulated spoken text so late chunks and fresh turns stay isolated', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '第一句' }],
+    }))
+    adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '迟到的' }],
+    }))).toEqual([])
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't2',
+      subtitles: [{ source: 'narrator', text: '新回合' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '新回合' },
+    ])
+  })
+
+  test('cancellation reset clears accumulated spoken text across all live turns', () => {
+    const adapter = createAdapter()
+    adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '甲' }],
+    }))
+    adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't2',
+      subtitles: [{ source: 'narrator', text: '乙' }],
+    }))
+    adapter.reset()
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't2',
+      subtitles: [{ source: 'main', text: '丙' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '丙' },
+    ])
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '丁' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '丁' },
     ])
   })
 })
@@ -217,10 +283,20 @@ describe('turn.end derives message_record from accumulated bot_output', () => {
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([])
   })
 
-  test('reset drops fragments from the previous connection generation', () => {
+  test('reset drops fragments and spoken text from the previous connection generation', () => {
     const adapter = createAdapter()
     adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'old' }))
+    adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '旧字幕' }],
+    }))
     adapter.reset()
+    expect(adapter.ingest(event({
+      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      subtitles: [{ source: 'main', text: '新字幕' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '新字幕' },
+    ])
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([])
   })
 })
