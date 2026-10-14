@@ -133,6 +133,41 @@ describe('createChannelBindingWorkflow', () => {
     await flush()
   })
 
+  test('aborts the superseded operation monitor when a new operation starts', async () => {
+    const oldGet = deferred<Response>()
+    const newGet = deferred<Response>()
+    const requests: { url: string, init?: RequestInit }[] = []
+    let postCount = 0
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        postCount += 1
+        return response(snapshot({ operation_id: `binding-${postCount}`, revision: 1 }))
+      }
+      if (url.includes('/bindings/binding-1')) return oldGet.promise
+      return newGet.promise
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+    })
+
+    await workflow.handleToolCall(toolCall())
+    await workflow.handleToolCall(toolCall())
+
+    const oldRequest = requests.find(request => request.url.includes('/bindings/binding-1'))
+    const newRequest = requests.find(request => request.url.includes('/bindings/binding-2'))
+    expect(oldRequest?.init?.signal).toBeDefined()
+    expect((oldRequest?.init?.signal as AbortSignal).aborted).toBe(true)
+    expect((newRequest?.init?.signal as AbortSignal).aborted).toBe(false)
+
+    oldGet.resolve(response(snapshot({ operation_id: 'binding-1', state: 'bound', revision: 2 })))
+    newGet.resolve(response(snapshot({ operation_id: 'binding-2', state: 'bound', revision: 2 })))
+    await flush()
+    workflow.dispose()
+  })
+
   test('continues polling when a new initiation replaces an older operation', async () => {
     const firstGet = deferred<Response>()
     const secondGet = deferred<Response>()
@@ -237,6 +272,40 @@ describe('createChannelBindingWorkflow', () => {
     boundWait.resolve(response(bound))
     await boundSeen.promise
     expect(seen[seen.length - 1]).toEqual(bound)
+  })
+
+  test('ignores a verification result after its operation is replaced', async () => {
+    const verificationResponse = deferred<Response>()
+    const oldMonitor = deferred<Response>()
+    let postCount = 0
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        postCount += 1
+        return response(snapshot({
+          operation_id: `binding-${postCount}`,
+          state: postCount === 1 ? 'verification' : 'bound',
+          revision: 1,
+          verification: postCount === 1 ? { required: true, retry: false } : null,
+        }))
+      }
+      if (init?.method === 'POST' && url.endsWith('/verify')) return verificationResponse.promise
+      return oldMonitor.promise
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+    })
+
+    await workflow.handleToolCall(toolCall())
+    const verifying = workflow.verify('123456')
+    await workflow.handleToolCall(toolCall())
+    verificationResponse.resolve(response({ accepted: true }))
+    oldMonitor.resolve(response(snapshot({ operation_id: 'binding-1', state: 'bound', revision: 2 })))
+
+    await expect(verifying).resolves.toEqual({ accepted: false })
+    await flush()
+    workflow.dispose()
   })
 
   test('disposes transport and fences callbacks from a retired workflow', async () => {

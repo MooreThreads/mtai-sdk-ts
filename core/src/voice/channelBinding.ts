@@ -189,10 +189,12 @@ export function createChannelBindingWorkflow(
 
   let current: ChannelBindingSnapshot | undefined
   let operationId: string | undefined
+  let operationGeneration = 0
   let initiation: Promise<ChannelBindingSnapshot> | undefined
   const monitors = new Map<string, Promise<void>>()
+  const operationControllers = new Map<string, AbortController>()
   let disposed = false
-  const abortController = typeof AbortController === 'function' ? new AbortController() : undefined
+  const workflowAbortController = typeof AbortController === 'function' ? new AbortController() : undefined
 
   const reportSnapshot = (snapshot: ChannelBindingSnapshot) => {
     if (disposed) return
@@ -200,7 +202,20 @@ export function createChannelBindingWorkflow(
       || current === undefined
       || snapshot.revision > current.revision
     if (!changed) return
-    operationId = snapshot.operation_id
+    if (operationId !== snapshot.operation_id) {
+      if (operationId !== undefined) {
+        operationControllers.get(operationId)?.abort()
+        operationControllers.delete(operationId)
+        monitors.delete(operationId)
+      }
+      operationId = snapshot.operation_id
+      operationGeneration += 1
+      if (typeof AbortController === 'function') {
+        operationControllers.set(snapshot.operation_id, new AbortController())
+      }
+    } else if (typeof AbortController === 'function' && !operationControllers.has(snapshot.operation_id)) {
+      operationControllers.set(snapshot.operation_id, new AbortController())
+    }
     current = cloneSnapshot(snapshot)
     try {
       options.onSnapshot?.(cloneSnapshot(snapshot))
@@ -218,13 +233,19 @@ export function createChannelBindingWorkflow(
     }
   }
 
-  const requestJson = async (path: string | URL, init?: RequestInit): Promise<unknown> => {
+  const requestJson = async (
+    path: string | URL,
+    init?: RequestInit,
+    signal?: AbortSignal,
+  ): Promise<unknown> => {
     if (disposed) throw safeError('binding_unavailable')
     let response: Response
     try {
+      const requestSignal = signal ?? workflowAbortController?.signal
+      const requestInit = requestSignal ? { ...init, signal: requestSignal } : init
       response = await fetchImpl(
         path instanceof URL ? path : endpointPath(base, path),
-        { ...init, ...(abortController ? { signal: abortController.signal } : {}) },
+        requestInit,
       )
     } catch {
       throw safeError('binding_unavailable')
@@ -242,18 +263,31 @@ export function createChannelBindingWorkflow(
     }
   }
 
-  const getSnapshot = async (id: string, afterRevision?: number): Promise<ChannelBindingSnapshot> => {
+  const getSnapshot = async (
+    id: string,
+    afterRevision?: number,
+    signal?: AbortSignal,
+  ): Promise<ChannelBindingSnapshot> => {
     const url = new URL(endpointPath(base, `bindings/${encodeURIComponent(id)}`))
     if (afterRevision !== undefined) url.searchParams.set('after_revision', String(afterRevision))
-    return parseSnapshot(await requestJson(url))
+    return parseSnapshot(await requestJson(url, undefined, signal))
   }
 
-  const monitorOperation = async (id: string, revision: number): Promise<void> => {
+  const monitorOperation = async (
+    id: string,
+    revision: number,
+    generation: number,
+    signal?: AbortSignal,
+  ): Promise<void> => {
     let after = revision
     try {
-      while (!disposed && operationId === id && current !== undefined && !isTerminal(current.state)) {
-        const next = await getSnapshot(id, after)
-        if (operationId !== id) return
+      while (!disposed
+          && operationId === id
+          && operationGeneration === generation
+          && current !== undefined
+          && !isTerminal(current.state)) {
+        const next = await getSnapshot(id, after, signal)
+        if (operationId !== id || operationGeneration !== generation) return
         if (next.revision <= after && !isTerminal(next.state)) {
           throw safeError('binding_unavailable')
         }
@@ -262,7 +296,7 @@ export function createChannelBindingWorkflow(
         if (isTerminal(next.state)) return
       }
     } catch (error) {
-      if (operationId !== id) return
+      if (disposed || operationId !== id || operationGeneration !== generation) return
       const safe = isRecord(error) && typeof error.code === 'string'
         && typeof error.message === 'string'
         ? { code: error.code, message: error.message }
@@ -274,7 +308,8 @@ export function createChannelBindingWorkflow(
   const ensureMonitoring = (snapshot: ChannelBindingSnapshot) => {
     if (disposed || isTerminal(snapshot.state) || monitors.has(snapshot.operation_id)) return
     const id = snapshot.operation_id
-    const pending = monitorOperation(id, snapshot.revision)
+    const controller = operationControllers.get(id)
+    const pending = monitorOperation(id, snapshot.revision, operationGeneration, controller?.signal)
     const tracked = pending.finally(() => {
       if (monitors.get(id) === tracked) monitors.delete(id)
     })
@@ -339,21 +374,31 @@ export function createChannelBindingWorkflow(
           || current?.state !== 'verification') {
         return { accepted: false }
       }
+      const id = operationId
+      const generation = operationGeneration
+      const signal = operationControllers.get(id)?.signal
       try {
         const value = await requestJson(
-          `bindings/${encodeURIComponent(operationId)}/verify`,
+          `bindings/${encodeURIComponent(id)}/verify`,
           {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ code: code.trim() }),
           },
+          signal,
         )
+        if (disposed || operationId !== id || operationGeneration !== generation) {
+          return { accepted: false }
+        }
         if (!isRecord(value) || typeof value.accepted !== 'boolean') {
           reportError(safeError('binding_unavailable'))
           return { accepted: false }
         }
         return { accepted: value.accepted }
       } catch (error) {
+        if (disposed || operationId !== id || operationGeneration !== generation) {
+          return { accepted: false }
+        }
         const safe = isRecord(error) && typeof error.code === 'string'
           && typeof error.message === 'string'
           ? { code: error.code, message: error.message }
@@ -368,7 +413,9 @@ export function createChannelBindingWorkflow(
       disposed = true
       operationId = undefined
       monitors.clear()
-      abortController?.abort()
+      workflowAbortController?.abort()
+      for (const controller of operationControllers.values()) controller.abort()
+      operationControllers.clear()
     },
     get snapshot() {
       return current ? cloneSnapshot(current) : undefined

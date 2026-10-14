@@ -54,7 +54,7 @@ export type DH2DVoiceClientConfig = {
    * global legacy `Config.endpoint`; a partial runtime config that omits
    * it falls back to that legacy endpoint.
    */
-  dh2d_endpoint: string,
+  dh2d_endpoint?: string,
   /**
    * Optional voice session identity; generated when omitted.
    */

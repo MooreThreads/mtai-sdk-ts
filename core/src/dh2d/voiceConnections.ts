@@ -88,6 +88,25 @@ const FRONTEND_TOOL_FAILURE: VoiceClientToolResult = {
   error: { code: 'frontend_tool_failed', message: 'frontend tool failed' },
 }
 
+const SAFE_FRONTEND_ERROR_MESSAGES: Record<string, readonly string[]> = {
+  invalid_arguments: ['invalid binding arguments', 'channel must be "wechat"'],
+  invalid_request: ['WeChat binding request was invalid'],
+  unknown_operation: ['WeChat binding operation is no longer available'],
+  binding_unavailable: ['WeChat binding service unavailable'],
+  frontend_tool_failed: ['frontend tool failed'],
+}
+
+function sanitizeFrontendToolResult(value: unknown): VoiceClientToolResult {
+  if (!isFrontendToolResult(value)) return FRONTEND_TOOL_FAILURE
+  if (value.ok) return { ok: true, result: value.result }
+
+  const code = value.error.code
+  const messages = SAFE_FRONTEND_ERROR_MESSAGES[code]
+  if (!messages) return FRONTEND_TOOL_FAILURE
+  const message = messages.includes(value.error.message) ? value.error.message : messages[0]
+  return { ok: false, error: { code, message } }
+}
+
 /**
  * Builds the frontend-to-client websocket URL: the avatar mode and selected
  * `video_id` are connection-query parameters, never protocol messages.
@@ -257,11 +276,10 @@ async function connectOnce(
     if (result === undefined || !running || disposed) return
     let encoded: string
     try {
-      const resultFrame = isFrontendToolResult(result)
-        ? result.ok
-          ? { ok: true as const, result: result.result }
-          : { ok: false as const, error: result.error }
-        : FRONTEND_TOOL_FAILURE
+      const normalizedResult = sanitizeFrontendToolResult(result)
+      const resultFrame = normalizedResult.ok
+        ? { ok: true as const, result: normalizedResult.result }
+        : { ok: false as const, error: normalizedResult.error }
       const serialized = JSON.stringify({
         type: 'tool.result',
         session_id: call.session_id,

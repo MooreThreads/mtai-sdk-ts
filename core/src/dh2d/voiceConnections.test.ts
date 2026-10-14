@@ -598,6 +598,74 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('sanitizes custom frontend error messages before sending them', async () => {
+    const globals = setupGlobals()
+    const handler = jest.fn(async () => ({
+      ok: false as const,
+      error: { code: 'invalid_arguments', message: 'secret-token-should-not-cross-the-client-boundary' },
+    }))
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig({
+        voiceClient: { frontendToolHandler: handler },
+      }), video)
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-7',
+        call_id: 'call-7',
+        name: 'some_frontend_tool',
+        arguments: {},
+      }))
+      await flushMicrotasks()
+      expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
+        type: 'tool.result',
+        session_id: 'voice-1',
+        turn_id: 'turn-7',
+        call_id: 'call-7',
+        ok: false,
+        error: { code: 'invalid_arguments', message: 'invalid binding arguments' },
+      })
+      expect(ws.sent.join('')).not.toContain('secret-token-should-not-cross')
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('does not send a result from a generic frontend handler after disposal', async () => {
+    const globals = setupGlobals()
+    const handlerReady = deferred<void>()
+    const result = deferred<any>()
+    const handler = jest.fn(async () => {
+      handlerReady.resolve()
+      return result.promise
+    })
+    try {
+      const video = fakeVideo()
+      const { connection, ws } = await connectReady(createConfig({
+        voiceClient: { frontendToolHandler: handler },
+      }), video)
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-8',
+        call_id: 'call-8',
+        name: 'some_frontend_tool',
+        arguments: {},
+      }))
+      await handlerReady.promise
+      connection.dispose()
+      result.resolve({ ok: true, result: { status: 'late' } })
+      await flushMicrotasks()
+      expect(ws.sent.map((data: string) => JSON.parse(data))).not.toContainEqual(expect.objectContaining({
+        type: 'tool.result',
+        call_id: 'call-8',
+      }))
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('replaces a malformed falsy frontend result with a safe correlated error', async () => {
     const globals = setupGlobals()
     const handler = jest.fn(async () => null as any)
