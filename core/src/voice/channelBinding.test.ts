@@ -106,6 +106,33 @@ describe('createChannelBindingWorkflow', () => {
     ])
   })
 
+  test('reuses one monitor when repeated initiation returns the same operation', async () => {
+    const pending = deferred<Response>()
+    let getCount = 0
+    let postCount = 0
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        postCount += 1
+        return response(snapshot({ operation_id: 'binding-1', revision: postCount }))
+      }
+      getCount += 1
+      return pending.promise
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+    })
+
+    await workflow.handleToolCall(toolCall())
+    await workflow.handleToolCall(toolCall())
+    expect(getCount).toBe(1)
+
+    workflow.dispose()
+    pending.resolve(response(snapshot({ operation_id: 'binding-1', state: 'bound', revision: 3 })))
+    await flush()
+  })
+
   test('continues polling when a new initiation replaces an older operation', async () => {
     const firstGet = deferred<Response>()
     const secondGet = deferred<Response>()
