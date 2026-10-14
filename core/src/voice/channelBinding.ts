@@ -112,6 +112,8 @@ function parseSnapshot(value: unknown): ChannelBindingSnapshot {
   if (!isRecord(value)
       || typeof value.operation_id !== 'string'
       || !value.operation_id
+      || value.operation_id === '.'
+      || value.operation_id === '..'
       || typeof value.state !== 'string'
       || !BINDING_STATES.has(value.state)
       || !Number.isInteger(value.revision)

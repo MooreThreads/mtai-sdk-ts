@@ -393,6 +393,25 @@ describe('createChannelBindingWorkflow', () => {
     expect(errors).toEqual([])
   })
 
+  test('rejects dot-segment operation ids before constructing polling paths', async () => {
+    const requests: string[] = []
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(String(input))
+        if (init?.method === 'POST') return response(snapshot({ operation_id: '..' }))
+        return response(snapshot({ operation_id: '..', state: 'bound', revision: 2 }))
+      },
+    })
+
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: false,
+      error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
+    })
+    expect(requests).toEqual(['http://127.0.0.1:8781/bindings'])
+    workflow.dispose()
+  })
+
   test('rejects malformed channel arguments and reports fetch failure safely', async () => {
     const fetchImpl = jest.fn(async () => {
       throw new Error('credential-bearing transport failure')
