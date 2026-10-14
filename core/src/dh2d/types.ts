@@ -1,4 +1,5 @@
 import { DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, EventSource, UnionEqual } from "../types";
+import type { ChannelBindingCallbacks, VoiceClientToolHandler } from "../voice/channelBinding";
 
 /**
  * Represents a connection to the server.
@@ -58,6 +59,20 @@ export type DH2DVoiceClientConfig = {
    * Optional voice session identity; generated when omitted.
    */
   sessionId?: string,
+  /**
+   * Explicit local WeChat binding plugin endpoint. There is no SDK default or
+   * discovery path; the consuming application supplies this value.
+   */
+  wechatPluginEndpoint?: string,
+  /**
+   * UI callbacks and the workflow handle for the configured binding endpoint.
+   */
+  wechatBinding?: ChannelBindingCallbacks,
+  /**
+   * Optional generic frontend tool handler. When omitted, a configured
+   * `wechatPluginEndpoint` installs the built-in WeChat binding handler.
+   */
+  frontendToolHandler?: VoiceClientToolHandler,
 }
 
 /**

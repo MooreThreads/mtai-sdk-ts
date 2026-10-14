@@ -261,6 +261,16 @@ const flushMicrotasks = async (times = 8) => {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 async function connectReady(config: any, video: any) {
   const scope = abortable()
   const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, config, child))
@@ -494,6 +504,146 @@ describe('connectVoiceClient', () => {
       connection.on('message', m => messages.push(m))
       ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-2', turn_id: 't1', text: 'hi' }))
       expect(messages).toEqual([])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('routes a raw frontend tool call to the configured handler and sends its normal result', async () => {
+    const globals = setupGlobals()
+    const called = deferred<void>()
+    const result = deferred<any>()
+    const handler = jest.fn(async (call: any) => {
+      expect(call).toEqual({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-1',
+        call_id: 'call-1',
+        name: 'initiate_channel_binding',
+        arguments: { channel: 'wechat' },
+      })
+      called.resolve()
+      return result.promise
+    })
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig({
+        voiceClient: { frontendToolHandler: handler },
+      }), video)
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-1',
+        call_id: 'call-1',
+        name: 'initiate_channel_binding',
+        arguments: { channel: 'wechat' },
+      }))
+      await called.promise
+      expect(handler).toHaveBeenCalledTimes(1)
+      result.resolve({ ok: true, result: { status: 'initiated' } })
+      await flushMicrotasks()
+      expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
+        type: 'tool.result',
+        session_id: 'voice-1',
+        turn_id: 'turn-1',
+        call_id: 'call-1',
+        ok: true,
+        result: { status: 'initiated' },
+      })
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('sends a safe normal tool error and ignores foreign tool calls', async () => {
+    const globals = setupGlobals()
+    const handler = jest.fn(async () => ({
+      ok: false as const,
+      error: { code: 'invalid_arguments', message: 'invalid binding arguments' },
+    }))
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig({
+        voiceClient: { frontendToolHandler: handler },
+      }), video)
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-2',
+        turn_id: 'turn-1',
+        call_id: 'foreign',
+        name: 'initiate_channel_binding',
+        arguments: { channel: 'wechat' },
+      }))
+      await flushMicrotasks()
+      expect(handler).not.toHaveBeenCalled()
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-2',
+        call_id: 'call-2',
+        name: 'initiate_channel_binding',
+        arguments: { channel: 'feishu' },
+      }))
+      await flushMicrotasks()
+      expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
+        type: 'tool.result',
+        session_id: 'voice-1',
+        turn_id: 'turn-2',
+        call_id: 'call-2',
+        ok: false,
+        error: { code: 'invalid_arguments', message: 'invalid binding arguments' },
+      })
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('configures the direct WeChat endpoint and exposes its continuing workflow', async () => {
+    const globals = setupGlobals()
+    const workflowReady = deferred<any>()
+    const snapshots: any[] = []
+    const pluginFetch = jest.fn(async (url: string, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => init?.method === 'POST'
+        ? { operation_id: 'binding-1', state: 'initiating', revision: 1, qr_url: null, verification: null }
+        : { operation_id: 'binding-1', state: 'bound', revision: 2, qr_url: null, verification: null, error: null },
+    }))
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig({
+        voiceClient: {
+          wechatPluginEndpoint: 'http://plugin.local:8781',
+          wechatBinding: {
+            onSnapshot: (snapshot: any) => snapshots.push(snapshot),
+            onWorkflow: (workflow: any) => workflowReady.resolve(workflow),
+          },
+        },
+      }), video)
+      ;(globalThis as any).fetch = pluginFetch
+      await workflowReady.promise
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-3',
+        call_id: 'call-3',
+        name: 'initiate_channel_binding',
+        arguments: { channel: 'wechat' },
+      }))
+      await flushMicrotasks(16)
+      expect(pluginFetch).toHaveBeenCalledWith(
+        'http://plugin.local:8781/bindings',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(snapshots.map(snapshot => snapshot.state)).toEqual(['initiating', 'bound'])
+      expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
+        type: 'tool.result',
+        session_id: 'voice-1',
+        turn_id: 'turn-3',
+        call_id: 'call-3',
+        ok: true,
+        result: { status: 'initiated' },
+      })
     } finally {
       globals.restore()
     }

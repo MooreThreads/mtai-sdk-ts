@@ -5,6 +5,12 @@ import { hooks } from "../hooks"
 import { connectPc } from "../pc"
 import { Abortable, DHConnectionEventTypes, DHConnectionEvents, DHInputMessage, Diff, Logger } from "../types"
 import { createVoiceMessageAdapter, VoiceClientFrame, VoiceMessageAdapter } from "../voice/adapter"
+import {
+  createChannelBindingToolHandler,
+  type VoiceClientToolCall,
+  type VoiceClientToolHandler,
+  type VoiceClientToolResult,
+} from "../voice/channelBinding"
 import { createVoiceMicrophone } from "../voice/microphone"
 import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from "./types"
 import { createAvatarPlayback } from "./avatarMedia"
@@ -35,6 +41,38 @@ function generateVoiceSessionId() {
     return `voice_${cryptoApi.randomUUID()}` as string
   }
   return `voice_${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+}
+
+function isFrontendToolCall(value: unknown): value is VoiceClientToolCall {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const message = value as Record<string, unknown>
+  const arguments_ = message.arguments
+  return message.type === 'tool.call'
+    && typeof message.session_id === 'string' && message.session_id.length > 0
+    && typeof message.turn_id === 'string' && message.turn_id.length > 0
+    && typeof message.call_id === 'string' && message.call_id.length > 0
+    && typeof message.name === 'string' && message.name.length > 0
+    && arguments_ !== null && typeof arguments_ === 'object' && !Array.isArray(arguments_)
+}
+
+function isFrontendToolResult(value: unknown): value is VoiceClientToolResult {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const result = value as Record<string, unknown>
+  if (result.ok === true) {
+    return result.result !== null && typeof result.result === 'object' && !Array.isArray(result.result)
+  }
+  if (result.ok === false) {
+    const error = result.error
+    return error !== null && typeof error === 'object' && !Array.isArray(error)
+      && typeof (error as Record<string, unknown>).code === 'string'
+      && typeof (error as Record<string, unknown>).message === 'string'
+  }
+  return false
+}
+
+const FRONTEND_TOOL_FAILURE: VoiceClientToolResult = {
+  ok: false,
+  error: { code: 'frontend_tool_failed', message: 'frontend tool failed' },
 }
 
 /**
@@ -179,6 +217,43 @@ async function connectOnce(
     onClientSend: frame => sendFrame(JSON.stringify(frame)),
   })
 
+  const configuredBinding = voiceConfig.wechatPluginEndpoint
+    ? createChannelBindingToolHandler({
+      endpoint: voiceConfig.wechatPluginEndpoint,
+      onSnapshot: voiceConfig.wechatBinding?.onSnapshot,
+      onError: voiceConfig.wechatBinding?.onError,
+    })
+    : undefined
+  const frontendToolHandler: VoiceClientToolHandler | undefined =
+    voiceConfig.frontendToolHandler ?? configuredBinding?.handler
+  if (configuredBinding) {
+    try {
+      voiceConfig.wechatBinding?.onWorkflow?.(configuredBinding.workflow)
+    } catch {
+      // The consuming UI is an observer; a callback cannot break the voice path.
+    }
+  }
+
+  const handleFrontendToolCall = async (call: VoiceClientToolCall) => {
+    let result: VoiceClientToolResult | undefined
+    try {
+      result = await frontendToolHandler?.(call)
+    } catch {
+      result = FRONTEND_TOOL_FAILURE
+    }
+    if (!result || !isFrontendToolResult(result) || !running || disposed) return
+    const resultFrame = result.ok
+      ? { ok: true as const, result: result.result }
+      : { ok: false as const, error: result.error }
+    sendFrame(JSON.stringify({
+      type: 'tool.result',
+      session_id: call.session_id,
+      turn_id: call.turn_id,
+      call_id: call.call_id,
+      ...resultFrame,
+    }))
+  }
+
   const wsCloseHandlers: (() => void)[] = []
   ws.onclose = () => {
     for (const handler of [...wsCloseHandlers]) {
@@ -294,6 +369,15 @@ async function connectOnce(
           const turnId = typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : undefined
           avatarPlayback?.notifyMediaEnded(turnId)
         }
+      }
+      if (message.type === 'tool.call') {
+        const call = isFrontendToolCall(message) ? message : undefined
+        if (call && call.session_id === adapter.sessionId && frontendToolHandler) {
+          void handleFrontendToolCall(call)
+        }
+        // Raw tool calls are frontend execution traffic, never app-facing
+        // adapter output and never a legacy start/finish presentation event.
+        return
       }
       for (const adapted of adapter.ingest(message)) {
         evt.emit('message', adapted)
