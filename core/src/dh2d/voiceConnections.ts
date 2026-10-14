@@ -70,6 +70,19 @@ function isFrontendToolResult(value: unknown): value is VoiceClientToolResult {
   return false
 }
 
+function isSerializedFrontendToolResult(
+  value: unknown,
+  call: VoiceClientToolCall,
+): value is Record<string, unknown> & VoiceClientToolResult {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const frame = value as Record<string, unknown>
+  return frame.type === 'tool.result'
+    && frame.session_id === call.session_id
+    && frame.turn_id === call.turn_id
+    && frame.call_id === call.call_id
+    && isFrontendToolResult(frame)
+}
+
 const FRONTEND_TOOL_FAILURE: VoiceClientToolResult = {
   ok: false,
   error: { code: 'frontend_tool_failed', message: 'frontend tool failed' },
@@ -249,13 +262,17 @@ async function connectOnce(
           ? { ok: true as const, result: result.result }
           : { ok: false as const, error: result.error }
         : FRONTEND_TOOL_FAILURE
-      encoded = JSON.stringify({
+      const serialized = JSON.stringify({
         type: 'tool.result',
         session_id: call.session_id,
         turn_id: call.turn_id,
         call_id: call.call_id,
         ...resultFrame,
       })
+      if (serialized === undefined || !isSerializedFrontendToolResult(JSON.parse(serialized), call)) {
+        throw new Error('invalid serialized frontend tool result')
+      }
+      encoded = serialized
     } catch {
       encoded = JSON.stringify({
         type: 'tool.result',
