@@ -271,14 +271,14 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-async function connectReady(config: any, video: any) {
+async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar') {
   const scope = abortable()
   const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, config, child))
   await flushMicrotasks()
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
   ws.open()
   await flushMicrotasks()
-  ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
+  ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: canonicalSessionId }))
   await flushMicrotasks()
   const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
   pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
@@ -390,6 +390,69 @@ describe('connectVoiceClient', () => {
     } finally {
       jest.useRealTimers()
       scope.abort()
+      globals.restore()
+    }
+  })
+
+  test('rejects an unexpected typed setup frame instead of leaving setup pending', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+      await flushMicrotasks()
+      const first = FakeWebSocket.instances[0]
+      first.open()
+      await flushMicrotasks()
+      first.receive(JSON.stringify({ type: 'assistant.text', text: 'too early' }))
+      await flushMicrotasks()
+      jest.advanceTimersByTime(2000)
+      await flushMicrotasks()
+      expect(FakeWebSocket.instances.length).toBe(2)
+      scope.abort()
+      await expect(connecting).rejects.toThrow('connection aborted')
+    } finally {
+      jest.useRealTimers()
+      scope.abort()
+      globals.restore()
+    }
+  })
+
+  test('rejects a binary setup frame instead of treating it as audio forever', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+      await flushMicrotasks()
+      const first = FakeWebSocket.instances[0]
+      first.open()
+      await flushMicrotasks()
+      first.receive(new ArrayBuffer(4))
+      await flushMicrotasks()
+      jest.advanceTimersByTime(2000)
+      await flushMicrotasks()
+      expect(FakeWebSocket.instances.length).toBe(2)
+      scope.abort()
+      await expect(connecting).rejects.toThrow('connection aborted')
+    } finally {
+      jest.useRealTimers()
+      scope.abort()
+      globals.restore()
+    }
+  })
+
+  test('encodes the canonical session id as one offer-path segment', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      await connectReady(createConfig(), video, 'avatar/with?unsafe#fragment')
+      expect(fetchCalls.map(_ => _.url)).toEqual([
+        'http://dh2d-voice:32107/api/v1/session/avatar%2Fwith%3Funsafe%23fragment/offer',
+      ])
+    } finally {
       globals.restore()
     }
   })
@@ -711,6 +774,26 @@ describe('connectVoiceClient', () => {
       expect(ws.sent.map((data: string) => JSON.parse(data))).not.toContainEqual(expect.objectContaining({
         type: 'tool.result',
         call_id: 'call-8',
+      }))
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('direct connection disposal stops avatar frame observation', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const { connection, ws } = await connectReady(createConfig(), video)
+      globals.setSample('A0')
+      globals.emitFrame()
+      connection.dispose()
+      globals.setSample('B0')
+      globals.emitFrame()
+      globals.setSample('C0')
+      globals.emitFrame()
+      expect(ws.sent.map((data: string) => JSON.parse(data))).not.toContainEqual(expect.objectContaining({
+        type: 'playback.ended',
       }))
     } finally {
       globals.restore()

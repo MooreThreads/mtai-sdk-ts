@@ -381,6 +381,10 @@ async function connectOnce(
     ws.onmessage = (event: MessageEvent) => {
       if (!running || disposed) return
       if (typeof event.data !== 'string') {
+        if (canonicalSessionId === undefined) {
+          reject(new Error('binary voice client frame arrived before session-ready'))
+          return
+        }
         // Output PCM follows its audio.chunk control frame; avatar playback
         // audio arrives through the WebRTC media path instead.
         evt.emit('audio', event.data)
@@ -400,9 +404,14 @@ async function connectOnce(
         if (canonicalSessionId === undefined) reject(new Error('invalid voice client frame'))
         return
       }
+      if (canonicalSessionId === undefined && message.type !== 'dh_2d_session_ready') {
+        reject(new Error('voice client session-ready frame expected'))
+        return
+      }
       if (message.type === 'dh_2d_session_ready' && canonicalSessionId === undefined) {
-        if (typeof message.session_id !== 'string' || !message.session_id) {
-          reject(new Error('voice client session-ready frame is missing session_id'))
+        if (typeof message.session_id !== 'string' || !message.session_id
+            || message.session_id === '.' || message.session_id === '..') {
+          reject(new Error('voice client session-ready frame has an invalid session_id'))
           return
         }
         // Only session allocation: media readiness comes from the direct
@@ -417,7 +426,8 @@ async function connectOnce(
         // config that omits it falls back to the legacy root service
         // endpoint.
         const offerEndpoint = voiceConfig.dh2d_endpoint || rootConfig().endpoint
-        const pcUrl = new URL(`${offerEndpoint}/api/v1/session/${canonicalSessionId}/offer`)
+        const encodedSessionId = encodeURIComponent(canonicalSessionId)
+        const pcUrl = new URL(`${offerEndpoint.replace(/\/+$/, '')}/api/v1/session/${encodedSessionId}/offer`)
         pcUrl.protocol = pcUrl.protocol === 'https:' || pcUrl.protocol === 'wss:' ? 'https:' : 'http:'
         connectPc(pc, pcUrl.toString())
           .then(() => {
@@ -503,6 +513,9 @@ async function connectOnce(
     failure,
   ])
 
+  if (!running || disposed) {
+    throw new Error('connection aborted')
+  }
   const frameRequester = hooks.dh2d.createAvatarFrameRequester(elements.video)
   if (frameRequester) {
     const playback = createAvatarPlayback({
