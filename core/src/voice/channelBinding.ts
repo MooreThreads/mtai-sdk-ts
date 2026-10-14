@@ -210,6 +210,7 @@ export function createChannelBindingWorkflow(
   }
 
   const reportError = (error: ChannelBindingError) => {
+    if (disposed) return
     try {
       options.onError?.(error)
     } catch {

@@ -187,6 +187,43 @@ describe('createChannelBindingWorkflow', () => {
     })
   })
 
+  test('does not report an in-flight verification failure after disposal', async () => {
+    const verifyResponse = deferred<Response>()
+    const monitorResponse = deferred<Response>()
+    const errors: unknown[] = []
+    let getCount = 0
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        return response(snapshot({ revision: 1 }))
+      }
+      if (init?.method === 'POST' && url.endsWith('/verify')) return verifyResponse.promise
+      getCount += 1
+      if (getCount > 1) return monitorResponse.promise
+      return response(snapshot({
+        state: 'verification',
+        revision: 2,
+        verification: { required: true, retry: false },
+      }))
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+      onError: error => errors.push(error),
+    })
+
+    await workflow.handleToolCall(toolCall())
+    await flush()
+    expect(getCount).toBeGreaterThan(0)
+    const verifying = workflow.verify('123456')
+    workflow.dispose()
+    verifyResponse.reject(new Error('aborted'))
+    monitorResponse.resolve(response(snapshot({ state: 'bound', revision: 3 })))
+    await expect(verifying).resolves.toEqual({ accepted: false })
+    await flush()
+    expect(errors).toEqual([])
+  })
+
   test('rejects malformed channel arguments and reports fetch failure safely', async () => {
     const fetchImpl = jest.fn(async () => {
       throw new Error('credential-bearing transport failure')
