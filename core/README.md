@@ -78,6 +78,31 @@ const session = createDH2DSession(divElement, {
 })
 ```
 
+Optional WeChat channel binding is configured explicitly on the voice client;
+the SDK does not discover a plugin endpoint. The endpoint exposes the
+revision-driven binding workflow and the UI receives sanitized snapshots and a
+workflow handle for verification:
+
+```typescript
+const session = createDH2DSession(divElement, {
+  videoId: 'YOUR_AVATAR_ID',
+  voiceClient: {
+    interaction_endpoint: 'ws://localhost:8300',
+    wechatPluginEndpoint: 'http://127.0.0.1:8781',
+    wechatBinding: {
+      onSnapshot: snapshot => renderBinding(snapshot),
+      onWorkflow: workflow => { currentBindingWorkflow = workflow },
+    },
+  },
+})
+```
+
+The built-in `initiate_channel_binding` tool only accepts
+`{ channel: 'wechat' }`. Verification codes are sent only through
+`workflow.verify(code)` and are never included in tool results or snapshots.
+Call the workflow's `dispose()` when the owning voice connection is retired;
+connection disposal performs this automatically.
+
 Playback boundaries: a validated stripe transition from turn A to a
 different turn B reports `playback.ended` for A. The A→idle boundary (the
 last turn of a playback sequence returning to idle) is never guessed from

@@ -133,6 +133,25 @@ describe('createChannelBindingWorkflow', () => {
     await flush()
   })
 
+  test('rejects a monitor snapshot for a different operation', async () => {
+    const errors: unknown[] = []
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST') return response(snapshot({ operation_id: 'binding-1', revision: 1 }))
+        return response(snapshot({ operation_id: 'binding-2', state: 'bound', revision: 2 }))
+      },
+      onError: error => errors.push(error),
+    })
+
+    await workflow.handleToolCall(toolCall())
+    await flush()
+
+    expect(errors).toEqual([{ code: 'binding_unavailable', message: 'WeChat binding service unavailable' }])
+    expect(workflow.snapshot?.operation_id).toBe('binding-1')
+    workflow.dispose()
+  })
+
   test('aborts the superseded operation monitor when a new operation starts', async () => {
     const oldGet = deferred<Response>()
     const newGet = deferred<Response>()

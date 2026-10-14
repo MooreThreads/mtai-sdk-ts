@@ -288,6 +288,9 @@ export function createChannelBindingWorkflow(
           && !isTerminal(current.state)) {
         const next = await getSnapshot(id, after, signal)
         if (operationId !== id || operationGeneration !== generation) return
+        if (next.operation_id !== id) {
+          throw safeError('binding_unavailable')
+        }
         if (next.revision <= after && !isTerminal(next.state)) {
           throw safeError('binding_unavailable')
         }

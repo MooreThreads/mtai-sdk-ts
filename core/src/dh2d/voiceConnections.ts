@@ -386,8 +386,25 @@ async function connectOnce(
         evt.emit('audio', event.data)
         return
       }
-      const message = JSON.parse(event.data)
+      let message: { type: string, [key: string]: any }
+      try {
+        const parsed = JSON.parse(event.data)
+        if (parsed === null
+            || typeof parsed !== 'object'
+            || Array.isArray(parsed)
+            || typeof parsed.type !== 'string') {
+          throw new Error('voice client frame must have a type')
+        }
+        message = parsed
+      } catch {
+        if (canonicalSessionId === undefined) reject(new Error('invalid voice client frame'))
+        return
+      }
       if (message.type === 'dh_2d_session_ready' && canonicalSessionId === undefined) {
+        if (typeof message.session_id !== 'string' || !message.session_id) {
+          reject(new Error('voice client session-ready frame is missing session_id'))
+          return
+        }
         // Only session allocation: media readiness comes from the direct
         // WebRTC exchange below, not from this frame.
         canonicalSessionId = message.session_id
@@ -472,6 +489,7 @@ async function connectOnce(
     disposed = true
     running = false
     configuredBinding?.workflow.dispose()
+    avatarPlayback?.stop()
     stopMicrophone?.()
     ws.onopen = null
     ws.onclose = null

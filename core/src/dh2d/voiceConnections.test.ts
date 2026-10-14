@@ -343,6 +343,57 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('rejects malformed setup frames instead of leaving connection setup pending', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+      await flushMicrotasks()
+      const first = FakeWebSocket.instances[0]
+      first.open()
+      await flushMicrotasks()
+      first.receive('{not-json')
+      await flushMicrotasks()
+      jest.advanceTimersByTime(2000)
+      await flushMicrotasks()
+      expect(FakeWebSocket.instances.length).toBe(2)
+      scope.abort()
+      await expect(connecting).rejects.toThrow('connection aborted')
+    } finally {
+      jest.useRealTimers()
+      scope.abort()
+      globals.restore()
+    }
+  })
+
+  test('rejects a session-ready frame without an id instead of retrying offer setup', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+      await flushMicrotasks()
+      const first = FakeWebSocket.instances[0]
+      first.open()
+      await flushMicrotasks()
+      first.receive(JSON.stringify({ type: 'dh_2d_session_ready' }))
+      await flushMicrotasks()
+      jest.advanceTimersByTime(2000)
+      await flushMicrotasks()
+      expect(FakeRTCPeerConnection.instances[0].transceivers).toEqual([])
+      expect(FakeWebSocket.instances.length).toBe(2)
+      scope.abort()
+      await expect(connecting).rejects.toThrow('connection aborted')
+    } finally {
+      jest.useRealTimers()
+      scope.abort()
+      globals.restore()
+    }
+  })
+
   test('sends session.start with protocol version 2 and never opens a DH2D command websocket', async () => {
     const globals = setupGlobals()
     try {
