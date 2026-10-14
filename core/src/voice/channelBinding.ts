@@ -70,6 +70,8 @@ export type ChannelBindingWorkflow = {
   handleToolCall: VoiceClientToolHandler,
   /** Submits a verification code to the current operation, without retaining it. */
   verify: (code: string) => Promise<{ accepted: boolean }>,
+  /** Stops transport work and fences all future UI callbacks. */
+  dispose: () => void,
   /** Latest sanitized snapshot observed by this workflow, if any. */
   readonly snapshot: ChannelBindingSnapshot | undefined,
 }
@@ -189,8 +191,11 @@ export function createChannelBindingWorkflow(
   let operationId: string | undefined
   let monitor: Promise<void> | undefined
   let initiation: Promise<ChannelBindingSnapshot> | undefined
+  let disposed = false
+  const abortController = typeof AbortController === 'function' ? new AbortController() : undefined
 
   const reportSnapshot = (snapshot: ChannelBindingSnapshot) => {
+    if (disposed) return
     const changed = operationId !== snapshot.operation_id
       || current === undefined
       || snapshot.revision > current.revision
@@ -213,9 +218,13 @@ export function createChannelBindingWorkflow(
   }
 
   const requestJson = async (path: string | URL, init?: RequestInit): Promise<unknown> => {
+    if (disposed) throw safeError('binding_unavailable')
     let response: Response
     try {
-      response = await fetchImpl(path instanceof URL ? path : endpointPath(base, path), init)
+      response = await fetchImpl(
+        path instanceof URL ? path : endpointPath(base, path),
+        { ...init, ...(abortController ? { signal: abortController.signal } : {}) },
+      )
     } catch {
       throw safeError('binding_unavailable')
     }
@@ -241,7 +250,7 @@ export function createChannelBindingWorkflow(
   const monitorOperation = async (id: string, revision: number): Promise<void> => {
     let after = revision
     try {
-      while (operationId === id && current !== undefined && !isTerminal(current.state)) {
+      while (!disposed && operationId === id && current !== undefined && !isTerminal(current.state)) {
         const next = await getSnapshot(id, after)
         if (operationId !== id) return
         if (next.revision <= after && !isTerminal(next.state)) {
@@ -262,7 +271,7 @@ export function createChannelBindingWorkflow(
   }
 
   const ensureMonitoring = (snapshot: ChannelBindingSnapshot) => {
-    if (isTerminal(snapshot.state) || monitor !== undefined) return
+    if (disposed || isTerminal(snapshot.state) || monitor !== undefined) return
     const id = snapshot.operation_id
     monitor = monitorOperation(id, snapshot.revision).finally(() => {
       if (operationId === id) monitor = undefined
@@ -276,6 +285,7 @@ export function createChannelBindingWorkflow(
       body: '{}',
     })
     const snapshot = parseSnapshot(value)
+    if (disposed) throw safeError('binding_unavailable')
     reportSnapshot(snapshot)
     ensureMonitoring(snapshot)
     return cloneSnapshot(snapshot)
@@ -294,6 +304,7 @@ export function createChannelBindingWorkflow(
   const workflow: ChannelBindingWorkflow = {
     async handleToolCall(call) {
       if (call.name !== CHANNEL_BINDING_TOOL_NAME) return undefined
+      if (disposed) return { ok: false, error: safeError('binding_unavailable') }
       if (!toolArgumentsAreValid(call.arguments)) {
         const channel = isRecord(call.arguments) ? call.arguments.channel : undefined
         if (channel !== undefined && channel !== 'wechat') {
@@ -320,7 +331,7 @@ export function createChannelBindingWorkflow(
     },
 
     async verify(code) {
-      if (typeof code !== 'string' || !code.trim()
+      if (disposed || typeof code !== 'string' || !code.trim()
           || operationId === undefined
           || current?.state !== 'verification') {
         return { accepted: false }
@@ -349,6 +360,12 @@ export function createChannelBindingWorkflow(
       }
     },
 
+    dispose() {
+      if (disposed) return
+      disposed = true
+      operationId = undefined
+      abortController?.abort()
+    },
     get snapshot() {
       return current ? cloneSnapshot(current) : undefined
     },

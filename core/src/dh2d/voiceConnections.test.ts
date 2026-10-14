@@ -598,6 +598,38 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('replaces an unserializable frontend result with a safe correlated error', async () => {
+    const globals = setupGlobals()
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    const handler = jest.fn(async () => ({ ok: true as const, result: circular }))
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig({
+        voiceClient: { frontendToolHandler: handler },
+      }), video)
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-4',
+        call_id: 'call-4',
+        name: 'some_frontend_tool',
+        arguments: {},
+      }))
+      await flushMicrotasks()
+      expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
+        type: 'tool.result',
+        session_id: 'voice-1',
+        turn_id: 'turn-4',
+        call_id: 'call-4',
+        ok: false,
+        error: { code: 'frontend_tool_failed', message: 'frontend tool failed' },
+      })
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('configures the direct WeChat endpoint and exposes its continuing workflow', async () => {
     const globals = setupGlobals()
     const workflowReady = deferred<any>()

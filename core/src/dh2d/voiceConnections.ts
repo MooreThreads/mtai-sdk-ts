@@ -241,17 +241,35 @@ async function connectOnce(
     } catch {
       result = FRONTEND_TOOL_FAILURE
     }
-    if (!result || !isFrontendToolResult(result) || !running || disposed) return
-    const resultFrame = result.ok
-      ? { ok: true as const, result: result.result }
-      : { ok: false as const, error: result.error }
-    sendFrame(JSON.stringify({
-      type: 'tool.result',
-      session_id: call.session_id,
-      turn_id: call.turn_id,
-      call_id: call.call_id,
-      ...resultFrame,
-    }))
+    if (!result || !running || disposed) return
+    let encoded: string
+    try {
+      const resultFrame = isFrontendToolResult(result)
+        ? result.ok
+          ? { ok: true as const, result: result.result }
+          : { ok: false as const, error: result.error }
+        : FRONTEND_TOOL_FAILURE
+      encoded = JSON.stringify({
+        type: 'tool.result',
+        session_id: call.session_id,
+        turn_id: call.turn_id,
+        call_id: call.call_id,
+        ...resultFrame,
+      })
+    } catch {
+      encoded = JSON.stringify({
+        type: 'tool.result',
+        session_id: call.session_id,
+        turn_id: call.turn_id,
+        call_id: call.call_id,
+        ...FRONTEND_TOOL_FAILURE,
+      })
+    }
+    try {
+      sendFrame(encoded)
+    } catch {
+      // A close racing the handler is a retired connection, not a tool error.
+    }
   }
 
   const wsCloseHandlers: (() => void)[] = []
@@ -418,6 +436,7 @@ async function connectOnce(
     }
     disposed = true
     running = false
+    configuredBinding?.workflow.dispose()
     stopMicrophone?.()
     ws.onopen = null
     ws.onclose = null

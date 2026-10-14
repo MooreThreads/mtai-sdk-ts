@@ -158,6 +158,35 @@ describe('createChannelBindingWorkflow', () => {
     expect(seen[seen.length - 1]).toEqual(bound)
   })
 
+  test('disposes transport and fences callbacks from a retired workflow', async () => {
+    const pending = deferred<Response>()
+    const seen: ChannelBindingSnapshot[] = []
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        return response(snapshot({ revision: 1 }))
+      }
+      return pending.promise
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+      onSnapshot: current => seen.push(current),
+    })
+
+    await workflow.handleToolCall(toolCall())
+    workflow.dispose()
+    pending.resolve(response(snapshot({ state: 'bound', revision: 2 })))
+    await flush()
+
+    expect(seen.map(current => current.state)).toEqual(['initiating'])
+    await expect(workflow.verify('123456')).resolves.toEqual({ accepted: false })
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: false,
+      error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
+    })
+  })
+
   test('rejects malformed channel arguments and reports fetch failure safely', async () => {
     const fetchImpl = jest.fn(async () => {
       throw new Error('credential-bearing transport failure')
