@@ -189,7 +189,6 @@ export function createChannelBindingWorkflow(
 
   let current: ChannelBindingSnapshot | undefined
   let operationId: string | undefined
-  let monitor: Promise<void> | undefined
   let initiation: Promise<ChannelBindingSnapshot> | undefined
   let disposed = false
   const abortController = typeof AbortController === 'function' ? new AbortController() : undefined
@@ -272,11 +271,8 @@ export function createChannelBindingWorkflow(
   }
 
   const ensureMonitoring = (snapshot: ChannelBindingSnapshot) => {
-    if (disposed || isTerminal(snapshot.state) || monitor !== undefined) return
-    const id = snapshot.operation_id
-    monitor = monitorOperation(id, snapshot.revision).finally(() => {
-      if (operationId === id) monitor = undefined
-    })
+    if (disposed || isTerminal(snapshot.state)) return
+    void monitorOperation(snapshot.operation_id, snapshot.revision)
   }
 
   const initiate = async (): Promise<ChannelBindingSnapshot> => {

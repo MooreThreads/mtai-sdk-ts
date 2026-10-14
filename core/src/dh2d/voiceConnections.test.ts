@@ -598,6 +598,36 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('replaces a malformed falsy frontend result with a safe correlated error', async () => {
+    const globals = setupGlobals()
+    const handler = jest.fn(async () => null as any)
+    try {
+      const video = fakeVideo()
+      const { ws } = await connectReady(createConfig({
+        voiceClient: { frontendToolHandler: handler },
+      }), video)
+      ws.receive(JSON.stringify({
+        type: 'tool.call',
+        session_id: 'voice-1',
+        turn_id: 'turn-5',
+        call_id: 'call-5',
+        name: 'some_frontend_tool',
+        arguments: {},
+      }))
+      await flushMicrotasks()
+      expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
+        type: 'tool.result',
+        session_id: 'voice-1',
+        turn_id: 'turn-5',
+        call_id: 'call-5',
+        ok: false,
+        error: { code: 'frontend_tool_failed', message: 'frontend tool failed' },
+      })
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('replaces an unserializable frontend result with a safe correlated error', async () => {
     const globals = setupGlobals()
     const circular: Record<string, unknown> = {}

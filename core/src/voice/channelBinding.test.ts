@@ -106,6 +106,60 @@ describe('createChannelBindingWorkflow', () => {
     ])
   })
 
+  test('continues polling when a new initiation replaces an older operation', async () => {
+    const firstGet = deferred<Response>()
+    const secondGet = deferred<Response>()
+    const requests: string[] = []
+    const seen: ChannelBindingSnapshot[] = []
+    let postCount = 0
+    const boundSeen = deferred<void>()
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push(url)
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        postCount += 1
+        return response(snapshot({
+          operation_id: `binding-${postCount}`,
+          revision: 1,
+        }))
+      }
+      if (url.includes('/bindings/binding-1')) return firstGet.promise
+      if (url.includes('/bindings/binding-2')) return secondGet.promise
+      throw new Error(`unexpected request ${url}`)
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+      onSnapshot: current => {
+        seen.push(current)
+        if (current.operation_id === 'binding-2' && current.state === 'bound') boundSeen.resolve()
+      },
+    })
+
+    await workflow.handleToolCall(toolCall())
+    await workflow.handleToolCall(toolCall({ channel: 'wechat' }))
+    expect(requests).toContain('http://127.0.0.1:8781/bindings/binding-2?after_revision=1')
+
+    firstGet.resolve(response(snapshot({
+      operation_id: 'binding-1',
+      state: 'qr',
+      revision: 2,
+      qr_url: 'https://qr.example/old',
+    })))
+    secondGet.resolve(response(snapshot({
+      operation_id: 'binding-2',
+      state: 'bound',
+      revision: 2,
+    })))
+    await boundSeen.promise
+
+    expect(seen).toEqual([
+      snapshot({ operation_id: 'binding-1', revision: 1 }),
+      snapshot({ operation_id: 'binding-2', revision: 1 }),
+      snapshot({ operation_id: 'binding-2', state: 'bound', revision: 2 }),
+    ])
+  })
+
   test('verification is a direct API callback and never enters the tool result', async () => {
     const requests: { url: string, init?: RequestInit }[] = []
     const verification = snapshot({

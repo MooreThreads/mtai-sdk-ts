@@ -241,7 +241,7 @@ async function connectOnce(
     } catch {
       result = FRONTEND_TOOL_FAILURE
     }
-    if (!result || !running || disposed) return
+    if (result === undefined || !running || disposed) return
     let encoded: string
     try {
       const resultFrame = isFrontendToolResult(result)
