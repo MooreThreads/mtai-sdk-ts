@@ -28,7 +28,10 @@ const flush = async () => {
   await Promise.resolve()
 }
 
-function toolCall(arguments_: Record<string, unknown> = { channel: 'wechat' }): VoiceClientToolCall {
+function toolCall(arguments_: Record<string, unknown> = {
+  channel: 'wechat',
+  action: 'initiate',
+}): VoiceClientToolCall {
   return {
     type: 'tool.call',
     session_id: 'voice-1',
@@ -104,6 +107,69 @@ describe('createChannelBindingWorkflow', () => {
       'http://127.0.0.1:8781/bindings/binding-1?after_revision=1',
       'http://127.0.0.1:8781/bindings/binding-1?after_revision=2',
     ])
+  })
+
+  test('accepts bind_channel cancellation locally without a backend request', async () => {
+    const pending = deferred<Response>()
+    const requests: { url: string, init?: RequestInit }[] = []
+    const seen: ChannelBindingSnapshot[] = []
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(input), init })
+      if (init?.method === 'POST') return response(snapshot({ state: 'qr', qr_url: 'https://qr.example/value' }))
+      return pending.promise
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+      onSnapshot: current => seen.push(current),
+    })
+
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: true,
+      result: { status: 'initiated' },
+    })
+    const operationId = workflow.snapshot?.operation_id as string
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'cancel', operation_id: operationId,
+    }))).resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+    expect(requests).toHaveLength(2)
+    expect(requests[1].init?.method).toBeUndefined()
+    expect(workflow.snapshot).toEqual(snapshot({
+      state: 'cancelled', revision: 2, qr_url: null,
+    }))
+    expect(seen[seen.length - 1].state).toBe('cancelled')
+
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'cancel', operation_id: operationId,
+    }))).resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+    pending.resolve(response(snapshot({ state: 'bound', revision: 2 })))
+    await flush()
+    expect(workflow.snapshot?.state).toBe('cancelled')
+    workflow.dispose()
+  })
+
+  test('rejects invalid bind_channel action shapes', async () => {
+    const fetchImpl = jest.fn(async () => response(snapshot({ revision: 1 })))
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+    })
+
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat' }))).resolves.toEqual({
+      ok: false,
+      error: { code: 'invalid_arguments', message: 'invalid binding arguments' },
+    })
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'cancel',
+    }))).resolves.toEqual({
+      ok: false,
+      error: { code: 'invalid_arguments', message: 'operation_id is required for cancellation' },
+    })
+    await expect(workflow.handleToolCall({
+      ...toolCall(), name: 'initiate_channel_binding',
+    })).resolves.toBeUndefined()
+    expect(fetchImpl).not.toHaveBeenCalled()
+    workflow.dispose()
   })
 
   test('reuses one monitor when repeated initiation returns the same operation', async () => {
@@ -218,7 +284,7 @@ describe('createChannelBindingWorkflow', () => {
     })
 
     await workflow.handleToolCall(toolCall())
-    await workflow.handleToolCall(toolCall({ channel: 'wechat' }))
+    await workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'initiate' }))
     expect(requests).toContain('http://127.0.0.1:8781/bindings/binding-2?after_revision=1')
 
     firstGet.resolve(response(snapshot({
@@ -425,7 +491,9 @@ describe('createChannelBindingWorkflow', () => {
       ok: false,
       error: { code: 'invalid_arguments', message: 'channel must be "wechat"' },
     })
-    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', extra: true }))).resolves.toEqual({
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'initiate', extra: true,
+    }))).resolves.toEqual({
       ok: false,
       error: { code: 'invalid_arguments', message: 'invalid binding arguments' },
     })

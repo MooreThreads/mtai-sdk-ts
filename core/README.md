@@ -97,8 +97,11 @@ const session = createDH2DSession(divElement, {
 })
 ```
 
-The built-in `initiate_channel_binding` tool only accepts
-`{ channel: 'wechat' }`. Verification codes are sent only through
+The built-in `bind_channel` tool accepts `{ channel: 'wechat', action:
+'initiate' }` or `{ channel: 'wechat', action: 'cancel', operation_id }`.
+Cancellation is a frontend-only dismissal: it fences local snapshot delivery
+and emits a sanitized `cancelled` snapshot without making a backend request;
+it does not cancel QR/login work. Verification codes are sent only through
 `workflow.verify(code)` and are never included in tool results or snapshots.
 Call the workflow's `dispose()` when the owning voice connection is retired;
 connection disposal performs this automatically.

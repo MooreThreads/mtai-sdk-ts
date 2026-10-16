@@ -1,4 +1,6 @@
-export const CHANNEL_BINDING_TOOL_NAME = 'initiate_channel_binding' as const
+export const CHANNEL_BINDING_TOOL_NAME = 'bind_channel' as const
+
+export type ChannelBindingAction = 'initiate' | 'cancel'
 
 const BINDING_STATES = new Set([
   'initiating',
@@ -8,9 +10,10 @@ const BINDING_STATES = new Set([
   'verification',
   'bound',
   'failed',
+  'cancelled',
 ])
 
-const TERMINAL_STATES = new Set(['bound', 'failed'])
+const TERMINAL_STATES = new Set(['bound', 'failed', 'cancelled'])
 
 type BindingState =
   | 'initiating'
@@ -20,6 +23,7 @@ type BindingState =
   | 'verification'
   | 'bound'
   | 'failed'
+  | 'cancelled'
 
 export type ChannelBindingSnapshot = {
   operation_id: string,
@@ -66,10 +70,12 @@ export type ChannelBindingWorkflowOptions = {
 }
 
 export type ChannelBindingWorkflow = {
-  /** Handles only initiate_channel_binding; other tool calls return undefined. */
+  /** Handles only bind_channel; other tool calls return undefined. */
   handleToolCall: VoiceClientToolHandler,
   /** Submits a verification code to the current operation, without retaining it. */
   verify: (code: string) => Promise<{ accepted: boolean }>,
+  /** Locally hides/fences one operation; it does not cancel backend login. */
+  cancel: (operationId: string) => boolean,
   /** Stops transport work and fences all future UI callbacks. */
   dispose: () => void,
   /** Latest sanitized snapshot observed by this workflow, if any. */
@@ -172,10 +178,30 @@ function endpointPath(base: URL, path: string): string {
   return new URL(path.replace(/^\/+/, ''), base).toString()
 }
 
-function toolArgumentsAreValid(arguments_: unknown): arguments_ is { channel: 'wechat' } {
-  return isRecord(arguments_)
-    && Object.keys(arguments_).length === 1
-    && arguments_.channel === 'wechat'
+type ChannelBindingArguments =
+  | { channel: 'wechat', action: 'initiate' }
+  | { channel: 'wechat', action: 'cancel', operation_id: string }
+
+function toolArgumentsAreValid(arguments_: unknown): arguments_ is ChannelBindingArguments {
+  if (!isRecord(arguments_) || arguments_.channel !== 'wechat'
+      || (arguments_.action !== 'initiate' && arguments_.action !== 'cancel')) return false
+  if (arguments_.action === 'initiate') {
+    return Object.keys(arguments_).length === 2 && !('operation_id' in arguments_)
+  }
+  return Object.keys(arguments_).length === 3
+    && typeof arguments_.operation_id === 'string'
+    && !!arguments_.operation_id
+}
+
+function invalidArgumentsError(arguments_: unknown): ChannelBindingError {
+  if (isRecord(arguments_) && arguments_.action === 'cancel'
+      && !('operation_id' in arguments_)) {
+    return { code: 'invalid_arguments', message: 'operation_id is required for cancellation' }
+  }
+  if (isRecord(arguments_) && arguments_.channel !== undefined && arguments_.channel !== 'wechat') {
+    return { code: 'invalid_arguments', message: 'channel must be "wechat"' }
+  }
+  return { code: 'invalid_arguments', message: SAFE_MESSAGES.invalid_arguments }
 }
 
 export function createChannelBindingWorkflow(
@@ -200,9 +226,13 @@ export function createChannelBindingWorkflow(
 
   const reportSnapshot = (snapshot: ChannelBindingSnapshot) => {
     if (disposed) return
+    const reactivatingLocallyCancelled = current?.state === 'cancelled'
+      && snapshot.operation_id === operationId
+      && snapshot.state !== 'cancelled'
     const changed = operationId !== snapshot.operation_id
       || current === undefined
       || snapshot.revision > current.revision
+      || reactivatingLocallyCancelled
     if (!changed) return
     if (operationId !== snapshot.operation_id) {
       if (operationId !== undefined) {
@@ -212,6 +242,12 @@ export function createChannelBindingWorkflow(
       }
       operationId = snapshot.operation_id
       operationGeneration += 1
+      if (typeof AbortController === 'function') {
+        operationControllers.set(snapshot.operation_id, new AbortController())
+      }
+    } else if (reactivatingLocallyCancelled) {
+      operationGeneration += 1
+      operationControllers.delete(snapshot.operation_id)
       if (typeof AbortController === 'function') {
         operationControllers.set(snapshot.operation_id, new AbortController())
       }
@@ -344,24 +380,46 @@ export function createChannelBindingWorkflow(
     return joined
   }
 
+  const cancelOperation = (id: string): boolean => {
+    if (disposed || operationId !== id || current === undefined) return false
+    if (current.state === 'cancelled') return true
+    if (isTerminal(current.state)) return false
+    operationControllers.get(id)?.abort()
+    operationControllers.delete(id)
+    monitors.delete(id)
+    operationGeneration += 1
+    current = {
+      ...cloneSnapshot(current),
+      state: 'cancelled',
+      revision: current.revision + 1,
+      qr_url: null,
+      verification: null,
+    }
+    try {
+      options.onSnapshot?.(cloneSnapshot(current))
+    } catch {
+      // UI callbacks are observers; they cannot stop local cancellation.
+    }
+    return true
+  }
+
   const workflow: ChannelBindingWorkflow = {
     async handleToolCall(call) {
       if (call.name !== CHANNEL_BINDING_TOOL_NAME) return undefined
       if (disposed) return { ok: false, error: safeError('binding_unavailable') }
       if (!toolArgumentsAreValid(call.arguments)) {
-        const channel = isRecord(call.arguments) ? call.arguments.channel : undefined
-        if (channel !== undefined && channel !== 'wechat') {
-          return {
-            ok: false,
-            error: { code: 'invalid_arguments', message: 'channel must be "wechat"' },
-          }
-        }
-        return {
-          ok: false,
-          error: { code: 'invalid_arguments', message: SAFE_MESSAGES.invalid_arguments },
-        }
+        return { ok: false, error: invalidArgumentsError(call.arguments) }
       }
       try {
+        if (call.arguments.action === 'cancel') {
+          if (!cancelOperation(call.arguments.operation_id)) {
+            return {
+              ok: false,
+              error: { code: 'invalid_arguments', message: 'operation is not cancellable' },
+            }
+          }
+          return { ok: true, result: { status: 'cancelled' } }
+        }
         await startInitiation()
         return { ok: true, result: { status: 'initiated' } }
       } catch (error) {
@@ -372,6 +430,8 @@ export function createChannelBindingWorkflow(
         return { ok: false, error: safe }
       }
     },
+
+    cancel: cancelOperation,
 
     async verify(code) {
       if (disposed || typeof code !== 'string' || !code.trim()
