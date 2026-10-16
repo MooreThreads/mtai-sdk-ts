@@ -633,8 +633,8 @@ describe('connectVoiceClient', () => {
         session_id: 'voice-1',
         turn_id: 'turn-1',
         call_id: 'call-1',
-        name: 'initiate_channel_binding',
-        arguments: { channel: 'wechat' },
+        name: 'bind_channel',
+        arguments: { channel: 'wechat', action: 'initiate' },
       })
       called.resolve()
       return result.promise
@@ -649,8 +649,8 @@ describe('connectVoiceClient', () => {
         session_id: 'voice-1',
         turn_id: 'turn-1',
         call_id: 'call-1',
-        name: 'initiate_channel_binding',
-        arguments: { channel: 'wechat' },
+        name: 'bind_channel',
+        arguments: { channel: 'wechat', action: 'initiate' },
       }))
       await called.promise
       expect(handler).toHaveBeenCalledTimes(1)
@@ -685,8 +685,8 @@ describe('connectVoiceClient', () => {
         session_id: 'voice-2',
         turn_id: 'turn-1',
         call_id: 'foreign',
-        name: 'initiate_channel_binding',
-        arguments: { channel: 'wechat' },
+        name: 'bind_channel',
+        arguments: { channel: 'wechat', action: 'initiate' },
       }))
       await flushMicrotasks()
       expect(handler).not.toHaveBeenCalled()
@@ -695,8 +695,8 @@ describe('connectVoiceClient', () => {
         session_id: 'voice-1',
         turn_id: 'turn-2',
         call_id: 'call-2',
-        name: 'initiate_channel_binding',
-        arguments: { channel: 'feishu' },
+        name: 'bind_channel',
+        arguments: { channel: 'feishu', action: 'initiate' },
       }))
       await flushMicrotasks()
       expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
@@ -924,8 +924,8 @@ describe('connectVoiceClient', () => {
         session_id: 'voice-1',
         turn_id: 'turn-3',
         call_id: 'call-3',
-        name: 'initiate_channel_binding',
-        arguments: { channel: 'wechat' },
+        name: 'bind_channel',
+        arguments: { channel: 'wechat', action: 'initiate' },
       }))
       await flushMicrotasks(16)
       expect(pluginFetch).toHaveBeenCalledWith(
