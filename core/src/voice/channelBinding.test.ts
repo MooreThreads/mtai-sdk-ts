@@ -148,6 +148,87 @@ describe('createChannelBindingWorkflow', () => {
     workflow.dispose()
   })
 
+  test('fences a verification response that completes after local cancellation', async () => {
+    const verifyResponse = deferred<Response>()
+    const monitorResponse = deferred<Response>()
+    const seen: ChannelBindingSnapshot[] = []
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        return response(snapshot({
+          state: 'verification',
+          revision: 2,
+          verification: { required: true, retry: false },
+        }))
+      }
+      if (init?.method === 'POST' && url.endsWith('/verify')) return verifyResponse.promise
+      if (url.includes('/bindings/binding-1')) return monitorResponse.promise
+      throw new Error(`unexpected request ${url}`)
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+      onSnapshot: current => seen.push(current),
+    })
+
+    await workflow.handleToolCall(toolCall())
+    const verifying = workflow.verify('123456')
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'cancel', operation_id: 'binding-1',
+    }))).resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+
+    verifyResponse.resolve(response({ accepted: true }))
+    await expect(verifying).resolves.toEqual({ accepted: false })
+    expect(workflow.snapshot?.state).toBe('cancelled')
+    expect(seen.map(current => current.state)).toEqual(['verification', 'cancelled'])
+    workflow.dispose()
+    monitorResponse.resolve(response(snapshot({ state: 'bound', revision: 3 })))
+    await flush()
+  })
+
+  test('explicit initiation may reactivate a locally dismissed operation', async () => {
+    const firstMonitor = deferred<Response>()
+    const secondMonitor = deferred<Response>()
+    const requests: { url: string, init?: RequestInit }[] = []
+    let postCount = 0
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (init?.method === 'POST' && url.endsWith('/bindings')) {
+        postCount += 1
+        return response(snapshot({
+          state: 'qr',
+          revision: postCount === 1 ? 1 : 3,
+          qr_url: `https://qr.example/${postCount}`,
+        }))
+      }
+      return postCount === 1 ? firstMonitor.promise : secondMonitor.promise
+    }
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: fetchImpl,
+    })
+
+    await workflow.handleToolCall(toolCall())
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'cancel', operation_id: 'binding-1',
+    }))).resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+    await workflow.handleToolCall(toolCall())
+
+    expect(postCount).toBe(2)
+    expect(workflow.snapshot).toEqual(snapshot({
+      state: 'qr', revision: 3, qr_url: 'https://qr.example/2',
+    }))
+    const firstRequest = requests.find(request => request.url.includes('after_revision=1'))
+    const secondRequest = requests.find(request => request.url.includes('after_revision=3'))
+    expect((firstRequest?.init?.signal as AbortSignal).aborted).toBe(true)
+    expect((secondRequest?.init?.signal as AbortSignal).aborted).toBe(false)
+    workflow.dispose()
+    firstMonitor.resolve(response(snapshot({ state: 'bound', revision: 2 })))
+    secondMonitor.resolve(response(snapshot({ state: 'bound', revision: 4 })))
+    await flush()
+  })
+
   test('rejects invalid bind_channel action shapes', async () => {
     const fetchImpl = jest.fn(async () => response(snapshot({ revision: 1 })))
     const workflow = createChannelBindingWorkflow({
