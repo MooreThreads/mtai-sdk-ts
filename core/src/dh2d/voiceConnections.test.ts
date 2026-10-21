@@ -137,6 +137,18 @@ function fakeVideo() {
   return video as HTMLVideoElement & FakeEventTarget
 }
 
+function fakeCover() {
+  const drawImage = jest.fn()
+  const cover: any = {
+    width: 0,
+    height: 0,
+    style: { opacity: '0' },
+    drawImage,
+    getContext: () => ({ drawImage }),
+  }
+  return cover as HTMLCanvasElement & { drawImage: jest.Mock }
+}
+
 function stripeImageData(token: string): ImageData {
   const crc = crc16(Uint8Array.from([token.charCodeAt(0), token.charCodeAt(1)]))
   const payload = [token.charCodeAt(0), token.charCodeAt(1), (crc >> 8) & 0xff, crc & 0xff]
@@ -271,9 +283,9 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar') {
+async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar', cover?: any) {
   const scope = abortable()
-  const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, config, child))
+  const connecting = withChild(scope, child => connectVoiceClient(logger, { video, cover } as any, config, child))
   await flushMicrotasks()
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
   ws.open()
@@ -339,6 +351,29 @@ describe('connectVoiceClient', () => {
       await disconnectVoiceClient(logger, connection, { video }, abortable())
     } finally {
       scope.abort()
+      globals.restore()
+    }
+  })
+
+  test('freezes the last video frame over the black video node while reconnecting', async () => {
+    const globals = setupGlobals()
+    try {
+      const video = fakeVideo()
+      const cover = fakeCover()
+      const { connection } = await connectReady(createConfig(), video, 'canonical-avatar', cover)
+      // A live connection shows the video, so the cover stays hidden.
+      expect(cover.style.opacity).toBe('0')
+      expect(cover.drawImage).not.toHaveBeenCalled()
+      // `sessions.ts` calls disconnectVoiceClient on failure before retrying;
+      // the last frame must be frozen over the video node at that point. The
+      // source is cleared afterwards, so the cover cannot be drawn later.
+      await disconnectVoiceClient(logger, connection, { video, cover } as any, abortable())
+      expect(cover.drawImage).toHaveBeenCalled()
+      expect(cover.width).toBe(1280)
+      expect(cover.height).toBe(720)
+      expect(cover.style.opacity).toBe('1')
+      expect(video.srcObject).toBeNull()
+    } finally {
       globals.restore()
     }
   })
