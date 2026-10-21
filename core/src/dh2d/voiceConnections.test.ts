@@ -471,8 +471,8 @@ describe('connectVoiceClient', () => {
       connection.on('message', m => messages.push(m))
       connection.on('audio', a => audio.push(a))
       ws.receive(JSON.stringify({ type: 'capture.start', session_id: 'voice-1', turn_id: 't1' }))
-      ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-1', turn_id: 't1', text: 'hi' }))
-      ws.receive(JSON.stringify({ type: 'audio.chunk', session_id: 'voice-1', turn_id: 't1', subtitles: [{ source: 'main', text: 'spoken' }] }))
+      ws.receive(JSON.stringify({ type: 'text.output.delta', session_id: 'voice-1', turn_id: 't1', text: 'hi' }))
+      ws.receive(JSON.stringify({ type: 'audio.output.delta', session_id: 'voice-1', turn_id: 't1', subtitles: [{ source: 'main', text: 'spoken' }] }))
       ws.receive(new ArrayBuffer(8))
       expect(messages).toEqual([
         { type: 'status_change', status: 'listening' },
@@ -492,7 +492,7 @@ describe('connectVoiceClient', () => {
       const { connection, ws } = await connectReady(createConfig(), video)
       const messages: any[] = []
       connection.on('message', m => messages.push(m))
-      ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-2', turn_id: 't1', text: 'hi' }))
+      ws.receive(JSON.stringify({ type: 'text.output.delta', session_id: 'voice-2', turn_id: 't1', text: 'hi' }))
       expect(messages).toEqual([])
     } finally {
       globals.restore()
@@ -509,8 +509,8 @@ describe('connectVoiceClient', () => {
       await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: '你好' })
       const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
       ws.receive(JSON.stringify({ type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 't1' }))
-      ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-1', turn_id: 't1', text: '答' }))
-      ws.receive(JSON.stringify({ type: 'audio.chunk', session_id: 'voice-1', turn_id: 't1', subtitles: [{ source: 'main', text: '答' }] }))
+      ws.receive(JSON.stringify({ type: 'text.output.delta', session_id: 'voice-1', turn_id: 't1', text: '答' }))
+      ws.receive(JSON.stringify({ type: 'audio.output.delta', session_id: 'voice-1', turn_id: 't1', subtitles: [{ source: 'main', text: '答' }] }))
       ws.receive(JSON.stringify({ type: 'turn.end', session_id: 'voice-1', turn_id: 't1' }))
       ws.receive(JSON.stringify({ type: 'conversation.state', session_id: 'voice-1', state: 'ended' }))
       expect(messages).toEqual([
@@ -885,7 +885,7 @@ describe('voice-client microphone input', () => {
     }
   })
 
-  test('sends microphone PCM as audio.chunk control followed by binary only during capture', async () => {
+  test('sends microphone PCM as audio.output.delta control followed by binary only during capture', async () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
@@ -897,7 +897,7 @@ describe('voice-client microphone input', () => {
       globals.triggerMicrophone(new Float32Array([0, 0.5, -0.5, 1]))
       expect(ws.sent.length).toBe(3)
       expect(JSON.parse(ws.sent[1])).toEqual({
-        type: 'audio.chunk', direction: 'input',
+        type: 'audio.input.delta', direction: 'input',
         session_id: 'voice-1', turn_id: 't1', byte_count: 8,
       })
       expect(ws.sent[2]).toBeInstanceOf(Uint8Array)
@@ -920,7 +920,7 @@ describe('voice-client microphone input', () => {
       globals.triggerMicrophone(new Float32Array([0, 9, 9, 0.5, 9, 9]))
       expect(ws.sent.length).toBe(3)
       expect(JSON.parse(ws.sent[1])).toEqual({
-        type: 'audio.chunk', direction: 'input',
+        type: 'audio.input.delta', direction: 'input',
         session_id: 'voice-1', turn_id: 't1', byte_count: 4,
       })
       expect(Array.from(ws.sent[2] as Uint8Array)).toEqual([0, 0, 0, 0x40])
@@ -1197,7 +1197,7 @@ describe('disconnectVoiceClient', () => {
       expect(video.srcObject).toEqual({ id: 's' })
       await disconnectVoiceClient(logger, connection, { video }, abortable())
       // Late traffic from the retired connection must never reach the app.
-      ws.receive(JSON.stringify({ type: 'assistant.text', session_id: 'voice-1', turn_id: 't1', text: 'late' }))
+      ws.receive(JSON.stringify({ type: 'text.output.delta', session_id: 'voice-1', turn_id: 't1', text: 'late' }))
       ws.receive(new ArrayBuffer(8))
       globals.setSample('B2')
       globals.emitFrame()
