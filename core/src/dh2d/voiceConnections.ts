@@ -385,7 +385,7 @@ async function connectOnce(
           reject(new Error('binary voice client frame arrived before session-ready'))
           return
         }
-        // Output PCM follows its audio.chunk control frame; avatar playback
+        // Output PCM follows its audio.output.delta control frame; avatar playback
         // audio arrives through the WebRTC media path instead.
         evt.emit('audio', event.data)
         return
@@ -466,7 +466,7 @@ async function connectOnce(
   })
 
   // Microphone PCM wiring: `audioInput` captures through the Web Audio API
-  // and delivers each batch to the client as an input `audio.chunk` control
+  // and delivers each batch to the client as an input `audio.input.delta` control
   // frame immediately followed by its binary PCM payload. The adapter only
   // accepts batches while a capture turn is active.
   let microphoneReady: Promise<void> = Promise.resolve()

@@ -6,7 +6,7 @@ import { DHOutputMessage, DHStatus } from "../types"
  * the subset relevant to the SDK adapter is modeled, extra fields are allowed.
  */
 
-/** Subtitle segment attached to an output `audio.chunk` control frame. */
+/** Subtitle segment attached to an output `audio.output.delta` control frame. */
 export type VoiceSubtitleSegment = {
   source: "main" | "narrator",
   text: string,
@@ -18,7 +18,7 @@ export type VoiceClientFrame =
   | { type: 'conversation.start', session_id: string }
   | { type: 'conversation.stop', session_id: string }
   | { type: 'text.input', session_id: string, request_id: string, text: string }
-  | { type: 'audio.chunk', direction: 'input', session_id: string, turn_id: string, byte_count: number }
+  | { type: 'audio.input.delta', direction: 'input', session_id: string, turn_id: string, byte_count: number }
   | { type: 'playback.ended', session_id: string, turn_id: string }
 
 /** Control frames the voice client sends to the SDK. */
@@ -34,7 +34,7 @@ export type VoiceClientEvent = {
 
 /** A microphone PCM batch: the control frame is immediately followed by its binary payload. */
 export type VoiceAudioInput = {
-  control: Extract<VoiceClientFrame, { type: 'audio.chunk' }>,
+  control: Extract<VoiceClientFrame, { type: 'audio.input.delta' }>,
   binary: Uint8Array,
 }
 
@@ -69,11 +69,11 @@ function defaultRequestIdFactory() {
  * `capture.stop` or the acknowledgement of the current generation's typed
  * input (`text.accepted`) reports `talking`; only `conversation.state:ended`
  * reports `sleeping`. No other event invents or changes a status —
- * `assistant.text`/`audio.*` frames, `turn.end`, and non-ended
+ * `text.output.delta`/`audio.output.*` frames, `turn.end`, and non-ended
  * `conversation.state` modes preserve the current active status — and
  * `sleep_talking` is never emitted.
  * Turns are fenced at `turn.end`: duplicate terminal events never produce
- * duplicate records, and late `assistant.text` fragments, `audio.chunk`
+ * duplicate records, and late `text.output.delta` fragments, `audio.output.delta`
  * subtitles, ASR events, or `capture.start`/`capture.stop` controls from a
  * retired turn are dropped before they can reach the app or replace the
  * accepted capture turn. `reset()` fences a new connection generation so
@@ -188,7 +188,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         const text = typeof event.text === 'string' ? event.text : ''
         return [{ type: 'asr_process', sentence: text, completed: event.type === 'asr.final' }]
       }
-      case 'assistant.text': {
+      case 'text.output.delta': {
         if (event.session_id !== sessionId || typeof event.turn_id !== 'string') return []
         const key = turnKey(event.turn_id)
         if (finalizedTurns.has(key)) {
@@ -199,7 +199,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         fragments.set(key, [...(fragments.get(key) || []), text])
         return [{ type: 'bot_output', text }]
       }
-      case 'audio.chunk': {
+      case 'audio.output.delta': {
         if (event.session_id !== sessionId) return []
         if (typeof event.turn_id === 'string' && finalizedTurns.has(turnKey(event.turn_id))) {
           // The turn is retired; late subtitles must never reach the app.
@@ -393,7 +393,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     }
     return {
       control: {
-        type: 'audio.chunk', direction: 'input',
+        type: 'audio.input.delta', direction: 'input',
         session_id: sessionId, turn_id: captureTurnId, byte_count: bytes.byteLength,
       },
       binary: bytes,

@@ -8,7 +8,7 @@ import { Logger } from "../types"
  * behavior); a provided `MediaStream` is used as-is and is never stopped by
  * this module. Captured audio is delivered to `onPcm` as mono 16-bit
  * little-endian PCM linearly resampled to `VOICE_INPUT_SAMPLE_RATE`, ready to
- * follow an input `audio.chunk` control frame on the voice-client websocket.
+ * follow an input `audio.input.delta` control frame on the voice-client websocket.
  */
 
 /** Input PCM sample rate delivered to the voice client. */
