@@ -1367,7 +1367,7 @@ describe('voice-client microphone input', () => {
     }
   })
 
-  test('sends microphone PCM as audio.output.delta control followed by binary only during capture', async () => {
+  test('sends microphone PCM as audio.input.delta control followed by binary only during capture', async () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()

@@ -697,7 +697,7 @@ describe('SDK actions translate to client frames', () => {
     expect(first.request_id).not.toBe(second.request_id)
   })
 
-  test('microphone PCM maps to an input audio.output.delta control frame plus binary', () => {
+  test('microphone PCM maps to an input audio.input.delta control frame plus binary', () => {
     const adapter = createAdapter()
     adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't9' }))
     const bytes = new Uint8Array([1, 2, 3, 4])
