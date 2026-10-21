@@ -214,6 +214,18 @@ async function connectOnce(
   innerAbortable.onabort(() => {
     running = false
   })
+  // Freeze the last rendered avatar frame over the video element when this
+  // attempt tears down, so the reconnect wait never exposes the black video
+  // node. The handler is registered before every teardown handler that clears
+  // the frame (`video.srcObject = null`), and abort handlers run in
+  // registration order, so the cover is drawn while the frame still exists.
+  // The next `canplay` hides it again.
+  let videoVisible = false
+  innerAbortable.onabort(() => {
+    if (videoVisible) {
+      drawCover(attemptLogger, elements)
+    }
+  })
   const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId))
   innerAbortable.onabort(() => {
     ws.close()
@@ -361,6 +373,7 @@ async function connectOnce(
     innerAbortable.onabort(() => pc.removeEventListener('track', onTrack))
     const onCanPlay = () => {
       video.removeEventListener('canplay', onCanPlay)
+      videoVisible = true
       const cover = elements.cover
       sessionLogger.log('video canplay')
       video.play()
@@ -606,6 +619,23 @@ export async function connectVoiceClient(
   }
 }
 
+function drawCover(logger: Logger, elements: DH2DPlayerElements) {
+  logger.log('draw cover')
+  const cover = elements.cover
+  const video = elements.video
+  if (!cover) return
+  const width = video.videoWidth
+  const height = video.videoHeight
+  if (!width || !height) return
+  cover.width = width
+  cover.height = height
+  const ctx = cover.getContext('2d')
+  if (ctx) {
+    ctx.drawImage(video, 0, 0, width, height)
+  }
+  cover.style.opacity = '1'
+}
+
 export async function disconnectVoiceClient(
   logger: Logger,
   connection: DH2DConnection & Partial<Pick<VoiceClientConnection, 'voice' | 'stopPlayback' | 'dispose'>>,
@@ -616,6 +646,10 @@ export async function disconnectVoiceClient(
   logger.log('enter')
   void abortable
   try {
+    // Freeze the last rendered frame over the video node before `dispose()`
+    // clears the source: the reconnect wait must show the last frame, not the
+    // black video element. The next `canplay` hides the cover again.
+    drawCover(logger, elements)
     // Fence the retired connection first: no stale websocket callback,
     // microphone batch, or queued event may reach the app afterwards.
     connection.dispose?.()
