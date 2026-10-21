@@ -37,7 +37,7 @@ describe('asr events become asr_process', () => {
 
   test('stale asr.partial from a retired turn never reaches the app', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({
       type: 'asr.partial', session_id: sessionId, turn_id: 't1', text: 'late',
@@ -46,7 +46,7 @@ describe('asr events become asr_process', () => {
 
   test('stale asr.final from a retired turn never reaches the app', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({
       type: 'asr.final', session_id: sessionId, turn_id: 't1', text: 'late',
@@ -64,16 +64,16 @@ describe('asr events become asr_process', () => {
   })
 })
 
-describe('assistant.text becomes bot_output and accumulates per turn', () => {
+describe('text.output.delta becomes bot_output and accumulates per turn', () => {
   test('each fragment is emitted as bot_output', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: '你好',
+      type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: '你好',
     }))).toEqual([
       { type: 'bot_output', text: '你好' },
     ])
     expect(adapter.ingest(event({
-      type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: '，世界',
+      type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: '，世界',
     }))).toEqual([
       { type: 'bot_output', text: '，世界' },
     ])
@@ -81,8 +81,8 @@ describe('assistant.text becomes bot_output and accumulates per turn', () => {
 
   test('fragments accumulate independently per turn', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'a' }))
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't2', text: 'b' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'a' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't2', text: 'b' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't2' }))).toEqual([
       { type: 'message_record', message: { role: 'assistant', content: 'b' } },
@@ -92,17 +92,17 @@ describe('assistant.text becomes bot_output and accumulates per turn', () => {
   test('fragments never become audio_text', () => {
     const adapter = createAdapter()
     const messages = adapter.ingest(event({
-      type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: '答案',
+      type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: '答案',
     }))
     expect(messages.some(m => m.type === 'audio_text')).toBe(false)
   })
 })
 
-describe('audio.chunk subtitles become audio_text in segment order', () => {
+describe('audio.output.delta subtitles become audio_text in segment order', () => {
   test('main and narrator segments emit accumulated text for Electron replacement UI', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [
         { source: 'main', text: '回答内容' },
         { source: 'narrator', text: '我先查一下。' },
@@ -112,34 +112,34 @@ describe('audio.chunk subtitles become audio_text in segment order', () => {
       { type: 'audio_text', text: '回答内容我先查一下。' },
     ])
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '继续。' }],
     }))).toEqual([
       { type: 'audio_text', text: '回答内容我先查一下。继续。' },
     ])
   })
 
-  test('audio.chunk without subtitles emits nothing', () => {
+  test('audio.output.delta without subtitles emits nothing', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1', byte_count: 4,
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1', byte_count: 4,
     }))).toEqual([])
   })
 
   test('unknown subtitle sources are not converted', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'unexpected', text: 'x' }] as any,
     }))).toEqual([])
   })
 
   test('late subtitles from a retired turn never reach the app', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: 'late spoken' }],
     }))).toEqual([])
   })
@@ -147,7 +147,7 @@ describe('audio.chunk subtitles become audio_text in segment order', () => {
   test('subtitles without a turn id are not fenced', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId,
+      type: 'audio.output.delta', session_id: sessionId,
       subtitles: [{ source: 'main', text: 'hi' }],
     }))).toEqual([
       { type: 'audio_text', text: 'hi' },
@@ -159,11 +159,11 @@ describe('accumulated audio_text is fenced by session, turn, and lifecycle', () 
   test('subtitles from another session neither emit nor pollute this session turn', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: 'voice-session-other', turn_id: 't1',
+      type: 'audio.output.delta', session_id: 'voice-session-other', turn_id: 't1',
       subtitles: [{ source: 'main', text: '别的会话' }],
     }))).toEqual([])
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '本会话' }],
     }))).toEqual([
       { type: 'audio_text', text: '本会话' },
@@ -173,16 +173,16 @@ describe('accumulated audio_text is fenced by session, turn, and lifecycle', () 
   test('turn.end clears accumulated spoken text so late chunks and fresh turns stay isolated', () => {
     const adapter = createAdapter()
     adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '第一句' }],
     }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '迟到的' }],
     }))).toEqual([])
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't2',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't2',
       subtitles: [{ source: 'narrator', text: '新回合' }],
     }))).toEqual([
       { type: 'audio_text', text: '新回合' },
@@ -192,22 +192,22 @@ describe('accumulated audio_text is fenced by session, turn, and lifecycle', () 
   test('cancellation reset clears accumulated spoken text across all live turns', () => {
     const adapter = createAdapter()
     adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '甲' }],
     }))
     adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't2',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't2',
       subtitles: [{ source: 'narrator', text: '乙' }],
     }))
     adapter.reset()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't2',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't2',
       subtitles: [{ source: 'main', text: '丙' }],
     }))).toEqual([
       { type: 'audio_text', text: '丙' },
     ])
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '丁' }],
     }))).toEqual([
       { type: 'audio_text', text: '丁' },
@@ -215,11 +215,11 @@ describe('accumulated audio_text is fenced by session, turn, and lifecycle', () 
   })
 })
 
-describe('zero-byte JSON-only segment-end markers (audio.chunk segment_end)', () => {
+describe('zero-byte JSON-only segment-end markers (audio.output.delta segment_end)', () => {
   test('marker metadata emits subtitles only and invents no status_change', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       byte_count: 4, output_byte_offset: 4, output_byte_count: 0,
       wire_payload_byte_count: 0, segment_end: true,
       subtitles: [{ source: 'narrator', text: '\u6211\u5148\u67e5\u4e00\u4e0b\u3002' }],
@@ -230,9 +230,9 @@ describe('zero-byte JSON-only segment-end markers (audio.chunk segment_end)', ()
 
   test('segment_end never finalizes the turn or changes typed status sequencing', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'hi' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'hi' }))
     adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       byte_count: 4, output_byte_offset: 4, output_byte_count: 0,
       wire_payload_byte_count: 0, segment_end: true,
     }))
@@ -248,8 +248,8 @@ describe('zero-byte JSON-only segment-end markers (audio.chunk segment_end)', ()
 describe('turn.end derives message_record from accumulated bot_output', () => {
   test('joined fragments become one assistant message_record', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: '第一' }))
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: '第二' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: '第一' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: '第二' }))
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([
       { type: 'message_record', message: { role: 'assistant', content: '第一第二' } },
     ])
@@ -262,37 +262,37 @@ describe('turn.end derives message_record from accumulated bot_output', () => {
 
   test('duplicate turn.end emits no duplicate record', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([])
   })
 
   test('a failed turn keeps its accumulated apology text', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: '抱歉，出错了' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: '抱歉，出错了' }))
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([
       { type: 'message_record', message: { role: 'assistant', content: '抱歉，出错了' } },
     ])
   })
 
-  test('late assistant.text from a retired turn never reaches the app', () => {
+  test('late text.output.delta from a retired turn never reaches the app', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
-    expect(adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'late' }))).toEqual([])
+    expect(adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'late' }))).toEqual([])
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([])
   })
 
   test('reset drops fragments and spoken text from the previous connection generation', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'old' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'old' }))
     adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '旧字幕' }],
     }))
     adapter.reset()
     expect(adapter.ingest(event({
-      type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '新字幕' }],
     }))).toEqual([
       { type: 'audio_text', text: '新字幕' },
@@ -426,7 +426,7 @@ describe('typed input acknowledgements become talking', () => {
   test('text.accepted for a retired turn emits no status', () => {
     const adapter = createAdapter()
     const frame = adapter.textInput('你好') as any
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'x' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
@@ -446,13 +446,13 @@ describe('typed input acknowledgements become talking', () => {
 })
 
 describe('status derivation boundaries', () => {
-  test('assistant.text, audio.start, and audio.chunk invent no status_change', () => {
+  test('text.output.delta, audio.output.start, and audio.output.delta invent no status_change', () => {
     const adapter = createAdapter()
     const messages = [
-      ...adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'hi' })),
-      ...adapter.ingest(event({ type: 'audio.start', session_id: sessionId, turn_id: 't1' })),
+      ...adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'hi' })),
+      ...adapter.ingest(event({ type: 'audio.output.start', session_id: sessionId, turn_id: 't1' })),
       ...adapter.ingest(event({
-        type: 'audio.chunk', session_id: sessionId, turn_id: 't1',
+        type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
         subtitles: [{ source: 'main', text: 'spoken' }],
       })),
     ]
@@ -471,7 +471,7 @@ describe('status derivation boundaries', () => {
 
   test('turn.end changes no status', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't1', text: 'hi' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: 'hi' }))
     expect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't1' }))).toEqual([
       { type: 'message_record', message: { role: 'assistant', content: 'hi' } },
     ])
@@ -512,8 +512,8 @@ describe('status derivation boundaries', () => {
     collect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: typed.request_id, turn_id: 't2',
     })))
-    collect(adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: 't2', text: '答' })))
-    collect(adapter.ingest(event({ type: 'audio.chunk', session_id: sessionId, turn_id: 't2', subtitles: [{ source: 'main', text: '答' }] })))
+    collect(adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: 't2', text: '答' })))
+    collect(adapter.ingest(event({ type: 'audio.output.delta', session_id: sessionId, turn_id: 't2', subtitles: [{ source: 'main', text: '答' }] })))
     collect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't2' })))
     collect(adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' })))
     expect(statuses).toEqual(['listening', 'talking', 'talking', 'sleeping'])
@@ -523,7 +523,7 @@ describe('status derivation boundaries', () => {
 
 describe('retired-turn fencing of capture events', () => {
   function retiredTurn(adapter: ReturnType<typeof createAdapter>, turnId: string) {
-    adapter.ingest(event({ type: 'assistant.text', session_id: sessionId, turn_id: turnId, text: 'x' }))
+    adapter.ingest(event({ type: 'text.output.delta', session_id: sessionId, turn_id: turnId, text: 'x' }))
     adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: turnId }))
   }
 
@@ -697,13 +697,13 @@ describe('SDK actions translate to client frames', () => {
     expect(first.request_id).not.toBe(second.request_id)
   })
 
-  test('microphone PCM maps to an input audio.chunk control frame plus binary', () => {
+  test('microphone PCM maps to an input audio.output.delta control frame plus binary', () => {
     const adapter = createAdapter()
     adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't9' }))
     const bytes = new Uint8Array([1, 2, 3, 4])
     expect(adapter.audioInput(bytes)).toEqual({
       control: {
-        type: 'audio.chunk', direction: 'input',
+        type: 'audio.input.delta', direction: 'input',
         session_id: sessionId, turn_id: 't9', byte_count: 4,
       },
       binary: bytes,
@@ -1126,7 +1126,7 @@ describe('other client events', () => {
   test('events for a different voice session are ignored', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
-      type: 'assistant.text', session_id: 'other-session', turn_id: 't1', text: 'x',
+      type: 'text.output.delta', session_id: 'other-session', turn_id: 't1', text: 'x',
     }))).toEqual([])
     expect(adapter.ingest(event({
       type: 'turn.end', session_id: 'other-session', turn_id: 't1',
