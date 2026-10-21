@@ -26,7 +26,7 @@ export type AvatarPlaybackOptions = {
   /** Samples the current video frame for stripe decoding. */
   sampleFrame: AvatarFrameSampler,
   /** Called with the previous turn when its playback boundary is confirmed. */
-  onPlaybackEnded: (_: string) => void,
+  onPlaybackEnded: (_: string, source?: "stripe" | "lifecycle", nextTurnId?: string) => void,
   /**
    * Called with every validated current-turn observation from stripe
    * decoding — including repeats of the current turn. Invalid, missing,
@@ -34,6 +34,16 @@ export type AvatarPlaybackOptions = {
    * never read as idle or as a transition.
    */
   onTurnObserved?: (_: string) => void,
+}
+
+/**
+ * Monotonic clock for avatar timing records, in the same domain across the
+ * playback observer and the send path. Falls back to wall time when the
+ * environment provides no `performance.now`.
+ */
+export function avatarTimingNow() {
+  return typeof performance !== "undefined"
+    && typeof performance.now === "function" ? performance.now() : Date.now()
 }
 
 /**
@@ -53,6 +63,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
   const tracker = createTurnTransitionTracker()
   let stopped = true
   let cancelFrame: (() => void) | undefined = undefined
+  let lastObservedTurnId: string | undefined = undefined
 
   function observe() {
     if (stopped) {
@@ -63,11 +74,32 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       if (image != null) {
         const { tokens } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
         const { endedTurnId, observedTurnId } = tracker.observe(tokens)
+        // The tracker repeats the current turn on every frame, so a timing
+        // record is emitted only for an actual token change. The arrival is
+        // stamped before the listeners run, but logged after them so the
+        // send-side record precedes the observation record.
+        const changed = observedTurnId !== undefined && observedTurnId !== lastObservedTurnId
+        const previousTurnId = lastObservedTurnId
+        const at = changed ? avatarTimingNow() : 0
+        const epochMs = changed ? Date.now() : 0
+        if (changed) {
+          lastObservedTurnId = observedTurnId
+        }
         if (endedTurnId !== undefined) {
-          options.onPlaybackEnded(endedTurnId)
+          options.onPlaybackEnded(endedTurnId, "stripe", observedTurnId)
         }
         if (observedTurnId !== undefined) {
           options.onTurnObserved?.(observedTurnId)
+        }
+        if (changed) {
+          // A diagnostic sink must never break playback or the frame loop.
+          try {
+            logger?.log(`avatar_turn_observed turn=${observedTurnId}`
+              + ` previous=${previousTurnId ?? "-"} ended=${endedTurnId ?? "-"}`
+              + ` now=${at.toFixed(3)} epoch_ms=${epochMs}`)
+          } catch {
+            // Observation logging is diagnostic only.
+          }
         }
       }
     } catch (error) {
@@ -87,11 +119,13 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       }
       stopped = false
       tracker.reset()
+      lastObservedTurnId = undefined
       cancelFrame = options.requestFrame(observe)
     },
     stop() {
       stopped = true
       tracker.reset()
+      lastObservedTurnId = undefined
       cancelFrame?.()
       cancelFrame = undefined
     },
@@ -111,7 +145,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       }
       const { endedTurnId } = tracker.endCurrent()
       if (endedTurnId !== undefined) {
-        options.onPlaybackEnded(endedTurnId)
+        options.onPlaybackEnded(endedTurnId, "lifecycle")
       }
     },
   }

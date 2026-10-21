@@ -532,3 +532,176 @@ describe('createAvatarFrameSampler', () => {
     }
   })
 })
+
+describe('createAvatarPlayback timing records', () => {
+  function recordingLogger() {
+    const lines: string[] = []
+    const logger: any = {
+      log: (message: string) => lines.push(String(message)),
+      warn: () => undefined,
+      error: () => undefined,
+    }
+    logger.push = () => logger
+    return { logger, lines }
+  }
+
+  test('records the observed turn only when the decoded token changes', () => {
+    const frames = createManualFrameSource()
+    const { logger, lines } = recordingLogger()
+    let image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      logger,
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: () => undefined,
+    })
+    playback.start()
+
+    frames.emitFrame() // first observation of A0
+    frames.emitFrame() // repeat of A0: no record
+    image = stripeImageData('A1')
+    frames.emitFrame() // transition A0 -> A1
+    frames.emitFrame() // repeat of A1: no record
+
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('turn=A0')
+    expect(lines[0]).toContain('previous=-')
+    expect(lines[0]).toContain('ended=-')
+    expect(lines[1]).toContain('turn=A1')
+    expect(lines[1]).toContain('previous=A0')
+    expect(lines[1]).toContain('ended=A0')
+    expect(lines[1]).toMatch(/now=\d+\.\d{3}/)
+    expect(lines[1]).toMatch(/epoch_ms=\d+/)
+  })
+
+  test('records no observation line for undecodable frames', () => {
+    const frames = createManualFrameSource()
+    const { logger, lines } = recordingLogger()
+    let image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      logger,
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: () => undefined,
+    })
+    playback.start()
+    frames.emitFrame()
+    image = stripeImageData(null)
+    frames.emitFrame()
+    frames.emitFrame()
+    expect(lines.filter(line => line.includes('turn='))).toHaveLength(1)
+  })
+
+  test('records again after a stop and restart with the same token', () => {
+    const frames = createManualFrameSource()
+    const { logger, lines } = recordingLogger()
+    const image = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      logger,
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: () => undefined,
+    })
+    playback.start()
+    frames.emitFrame()
+    playback.stop()
+    playback.start()
+    frames.emitFrame()
+    expect(lines.filter(line => line.includes('turn=A0'))).toHaveLength(2)
+  })
+
+  test('supplies the arriving token with the ended turn and its source', () => {
+    const frames = createManualFrameSource()
+    const calls: { turn: string, source?: string, next?: string }[] = []
+    let image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: (turn, source, next) => calls.push({ turn, source, next }),
+    })
+    playback.start()
+    frames.emitFrame()
+    image = stripeImageData('A1')
+    frames.emitFrame()
+    playback.notifyMediaEnded()
+    expect(calls).toEqual([
+      { turn: 'A0', source: 'stripe', next: 'A1' },
+      { turn: 'A1', source: 'lifecycle', next: undefined },
+    ])
+  })
+
+  test('stamps an observation before the listeners run', () => {
+    jest.useFakeTimers()
+    try {
+      jest.setSystemTime(1_700_000_000_000)
+      const frames = createManualFrameSource()
+      const { logger, lines } = recordingLogger()
+      const image = stripeImageData('A0')
+      let listenerEpoch = 0
+      const playback = createAvatarPlayback({
+        logger,
+        requestFrame: frames.requestFrame,
+        sampleFrame: () => image,
+        onPlaybackEnded: () => undefined,
+        onTurnObserved: () => {
+          // The listener moves the clock; the record must predate it.
+          jest.setSystemTime(Date.now() + 5000)
+          listenerEpoch = Date.now()
+        },
+      })
+      playback.start()
+      frames.emitFrame()
+      expect(lines).toHaveLength(1)
+      const recorded = Number(/epoch_ms=(\d+)/.exec(lines[0])![1])
+      expect(recorded).toBe(1_700_000_000_000)
+      expect(listenerEpoch).toBe(1_700_000_005_000)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  test('a throwing log sink never suppresses playback or observation', () => {
+    const frames = createManualFrameSource()
+    let image: ImageData | null = stripeImageData('A0')
+    const ended: string[] = []
+    const observed: string[] = []
+    const logger: any = {
+      log: () => { throw new Error('sink down') },
+      warn: () => undefined,
+      error: () => undefined,
+      push: () => logger,
+    }
+    const playback = createAvatarPlayback({
+      logger,
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: turn => ended.push(turn),
+      onTurnObserved: turn => observed.push(turn),
+    })
+    playback.start()
+    frames.emitFrame()
+    image = stripeImageData('A1')
+    frames.emitFrame()
+    image = stripeImageData('A1')
+    frames.emitFrame()
+    expect(ended).toEqual(['A0'])
+    expect(observed).toEqual(['A0', 'A1', 'A1'])
+  })
+
+  test('marks stripe transitions and lifecycle ends as different sources', () => {
+    const frames = createManualFrameSource()
+    const sources: (string | undefined)[] = []
+    let image: ImageData | null = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      requestFrame: frames.requestFrame,
+      sampleFrame: () => image,
+      onPlaybackEnded: (_turn, source) => sources.push(source),
+    })
+    playback.start()
+    frames.emitFrame()
+    image = stripeImageData('A1')
+    frames.emitFrame()
+    playback.notifyMediaEnded()
+    expect(sources).toEqual(['stripe', 'lifecycle'])
+  })
+})

@@ -13,7 +13,7 @@ import {
 } from "../voice/channelBinding"
 import { createVoiceMicrophone } from "../voice/microphone"
 import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from "./types"
-import { createAvatarPlayback } from "./avatarMedia"
+import { avatarTimingNow, createAvatarPlayback } from "./avatarMedia"
 
 /**
  * A DH2D connection whose voice-protocol traffic is carried by the voice
@@ -535,7 +535,18 @@ async function connectOnce(
       logger: sessionLogger,
       requestFrame: frameRequester,
       sampleFrame: hooks.dh2d.createAvatarFrameSampler(elements.video),
-      onPlaybackEnded: turnId => {
+      onPlaybackEnded: (turnId, source, nextTurnId) => {
+        // Timing point 6: stamped at the send boundary so the return leg can
+        // be paired with the client's receipt record (point 5). `next` is the
+        // token that arrived in the same decoded frame, when there was one.
+        // A diagnostic sink must never suppress the acknowledgement.
+        try {
+          sessionLogger.log(`avatar_playback_ended_sent turn=${turnId}`
+            + ` next=${nextTurnId ?? "-"} source=${source ?? "stripe"}`
+            + ` now=${avatarTimingNow().toFixed(3)} epoch_ms=${Date.now()}`)
+        } catch {
+          // Sending the playback boundary outranks the timing record.
+        }
         sendFrame(JSON.stringify(adapter.playbackEnded(turnId)))
       },
       onTurnObserved: turnId => {
