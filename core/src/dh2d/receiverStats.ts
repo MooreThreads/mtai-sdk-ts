@@ -86,7 +86,10 @@ export function createReceiverStats(options: ReceiverStatsOptions) {
     if (typeof getStats !== 'function') { safeUnavailable(options.logger, 'unsupported'); return }
     if (busy) { safeUnavailable(options.logger, 'busy'); return }
     busy = true
-    Promise.resolve().then(() => getStats.call(options.pc)).then(report => {
+    Promise.resolve().then(() => {
+      if (stopped) return undefined
+      return getStats.call(options.pc)
+    }).then(report => {
       if (stopped) return
       const current = new Map<string, Snapshot>()
       for (const item of entries(report)) {

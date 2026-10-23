@@ -97,7 +97,16 @@ describe('createReceiverStats', () => {
     stats.stop()
     release(report([{ id: 'late', type: 'inbound-rtp', kind: 'audio', ssrc: 4, timestamp: 1, packetsLost: 1 }]))
     await settled()
-    expect(getStats).toHaveBeenCalledTimes(2)
+    expect(getStats).toHaveBeenCalledTimes(1)
     expect(lines.filter(line => line.includes('receiver_stats=')).length).toBe(0)
+
+    const retiredLines: string[] = []
+    const retiredGetStats = jest.fn(async () => report([{ id: 'retired', type: 'inbound-rtp', kind: 'audio', ssrc: 5, timestamp: 2, packetsLost: 1 }]))
+    const retired = createReceiverStats({ pc: { getStats: retiredGetStats }, logger: logger(retiredLines) })
+    retired.request({ turnId: 'retired' })
+    retired.stop()
+    await settled()
+    expect(retiredGetStats).not.toHaveBeenCalled()
+    expect(retiredLines).toEqual([])
   })
 })
