@@ -87,12 +87,21 @@ its request hook runs asynchronously after playback listeners.
 Receiver diagnostics use one asynchronous `RTCPeerConnection.getStats()`
 collector per connection generation. A baseline is requested when playback is
 ready; changed-token observations request later snapshots asynchronously after
-listeners. Interval records retain only allowlisted inbound audio/video report
-identity and primitive numeric counters. Decoder and jitter-buffer means are
-interval aggregates (`1000 * delta / delta emitted-or-decoded count`), not
-same-frame measurements. Missing fields, nonfinite values, counter resets,
+listeners. Interval records retain only allowlisted inbound audio/video reports keyed by
+`id`, `kind`, and proven numeric `ssrc`, with current/previous RTCStats
+timestamps, interval duration, and raw counters carrying explicit units
+(`packets`, `count`, `frames`, `samples`, or `seconds`). `packetsLost` may be
+signed and its signed delta is preserved; other nonmonotonic counters produce a
+null delta and establish a fresh baseline. Decoder and jitter-buffer means use
+`totalDecodeTime`, `jitterBufferDelay`, the real cumulative
+`jitterBufferTargetDelay`/`jitterBufferMinimumDelay`, and emitted/decoded deltas:
+`1000 * delta / delta emitted-or-decoded count`, not same-frame measurements. Missing fields, nonfinite values, counter resets,
 identity changes, unsupported stats, rejected calls, and overlapping calls are
 reported as `null` or fixed unavailable reasons; busy calls are not queued.
+Missing SSRC, identity changes, equal/backward report timestamps, and reset
+intervals suppress that interval and use the current report as the next
+baseline. Each record also carries the observation `turn`, RTP timestamp,
+native callback timestamp, and performance origin when available.
 There is no timer, polling, retry, timeout, or media backpressure. Stopping a
 connection clears the baseline and fences late results.
 

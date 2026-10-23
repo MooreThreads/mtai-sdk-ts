@@ -61,7 +61,14 @@ function finiteDifference(end: number | null, start: number | null): number | nu
 }
 
 function timingNowOrNull(): number | null {
-  try { return finiteNumber(avatarTimingNow()) } catch { return null }
+  try {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? finiteNumber(performance.now()) : null
+  } catch { return null }
+}
+
+function safeMetadataNumber(metadata: Partial<VideoFrameCallbackMetadata> | undefined, field: keyof VideoFrameCallbackMetadata): number | null {
+  try { return finiteNumber(metadata?.[field]) } catch { return null }
 }
 
 /** Snapshot only allowlisted primitives; never serialize native metadata itself. */
@@ -102,6 +109,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
   let stopped = true
   let cancelFrame: (() => void) | undefined = undefined
   let lastObservedTurnId: string | undefined = undefined
+  let generation = 0
 
   function observe(now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) {
     if (stopped) {
@@ -121,8 +129,16 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         // send-side record precedes the observation record.
         const changed = observedTurnId !== undefined && observedTurnId !== lastObservedTurnId
         const previousTurnId = lastObservedTurnId
-        const at = changed ? (decodingEndMs ?? timingNowOrNull() ?? 0) : 0
+        const at = changed ? avatarTimingNow() : 0
         const epochMs = changed ? Date.now() : 0
+        const context = changed ? {
+          rtpTimestamp: safeMetadataNumber(metadata, 'rtpTimestamp'),
+          callbackNowMs: finiteNumber(now),
+          performanceOriginMs: (() => {
+            try { return finiteNumber(typeof performance !== 'undefined' ? performance.timeOrigin : undefined) } catch { return null }
+          })(),
+        } : undefined
+        const observationGeneration = generation
         let frameTiming = ''
         if (changed) {
           lastObservedTurnId = observedTurnId
@@ -155,13 +171,8 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
           } catch {
             // Observation logging is diagnostic only.
           }
-          const context = {
-            rtpTimestamp: finiteNumber(metadata?.rtpTimestamp),
-            callbackNowMs: finiteNumber(now),
-            performanceOriginMs: finiteNumber(typeof performance !== 'undefined' ? performance.timeOrigin : undefined),
-          }
           Promise.resolve().then(() => {
-            if (!stopped) {
+            if (!stopped && generation === observationGeneration && context) {
               try { options.onTurnChanged?.(observedTurnId, context) } catch { /* diagnostic hook is isolated */ }
             }
           }).catch(() => undefined)
@@ -183,12 +194,14 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         return
       }
       stopped = false
+      generation++
       tracker.reset()
       lastObservedTurnId = undefined
       cancelFrame = options.requestFrame(observe)
     },
     stop() {
       stopped = true
+      generation++
       tracker.reset()
       lastObservedTurnId = undefined
       cancelFrame?.()

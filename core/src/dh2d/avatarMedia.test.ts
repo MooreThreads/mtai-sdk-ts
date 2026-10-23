@@ -876,26 +876,54 @@ describe('createAvatarPlayback timing records', () => {
       const frame = JSON.parse(line.split(' frame_timing=')[1].split(' observation_timing=')[0])
       const observation = JSON.parse(line.split(' observation_timing=')[1])
       expect(Object.keys(frame)).toHaveLength(10)
+      expect(line).toContain(' now=40.000 ')
       expect(observation).toEqual({ callback_entry_ms: 10, sampling_end_ms: 20, decoding_end_ms: 35, callback_to_sampling_ms: 10, sampling_to_decoding_ms: 15, callback_to_decoding_ms: 25 })
     } finally { now.mockRestore() }
   })
 
-  test('schedules changed-token diagnostics after listeners and tolerates absent clocks', async () => {
+  test('schedules changed-token diagnostics after listeners and snapshots correlation before mutation', async () => {
     const frames = createManualFrameSource()
     const order: string[] = []
     const changed = jest.fn(() => order.push('diagnostic'))
     const logger: any = { log: () => { throw new Error('sink') }, warn: () => undefined, error: () => undefined, push: () => logger }
+    const metadata: any = { rtpTimestamp: 7 }
     const options: any = {
       logger, requestFrame: frames.requestFrame, sampleFrame: () => stripeImageData('A0'),
-      onPlaybackEnded: () => undefined, onTurnObserved: () => order.push('listener'),
+      onPlaybackEnded: () => undefined, onTurnObserved: () => { order.push('listener'); metadata.rtpTimestamp = 99 },
       onTurnChanged: changed,
     }
     const playback = createAvatarPlayback(options)
     playback.start()
-    frames.emitFrame(undefined, undefined)
+    frames.emitFrame(11, metadata)
     expect(order).toEqual(['listener'])
     await Promise.resolve()
     expect(order).toEqual(['listener', 'diagnostic'])
-    expect(changed).toHaveBeenCalledWith('A0', expect.objectContaining({ rtpTimestamp: null }))
+    expect(changed).toHaveBeenCalledWith('A0', { rtpTimestamp: 7, callbackNowMs: 11, performanceOriginMs: expect.any(Number) })
+  })
+
+  test('uses null observation clocks and fences a stop-start generation', async () => {
+    const originalPerformance = (globalThis as any).performance
+    const lines: string[] = []
+    const frames = createManualFrameSource()
+    const changed = jest.fn()
+    const logger: any = { log: (line: string) => lines.push(line), warn: () => undefined, error: () => undefined, push: () => logger }
+    try {
+      delete (globalThis as any).performance
+      let playback: ReturnType<typeof createAvatarPlayback>
+      playback = createAvatarPlayback({
+        logger, requestFrame: frames.requestFrame, sampleFrame: () => stripeImageData('A0'),
+        onPlaybackEnded: () => undefined,
+        onTurnObserved: () => { playback.stop(); playback.start() },
+        onTurnChanged: changed,
+      })
+      playback.start()
+      frames.emitFrame()
+      await Promise.resolve()
+      const observation = JSON.parse(lines[0].split(' observation_timing=')[1])
+      expect(observation).toEqual({ callback_entry_ms: null, sampling_end_ms: null, decoding_end_ms: null, callback_to_sampling_ms: null, sampling_to_decoding_ms: null, callback_to_decoding_ms: null })
+      expect(changed).not.toHaveBeenCalled()
+    } finally {
+      ;(globalThis as any).performance = originalPerformance
+    }
   })
 })

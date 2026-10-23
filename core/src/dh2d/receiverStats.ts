@@ -1,108 +1,85 @@
 import { Logger } from '../types'
 
-type StatsReport = {
-  getStats?: () => Promise<RTCStatsReport> | RTCStatsReport
-}
+type StatsReport = { getStats?: () => Promise<RTCStatsReport> | RTCStatsReport }
+type ObservationContext = { turnId?: string, rtpTimestamp?: number | null, callbackNowMs?: number | null, performanceOriginMs?: number | null }
+type ReceiverStatsOptions = { pc: StatsReport, logger?: Logger }
+type Field = typeof FIELDS[number]
+type Snapshot = { id: string, kind: 'audio' | 'video', ssrc: number | null, timestamp: number, values: Record<string, number> }
 
-type ObservationContext = {
-  turnId?: string,
-  rtpTimestamp?: number | null,
-  callbackNowMs?: number | null,
-  performanceOriginMs?: number | null,
-}
-
-type ReceiverStatsOptions = {
-  pc: StatsReport,
-  logger?: Logger,
-}
-
-type Snapshot = {
-  id: string,
-  kind: 'audio' | 'video',
-  ssrc: number | null,
-  timestamp: number,
-  values: Record<string, number>,
-}
-
-const COUNTERS = [
+const FIELDS = [
   'packetsLost', 'nackCount', 'pliCount', 'firCount', 'retransmittedPacketsReceived',
   'framesDecoded', 'freezeCount', 'totalDecodeTime', 'jitterBufferDelay',
-  'jitterBufferTarget', 'jitterBufferMinimumDelay', 'jitterBufferEmittedCount',
+  'jitterBufferTargetDelay', 'jitterBufferMinimumDelay', 'jitterBufferEmittedCount',
   'concealedSamples', 'silentConcealedSamples', 'concealmentEvents',
   'totalSamplesReceived', 'audioSamplesReceived', 'audioSamplesDecoded',
   'insertedSamplesForDeceleration', 'removedSamplesForAcceleration',
 ] as const
 
+const UNITS: Record<Field, string> = {
+  packetsLost: 'packets', nackCount: 'count', pliCount: 'count', firCount: 'count',
+  retransmittedPacketsReceived: 'packets', framesDecoded: 'frames', freezeCount: 'count',
+  totalDecodeTime: 'seconds', jitterBufferDelay: 'seconds', jitterBufferTargetDelay: 'seconds',
+  jitterBufferMinimumDelay: 'seconds', jitterBufferEmittedCount: 'count', concealedSamples: 'samples',
+  silentConcealedSamples: 'samples', concealmentEvents: 'count', totalSamplesReceived: 'samples',
+  audioSamplesReceived: 'samples', audioSamplesDecoded: 'samples',
+  insertedSamplesForDeceleration: 'samples', removedSamplesForAcceleration: 'samples',
+}
+
 function finite(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
-
-function reportEntries(report: any): any[] {
-  if (report && typeof report.forEach === 'function') {
-    const entries: any[] = []
-    report.forEach((value: any) => entries.push(value))
-    return entries
-  }
-  return []
+function safeLog(logger: Logger | undefined, line: string) { try { logger?.log(line) } catch { /* diagnostic sink is isolated */ } }
+function safeUnavailable(logger: Logger | undefined, reason: 'unsupported' | 'busy' | 'get_stats_failed') {
+  try { logger?.error(`receiver_stats_unavailable reason=${reason}`) } catch { /* fixed diagnostic only */ }
 }
-
-function safeLog(logger: Logger | undefined, message: string) {
-  try { logger?.log(message) } catch { /* diagnostics never affect media */ }
+function entries(report: any): any[] {
+  if (!report || typeof report.forEach !== 'function') return []
+  const result: any[] = []
+  try { report.forEach((value: any) => result.push(value)) } catch { return [] }
+  return result
 }
-
-function safeError(logger: Logger | undefined, reason: string) {
-  try { logger?.error(`receiver_stats_unavailable reason=${reason}`) } catch { /* isolated */ }
-}
-
 function snapshot(entry: any): Snapshot | null {
-  if (entry?.type !== 'inbound-rtp' || (entry.kind !== 'audio' && entry.kind !== 'video')) return null
+  if (entry?.type !== 'inbound-rtp' || (entry.kind !== 'audio' && entry.kind !== 'video') || typeof entry.id !== 'string') return null
   const timestamp = finite(entry.timestamp)
-  if (timestamp === null || typeof entry.id !== 'string') return null
+  if (timestamp === null) return null
   const values: Record<string, number> = {}
-  for (const field of COUNTERS) {
+  for (const field of FIELDS) {
     const value = finite(entry[field])
     if (value !== null) values[field] = value
   }
-  return {
-    id: entry.id,
-    kind: entry.kind,
-    ssrc: finite(entry.ssrc),
-    timestamp,
-    values,
+  return { id: entry.id, kind: entry.kind, ssrc: finite(entry.ssrc), timestamp, values }
+}
+function name(field: string) { return field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`) }
+function monotonicDelta(field: Field, previous: number | undefined, current: number | undefined): number | null {
+  if (previous === undefined || current === undefined || !Number.isFinite(previous) || !Number.isFinite(current)) return null
+  if (field !== 'packetsLost' && current < previous) return null
+  const result = current - previous
+  return Number.isFinite(result) ? result : null
+}
+function ratio(deltaValue: number | null, emitted: number | null): number | null {
+  if (deltaValue === null || emitted === null || emitted <= 0) return null
+  const result = 1000 * deltaValue / emitted
+  return Number.isFinite(result) ? result : null
+}
+function reportRecord(current: Snapshot, previous?: Snapshot) {
+  const identity = previous && (previous.kind !== current.kind || previous.ssrc === null || current.ssrc === null || previous.ssrc !== current.ssrc)
+  const intervalMs = previous && !identity && current.timestamp > previous.timestamp && Number.isFinite(current.timestamp - previous.timestamp)
+    ? current.timestamp - previous.timestamp : null
+  const validInterval = previous !== undefined && intervalMs !== null && !identity
+  const counters: Record<string, { value: number, delta: number | null, unit: string }> = {}
+  for (const field of FIELDS) {
+    const value = current.values[field]
+    if (value !== undefined) counters[name(field)] = { value, delta: validInterval ? monotonicDelta(field, previous!.values[field], value) : null, unit: UNITS[field] }
   }
-}
-
-function delta(previous: number | undefined, current: number | undefined): number | null {
-  if (previous === undefined || current === undefined || current < previous) return null
-  return current - previous
-}
-
-function diagnosticName(field: string): string {
-  return field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)
-}
-
-function interval(current: Snapshot, previous: Snapshot): Record<string, number | null> {
-  const result: Record<string, number | null> = {}
-  for (const field of COUNTERS) {
-    const d = delta(previous.values[field], current.values[field])
-    if (field === 'totalDecodeTime') continue
-    result[`${diagnosticName(field)}_delta`] = d
+  const emitted = validInterval ? monotonicDelta('jitterBufferEmittedCount', previous!.values.jitterBufferEmittedCount, current.values.jitterBufferEmittedCount) : null
+  const derived = {
+    jitter_buffer_actual_delay_ms: ratio(validInterval ? monotonicDelta('jitterBufferDelay', previous!.values.jitterBufferDelay, current.values.jitterBufferDelay) : null, emitted),
+    jitter_buffer_target_delay_ms: ratio(validInterval ? monotonicDelta('jitterBufferTargetDelay', previous!.values.jitterBufferTargetDelay, current.values.jitterBufferTargetDelay) : null, emitted),
+    jitter_buffer_minimum_delay_ms: ratio(validInterval ? monotonicDelta('jitterBufferMinimumDelay', previous!.values.jitterBufferMinimumDelay, current.values.jitterBufferMinimumDelay) : null, emitted),
+    decoder_mean_ms: ratio(validInterval ? monotonicDelta('totalDecodeTime', previous!.values.totalDecodeTime, current.values.totalDecodeTime) : null,
+      validInterval ? monotonicDelta('framesDecoded', previous!.values.framesDecoded, current.values.framesDecoded) : null),
   }
-  const emitted = delta(previous.values.jitterBufferEmittedCount, current.values.jitterBufferEmittedCount)
-  const delayDelta = delta(previous.values.jitterBufferDelay, current.values.jitterBufferDelay)
-  const targetDelta = delta(previous.values.jitterBufferTarget, current.values.jitterBufferTarget)
-  const minimumDelta = delta(previous.values.jitterBufferMinimumDelay, current.values.jitterBufferMinimumDelay)
-  result.jitter_buffer_actual_mean_ms = emitted !== null && emitted > 0 && delayDelta !== null ? 1000 * delayDelta / emitted : null
-  result.jitter_buffer_target_mean_ms = emitted !== null && emitted > 0 && targetDelta !== null ? 1000 * targetDelta / emitted : null
-  result.jitter_buffer_minimum_mean_ms = emitted !== null && emitted > 0 && minimumDelta !== null ? 1000 * minimumDelta / emitted : null
-  const decoderFrames = delta(previous.values.framesDecoded, current.values.framesDecoded)
-  const decodeTime = delta(previous.values.totalDecodeTime, current.values.totalDecodeTime)
-  result.decoder_mean_ms = decoderFrames !== null && decoderFrames > 0 && decodeTime !== null ? 1000 * decodeTime / decoderFrames : null
-  return result
-}
-
-function identityChanged(current: Snapshot, previous: Snapshot): boolean {
-  return current.id !== previous.id || current.kind !== previous.kind || current.ssrc !== previous.ssrc
+  return { id: current.id, kind: current.kind, ssrc: current.ssrc, previous_timestamp_ms: previous?.timestamp ?? null, timestamp_ms: current.timestamp, interval_ms: intervalMs, counters, derived }
 }
 
 export function createReceiverStats(options: ReceiverStatsOptions) {
@@ -110,55 +87,29 @@ export function createReceiverStats(options: ReceiverStatsOptions) {
   let stopped = false
   let busy = false
   let baseline = new Map<string, Snapshot>()
-
   function request(context: ObservationContext = {}) {
     if (stopped) return
-    if (typeof getStats !== 'function') {
-      safeError(options.logger, 'unsupported')
-      return
-    }
-    if (busy) {
-      safeError(options.logger, 'busy')
-      return
-    }
+    if (typeof getStats !== 'function') { safeUnavailable(options.logger, 'unsupported'); return }
+    if (busy) { safeUnavailable(options.logger, 'busy'); return }
     busy = true
-    // Promise continuation keeps getStats out of the synchronous media path.
     Promise.resolve().then(() => getStats.call(options.pc)).then(report => {
       if (stopped) return
       const current = new Map<string, Snapshot>()
-      for (const entry of reportEntries(report)) {
-        const item = snapshot(entry)
-        if (item) current.set(item.id, item)
+      for (const item of entries(report)) {
+        const parsed = snapshot(item)
+        if (parsed) current.set(parsed.id, parsed)
       }
-      const intervalData: Record<string, Record<string, number | null>> = {}
-      for (const [id, item] of current) {
-        const previous = baseline.get(id)
-        if (previous && item.timestamp > previous.timestamp && !identityChanged(item, previous)) {
-          intervalData[item.kind] = interval(item, previous)
-        }
-      }
+      const records = [...current.values()].map(item => reportRecord(item, baseline.get(item.id)))
       const phase = baseline.size === 0 ? 'baseline' : 'interval'
       safeLog(options.logger, `receiver_stats phase=${phase} receiver_stats=${JSON.stringify({
-        phase,
-        turn: context.turnId ?? null,
-        rtp_timestamp: finite(context.rtpTimestamp),
-        performance_origin_ms: finite(context.performanceOriginMs),
-        timestamp_ms: current.size ? Math.max(...[...current.values()].map(item => item.timestamp)) : null,
-        video: intervalData.video ?? null,
-        audio: intervalData.audio ?? null,
-        reports: [...current.values()].map(item => ({ id: item.id, kind: item.kind, ssrc: item.ssrc })),
+        phase, turn: context.turnId ?? null, rtp_timestamp: finite(context.rtpTimestamp),
+        callback_now_ms: finite(context.callbackNowMs), performance_origin_ms: finite(context.performanceOriginMs), reports: records,
       })}`)
       baseline = current
-    }).catch(() => {
-      if (!stopped) safeError(options.logger, 'get_stats_failed')
-    }).finally(() => { busy = false })
+    }).catch(() => { if (!stopped) safeUnavailable(options.logger, 'get_stats_failed') }).finally(() => { busy = false })
   }
-
   return {
     request,
-    stop() {
-      stopped = true
-      baseline = new Map()
-    },
+    stop() { stopped = true; baseline = new Map() },
   }
 }

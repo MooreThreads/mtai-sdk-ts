@@ -567,14 +567,18 @@ async function connectOnce(
     })
     avatarPlayback = playback
     playback.start()
+    const stopPlayback = () => {
+      receiverStats.stop()
+      playback.stop()
+    }
     return {
-      ...connectionBase(ws, pc, canonicalSessionId, adapter, playback.stop, dispose),
+      ...connectionBase(ws, pc, canonicalSessionId, adapter, stopPlayback, dispose),
       ...(({ on, off }) => ({ on, off }))(evt),
     }
   }
   sessionLogger.warn('requestVideoFrameCallback unavailable; avatar turn decoding disabled')
   return {
-    ...connectionBase(ws, pc, canonicalSessionId, adapter, () => undefined, dispose),
+    ...connectionBase(ws, pc, canonicalSessionId, adapter, () => receiverStats.stop(), dispose),
     ...(({ on, off }) => ({ on, off }))(evt),
   }
 }
