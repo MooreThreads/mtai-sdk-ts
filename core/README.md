@@ -51,7 +51,7 @@ observation logs. Evidence is captured before playback listeners, while the log
 is emitted after them. The existing `now` is the SDK observation timestamp
 captured after stripe sampling and decoding, before listeners; it is distinct
 from the native callback timestamp `callback_now_ms`. These diagnostics do not
-change playback or latency.
+change playback or latency policy; logging overhead is not a measured speedup.
 
 The JSON contains exactly these fields (native times use the document's
 `performance` clock):
