@@ -74,7 +74,11 @@ function createManualFrameSource() {
   }
   return {
     requestFrame,
-    emitFrame: (now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) => callback?.(now, metadata),
+    emitFrame: (now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) => {
+      const pending = callback
+      callback = undefined
+      pending?.(now, metadata)
+    },
   }
 }
 

@@ -48,7 +48,10 @@ On each validated turn-token change, `avatar_turn_observed` retains its existing
 `turn`, `previous`, `ended`, `now`, and `epoch_ms` fields and appends
 ` frame_timing=<JSON>`. Repeated tokens and invalid frames produce no additional
 observation logs. Evidence is captured before playback listeners, while the log
-is emitted after them. These diagnostics do not change playback or latency.
+is emitted after them. The existing `now` is the SDK observation timestamp
+captured after stripe sampling and decoding, before listeners; it is distinct
+from the native callback timestamp `callback_now_ms`. These diagnostics do not
+change playback or latency.
 
 The JSON contains exactly these fields (native times use the document's
 `performance` clock):
@@ -82,8 +85,11 @@ avatar_turn_observed turn=A1 previous=A0 ended=A0 now=1205.000 epoch_ms=17000000
 For cross-process correlation, convert native timestamps to epoch milliseconds
 with `time_origin_ms + native_timestamp_ms`; do not subtract unrelated
 monotonic clocks. Presentation means compositor submission, not actual speaker
-playback. `processing_duration_ms` overlaps receive-to-presentation time: do not
-sum them as disjoint stages. A token identifies a turn, not uniquely its first
+playback. Receive-to-presentation spans browser receive buffering, A/V sync,
+decode, and presentation; it is not a pure jitter-buffer measurement, and the
+exact decomposition remains unknown. `processing_duration_ms` overlaps this
+interval: do not sum decoder processing and receive-to-presentation as disjoint
+stages. A token identifies a turn, not uniquely its first
 encoded frame; RTP timestamps and frame counts aid correlation. Packaging,
 deployment, and ten warmed-turn real measurements are outside this diagnostic
 change; no latency improvement is claimed.
