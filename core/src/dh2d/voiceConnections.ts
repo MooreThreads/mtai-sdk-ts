@@ -14,6 +14,7 @@ import {
 import { createVoiceMicrophone } from "../voice/microphone"
 import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from "./types"
 import { avatarTimingNow, createAvatarPlayback } from "./avatarMedia"
+import { createReceiverStats } from "./receiverStats"
 
 /**
  * A DH2D connection whose voice-protocol traffic is carried by the voice
@@ -239,6 +240,7 @@ async function connectOnce(
   let sessionLogger = attemptLogger
   let avatarPlayback: ReturnType<typeof createAvatarPlayback> | undefined = undefined
   let stopMicrophone: (() => void) | undefined = undefined
+  const receiverStats = createReceiverStats({ pc, logger: attemptLogger })
   let disposed = false
 
   // The native websocket throws on send() while still CONNECTING, so every
@@ -512,6 +514,7 @@ async function connectOnce(
     disposed = true
     running = false
     configuredBinding?.workflow.dispose()
+    receiverStats.stop()
     avatarPlayback?.stop()
     stopMicrophone?.()
     ws.onopen = null
@@ -529,6 +532,7 @@ async function connectOnce(
   if (!running || disposed) {
     throw new Error('connection aborted')
   }
+  receiverStats.request({ performanceOriginMs: typeof performance !== 'undefined' ? performance.timeOrigin : null })
   const frameRequester = hooks.dh2d.createAvatarFrameRequester(elements.video)
   if (frameRequester) {
     const playback = createAvatarPlayback({
@@ -551,6 +555,14 @@ async function connectOnce(
       },
       onTurnObserved: turnId => {
         adapter.observeAvatarTurn(turnId)
+      },
+      onTurnChanged: (turnId, context) => {
+        receiverStats.request({
+          turnId,
+          rtpTimestamp: context.rtpTimestamp,
+          callbackNowMs: context.callbackNowMs,
+          performanceOriginMs: context.performanceOriginMs,
+        })
       },
     })
     avatarPlayback = playback

@@ -34,6 +34,12 @@ export type AvatarPlaybackOptions = {
    * never read as idle or as a transition.
    */
   onTurnObserved?: (_: string) => void,
+  /** Diagnostic hook for changed tokens; invoked in a promise continuation after listeners. */
+  onTurnChanged?: (_: string, context: {
+    rtpTimestamp: number | null,
+    callbackNowMs: number | null,
+    performanceOriginMs: number | null,
+  }) => void,
 }
 
 /**
@@ -52,6 +58,10 @@ function finiteNumber(value: unknown): number | null {
 
 function finiteDifference(end: number | null, start: number | null): number | null {
   return end !== null && start !== null ? finiteNumber(end - start) : null
+}
+
+function timingNowOrNull(): number | null {
+  try { return finiteNumber(avatarTimingNow()) } catch { return null }
 }
 
 /** Snapshot only allowlisted primitives; never serialize native metadata itself. */
@@ -97,10 +107,13 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
     if (stopped) {
       return
     }
+    const callbackEntryMs = timingNowOrNull()
     try {
       const image = options.sampleFrame()
+      const samplingEndMs = timingNowOrNull()
       if (image != null) {
         const { tokens } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
+        const decodingEndMs = timingNowOrNull()
         const { endedTurnId, observedTurnId } = tracker.observe(tokens)
         // The tracker repeats the current turn on every frame, so a timing
         // record is emitted only for an actual token change. The arrival is
@@ -108,7 +121,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         // send-side record precedes the observation record.
         const changed = observedTurnId !== undefined && observedTurnId !== lastObservedTurnId
         const previousTurnId = lastObservedTurnId
-        const at = changed ? avatarTimingNow() : 0
+        const at = changed ? (decodingEndMs ?? timingNowOrNull() ?? 0) : 0
         const epochMs = changed ? Date.now() : 0
         let frameTiming = ''
         if (changed) {
@@ -128,18 +141,36 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         if (changed) {
           // A diagnostic sink must never break playback or the frame loop.
           try {
+            const observationTiming = JSON.stringify({
+              callback_entry_ms: callbackEntryMs,
+              sampling_end_ms: samplingEndMs,
+              decoding_end_ms: decodingEndMs,
+              callback_to_sampling_ms: finiteDifference(samplingEndMs, callbackEntryMs),
+              sampling_to_decoding_ms: finiteDifference(decodingEndMs, samplingEndMs),
+              callback_to_decoding_ms: finiteDifference(decodingEndMs, callbackEntryMs),
+            })
             logger?.log(`avatar_turn_observed turn=${observedTurnId}`
               + ` previous=${previousTurnId ?? "-"} ended=${endedTurnId ?? "-"}`
-              + ` now=${at.toFixed(3)} epoch_ms=${epochMs}${frameTiming}`)
+              + ` now=${at.toFixed(3)} epoch_ms=${epochMs}${frameTiming} observation_timing=${observationTiming}`)
           } catch {
             // Observation logging is diagnostic only.
           }
+          const context = {
+            rtpTimestamp: finiteNumber(metadata?.rtpTimestamp),
+            callbackNowMs: finiteNumber(now),
+            performanceOriginMs: finiteNumber(typeof performance !== 'undefined' ? performance.timeOrigin : undefined),
+          }
+          Promise.resolve().then(() => {
+            if (!stopped) {
+              try { options.onTurnChanged?.(observedTurnId, context) } catch { /* diagnostic hook is isolated */ }
+            }
+          }).catch(() => undefined)
         }
       }
     } catch (error) {
       // A failing sample (for example a mid-resize frame) must never break
       // the observation loop.
-      logger?.error('avatar frame observation failed', error)
+      try { logger?.error('avatar frame observation failed', error) } catch { /* diagnostic logging is isolated */ }
     }
     if (!stopped) {
       cancelFrame = options.requestFrame(observe)

@@ -584,7 +584,7 @@ describe('createAvatarPlayback timing records', () => {
     processingDuration: 0.008, presentedFrames: 42, rtpTimestamp: 90000,
     width: 1920, height: 1080, mediaTime: 1,
   })
-  const timing = (line: string) => JSON.parse(line.split(' frame_timing=')[1])
+  const timing = (line: string) => JSON.parse(line.split(' frame_timing=')[1].split(' observation_timing=')[0])
 
   function timingFixture(onPlaybackEnded = jest.fn(), onTurnObserved = jest.fn()) {
     const frames = createManualFrameSource()
@@ -686,7 +686,7 @@ describe('createAvatarPlayback timing records', () => {
     const f = timingFixture(ended, observed)
     const metadata = { get receiveTime(): number { throw new Error('getter down') } }
     f.frames.emitFrame(1204, metadata)
-    expect(f.lines[0]).toMatch(/^avatar_turn_observed turn=A0 previous=- ended=- now=\d+\.\d{3} epoch_ms=\d+$/)
+    expect(f.lines[0]).toMatch(/^avatar_turn_observed turn=A0 previous=- ended=- now=\d+\.\d{3} epoch_ms=\d+ observation_timing=/)
     f.turn('A1')
     f.frames.emitFrame(1204, nativeMetadata())
     expect(timing(f.lines[1]).callback_now_ms).toBe(1204)
@@ -857,5 +857,45 @@ describe('createAvatarPlayback timing records', () => {
     frames.emitFrame()
     playback.notifyMediaEnded()
     expect(sources).toEqual(['stripe', 'lifecycle'])
+  })
+
+  test('appends observation timing without changing the ten frame timing fields', () => {
+    const frames = createManualFrameSource()
+    const lines: string[] = []
+    const logger: any = { log: (line: string) => lines.push(line), warn: () => undefined, error: () => undefined, push: () => logger }
+    const times = [10, 20, 35, 40]
+    const now = jest.spyOn(performance, 'now').mockImplementation(() => times.shift() ?? 40)
+    try {
+      const playback = createAvatarPlayback({
+        logger, requestFrame: frames.requestFrame, sampleFrame: () => stripeImageData('A0'),
+        onPlaybackEnded: () => undefined,
+      })
+      playback.start()
+      frames.emitFrame(99, { receiveTime: 1 })
+      const line = lines[0]
+      const frame = JSON.parse(line.split(' frame_timing=')[1].split(' observation_timing=')[0])
+      const observation = JSON.parse(line.split(' observation_timing=')[1])
+      expect(Object.keys(frame)).toHaveLength(10)
+      expect(observation).toEqual({ callback_entry_ms: 10, sampling_end_ms: 20, decoding_end_ms: 35, callback_to_sampling_ms: 10, sampling_to_decoding_ms: 15, callback_to_decoding_ms: 25 })
+    } finally { now.mockRestore() }
+  })
+
+  test('schedules changed-token diagnostics after listeners and tolerates absent clocks', async () => {
+    const frames = createManualFrameSource()
+    const order: string[] = []
+    const changed = jest.fn(() => order.push('diagnostic'))
+    const logger: any = { log: () => { throw new Error('sink') }, warn: () => undefined, error: () => undefined, push: () => logger }
+    const options: any = {
+      logger, requestFrame: frames.requestFrame, sampleFrame: () => stripeImageData('A0'),
+      onPlaybackEnded: () => undefined, onTurnObserved: () => order.push('listener'),
+      onTurnChanged: changed,
+    }
+    const playback = createAvatarPlayback(options)
+    playback.start()
+    frames.emitFrame(undefined, undefined)
+    expect(order).toEqual(['listener'])
+    await Promise.resolve()
+    expect(order).toEqual(['listener', 'diagnostic'])
+    expect(changed).toHaveBeenCalledWith('A0', expect.objectContaining({ rtpTimestamp: null }))
   })
 })

@@ -76,6 +76,26 @@ without native arguments still produce the suffix with unavailable values set
 to `null`. A throwing metadata getter or unexpected snapshot failure may omit
 only the suffix; diagnostic failures must not interrupt playback.
 
+The separate `observation_timing` suffix contains six fields, all in the
+performance clock domain: `callback_entry_ms`, `sampling_end_ms`,
+`decoding_end_ms`, `callback_to_sampling_ms`, `sampling_to_decoding_ms`, and
+`callback_to_decoding_ms`. Sampling covers canvas draw/readback; decoding covers
+stripe conversion/decoding. Missing or nonfinite clock readings are `null`.
+The suffix is emitted only for changed validated tokens and is diagnostic only;
+its request hook runs asynchronously after playback listeners.
+
+Receiver diagnostics use one asynchronous `RTCPeerConnection.getStats()`
+collector per connection generation. A baseline is requested when playback is
+ready; changed-token observations request later snapshots asynchronously after
+listeners. Interval records retain only allowlisted inbound audio/video report
+identity and primitive numeric counters. Decoder and jitter-buffer means are
+interval aggregates (`1000 * delta / delta emitted-or-decoded count`), not
+same-frame measurements. Missing fields, nonfinite values, counter resets,
+identity changes, unsupported stats, rejected calls, and overlapping calls are
+reported as `null` or fixed unavailable reasons; busy calls are not queued.
+There is no timer, polling, retry, timeout, or media backpressure. Stopping a
+connection clears the baseline and fences late results.
+
 Synthetic example (not a measurement):
 
 ```text
