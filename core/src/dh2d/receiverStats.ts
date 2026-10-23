@@ -4,7 +4,7 @@ type StatsReport = { getStats?: () => Promise<RTCStatsReport> | RTCStatsReport }
 type ObservationContext = { turnId?: string, rtpTimestamp?: number | null, callbackNowMs?: number | null, performanceOriginMs?: number | null }
 type ReceiverStatsOptions = { pc: StatsReport, logger?: Logger }
 type Field = typeof FIELDS[number]
-type Snapshot = { id: string, kind: 'audio' | 'video', ssrc: number | null, timestamp: number, values: Record<string, number> }
+type Snapshot = { id: string, kind: 'audio' | 'video', ssrc: number | null, timestamp: number | null, values: Record<Field, number | null> }
 
 const FIELDS = [
   'packetsLost', 'nackCount', 'pliCount', 'firCount', 'retransmittedPacketsReceived',
@@ -25,13 +25,9 @@ const UNITS: Record<Field, string> = {
   insertedSamplesForDeceleration: 'samples', removedSamplesForAcceleration: 'samples',
 }
 
-function finite(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
+function finite(value: unknown): number | null { return typeof value === 'number' && Number.isFinite(value) ? value : null }
 function safeLog(logger: Logger | undefined, line: string) { try { logger?.log(line) } catch { /* diagnostic sink is isolated */ } }
-function safeUnavailable(logger: Logger | undefined, reason: 'unsupported' | 'busy' | 'get_stats_failed') {
-  try { logger?.error(`receiver_stats_unavailable reason=${reason}`) } catch { /* fixed diagnostic only */ }
-}
+function safeUnavailable(logger: Logger | undefined, reason: 'unsupported' | 'busy' | 'get_stats_failed') { try { logger?.error(`receiver_stats_unavailable reason=${reason}`) } catch { /* fixed diagnostic only */ } }
 function entries(report: any): any[] {
   if (!report || typeof report.forEach !== 'function') return []
   const result: any[] = []
@@ -40,18 +36,13 @@ function entries(report: any): any[] {
 }
 function snapshot(entry: any): Snapshot | null {
   if (entry?.type !== 'inbound-rtp' || (entry.kind !== 'audio' && entry.kind !== 'video') || typeof entry.id !== 'string') return null
-  const timestamp = finite(entry.timestamp)
-  if (timestamp === null) return null
-  const values: Record<string, number> = {}
-  for (const field of FIELDS) {
-    const value = finite(entry[field])
-    if (value !== null) values[field] = value
-  }
-  return { id: entry.id, kind: entry.kind, ssrc: finite(entry.ssrc), timestamp, values }
+  const values = {} as Record<Field, number | null>
+  for (const field of FIELDS) values[field] = finite(entry[field])
+  return { id: entry.id, kind: entry.kind, ssrc: finite(entry.ssrc), timestamp: finite(entry.timestamp), values }
 }
 function name(field: string) { return field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`) }
-function monotonicDelta(field: Field, previous: number | undefined, current: number | undefined): number | null {
-  if (previous === undefined || current === undefined || !Number.isFinite(previous) || !Number.isFinite(current)) return null
+function monotonicDelta(field: Field, previous: number | null, current: number | null): number | null {
+  if (previous === null || current === null) return null
   if (field !== 'packetsLost' && current < previous) return null
   const result = current - previous
   return Number.isFinite(result) ? result : null
@@ -63,13 +54,16 @@ function ratio(deltaValue: number | null, emitted: number | null): number | null
 }
 function reportRecord(current: Snapshot, previous?: Snapshot) {
   const identity = previous && (previous.kind !== current.kind || previous.ssrc === null || current.ssrc === null || previous.ssrc !== current.ssrc)
-  const intervalMs = previous && !identity && current.timestamp > previous.timestamp && Number.isFinite(current.timestamp - previous.timestamp)
-    ? current.timestamp - previous.timestamp : null
-  const validInterval = previous !== undefined && intervalMs !== null && !identity
-  const counters: Record<string, { value: number, delta: number | null, unit: string }> = {}
+  const timestampValid = previous?.timestamp !== null && previous?.timestamp !== undefined && current.timestamp !== null
+    && current.timestamp > previous.timestamp && Number.isFinite(current.timestamp - previous.timestamp)
+  const sharedReset = previous !== undefined && FIELDS.some(field => field !== 'packetsLost'
+    && previous.values[field] !== null && current.values[field] !== null && current.values[field]! < previous.values[field]!)
+  const intervalMs = !identity && timestampValid && !sharedReset ? current.timestamp! - previous!.timestamp! : null
+  const validInterval = previous !== undefined && intervalMs !== null
+  const counters: Record<string, { value: number | null, delta: number | null, unit: string }> = {}
   for (const field of FIELDS) {
     const value = current.values[field]
-    if (value !== undefined) counters[name(field)] = { value, delta: validInterval ? monotonicDelta(field, previous!.values[field], value) : null, unit: UNITS[field] }
+    counters[name(field)] = { value, delta: validInterval ? monotonicDelta(field, previous!.values[field], value) : null, unit: UNITS[field] }
   }
   const emitted = validInterval ? monotonicDelta('jitterBufferEmittedCount', previous!.values.jitterBufferEmittedCount, current.values.jitterBufferEmittedCount) : null
   const derived = {
@@ -108,8 +102,5 @@ export function createReceiverStats(options: ReceiverStatsOptions) {
       baseline = current
     }).catch(() => { if (!stopped) safeUnavailable(options.logger, 'get_stats_failed') }).finally(() => { busy = false })
   }
-  return {
-    request,
-    stop() { stopped = true; baseline = new Map() },
-  }
+  return { request, stop() { stopped = true; baseline = new Map() } }
 }

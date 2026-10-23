@@ -901,6 +901,25 @@ describe('createAvatarPlayback timing records', () => {
     expect(changed).toHaveBeenCalledWith('A0', { rtpTimestamp: 7, callbackNowMs: 11, performanceOriginMs: expect.any(Number) })
   })
 
+  test('sanitizes frame failure logging and continues the observation loop', () => {
+    const frames = createManualFrameSource()
+    let samples = 0
+    const errors: any[][] = []
+    const observed: string[] = []
+    const logger: any = { log: () => undefined, warn: () => undefined, error: (...args: any[]) => errors.push(args), push: () => logger }
+    const playback = createAvatarPlayback({
+      logger, requestFrame: frames.requestFrame,
+      sampleFrame: () => { samples++; if (samples === 1) throw new Error('secret failure'); return stripeImageData('A0') },
+      onPlaybackEnded: () => undefined, onTurnObserved: turn => observed.push(turn),
+    })
+    playback.start()
+    expect(() => frames.emitFrame()).not.toThrow()
+    expect(() => frames.emitFrame()).not.toThrow()
+    expect(observed).toEqual(['A0'])
+    expect(errors).toEqual([['avatar frame observation failed', 'observation_failed']] )
+    expect(JSON.stringify(errors)).not.toContain('secret failure')
+  })
+
   test('uses null observation clocks and fences a stop-start generation', async () => {
     const originalPerformance = (globalThis as any).performance
     const lines: string[] = []

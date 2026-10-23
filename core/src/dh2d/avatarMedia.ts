@@ -181,7 +181,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
     } catch (error) {
       // A failing sample (for example a mid-resize frame) must never break
       // the observation loop.
-      try { logger?.error('avatar frame observation failed', error) } catch { /* diagnostic logging is isolated */ }
+      try { logger?.error('avatar frame observation failed', 'observation_failed') } catch { /* diagnostic logging is isolated */ }
     }
     if (!stopped) {
       cancelFrame = options.requestFrame(observe)

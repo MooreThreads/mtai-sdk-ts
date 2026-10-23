@@ -89,8 +89,9 @@ collector per connection generation. A baseline is requested when playback is
 ready; changed-token observations request later snapshots asynchronously after
 listeners. Interval records retain only allowlisted inbound audio/video reports keyed by
 `id`, `kind`, and proven numeric `ssrc`, with current/previous RTCStats
-timestamps, interval duration, and raw counters carrying explicit units
-(`packets`, `count`, `frames`, `samples`, or `seconds`). `packetsLost` may be
+timestamps, interval duration, and every allowlisted counter carrying an
+explicit unit (`packets`, `count`, `frames`, `samples`, or `seconds`). Missing
+or nonfinite counters remain present as `{ value: null, delta: null, unit }`. `packetsLost` may be
 signed and its signed delta is preserved; other nonmonotonic counters produce a
 null delta and establish a fresh baseline. Decoder and jitter-buffer means use
 `totalDecodeTime`, `jitterBufferDelay`, the real cumulative
@@ -98,9 +99,11 @@ null delta and establish a fresh baseline. Decoder and jitter-buffer means use
 `1000 * delta / delta emitted-or-decoded count`, not same-frame measurements. Missing fields, nonfinite values, counter resets,
 identity changes, unsupported stats, rejected calls, and overlapping calls are
 reported as `null` or fixed unavailable reasons; busy calls are not queued.
-Missing SSRC, identity changes, equal/backward report timestamps, and reset
-intervals suppress that interval and use the current report as the next
-baseline. Each record also carries the observation `turn`, RTP timestamp,
+Missing SSRC, missing/nonfinite timestamps, identity changes, equal/backward
+report timestamps, and any shared non-`packetsLost` counter decrease suppress
+that report's interval and use the current report as the next baseline. Raw
+values remain present when the interval is null; a later valid pair may resume
+interval reporting. Each record also carries the observation `turn`, RTP timestamp,
 native callback timestamp, and performance origin when available.
 There is no timer, polling, retry, timeout, or media backpressure. Stopping a
 connection clears the baseline and fences late results.
