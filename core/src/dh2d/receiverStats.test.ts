@@ -77,15 +77,19 @@ describe('createReceiverStats', () => {
     let release!: (value: any) => void
     const pending = new Promise(resolve => { release = resolve })
     const lines: string[] = []
-    const getStats = jest.fn(() => pending)
+    let calls = 0
+    const getStats = jest.fn(() => calls++ === 0 ? Promise.reject(new Error('secret')) : pending)
     const stats = createReceiverStats({ pc: { getStats }, logger: { ...logger(lines), log: () => { throw new Error('sink') } } })
+    stats.request({ turnId: 'failed' })
+    await settled()
+    expect(lines).toContain('receiver_stats_unavailable reason=get_stats_failed')
     stats.request({ turnId: 'busy' })
     stats.request({ turnId: 'dropped' })
     expect(lines).toContain('receiver_stats_unavailable reason=busy')
     stats.stop()
     release(report([{ id: 'late', type: 'inbound-rtp', kind: 'audio', ssrc: 4, timestamp: 1, packetsLost: 1 }]))
     await settled()
-    expect(getStats).toHaveBeenCalledTimes(1)
+    expect(getStats).toHaveBeenCalledTimes(2)
     expect(lines.filter(line => line.includes('receiver_stats=')).length).toBe(0)
   })
 })
