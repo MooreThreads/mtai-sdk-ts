@@ -42,6 +42,52 @@ surfaced as `audio_text`, streamed LLM output as `bot_output`, and a
 Avatar playback boundaries are decoded from the DH2D video turn stripe and
 reported to the client as `playback.ended`.
 
+### Avatar frame timing diagnostics
+
+On each validated turn-token change, `avatar_turn_observed` retains its existing
+`turn`, `previous`, `ended`, `now`, and `epoch_ms` fields and appends
+` frame_timing=<JSON>`. Repeated tokens and invalid frames produce no additional
+observation logs. Evidence is captured before playback listeners, while the log
+is emitted after them. These diagnostics do not change playback or latency.
+
+The JSON contains exactly these fields (native times use the document's
+`performance` clock):
+
+| Field | Source / units |
+| --- | --- |
+| `callback_now_ms` | Native requestVideoFrameCallback `now`, milliseconds; no fallback |
+| `receive_time_ms` | Native `receiveTime`, milliseconds |
+| `presentation_time_ms` | Native `presentationTime`, milliseconds |
+| `expected_display_time_ms` | Native `expectedDisplayTime`, milliseconds |
+| `processing_duration_ms` | Native `processingDuration` (seconds) × 1000 |
+| `presented_frames` | Native `presentedFrames`, frame count |
+| `rtp_timestamp` | Native `rtpTimestamp`, RTP clock ticks |
+| `time_origin_ms` | Document `performance.timeOrigin`, epoch milliseconds |
+| `receive_to_presentation_ms` | `presentation_time_ms - receive_time_ms` |
+| `presentation_to_callback_ms` | `callback_now_ms - presentation_time_ms` |
+
+Every value is a finite number or JSON `null`. Missing, nonnumeric, nonfinite,
+and overflowing results are `null`; zero and signed differences are preserved.
+No raw metadata or other native fields are serialized. Legacy frame sources
+without native arguments still produce the suffix with unavailable values set
+to `null`. A throwing metadata getter or unexpected snapshot failure may omit
+only the suffix; diagnostic failures must not interrupt playback.
+
+Synthetic example (not a measurement):
+
+```text
+avatar_turn_observed turn=A1 previous=A0 ended=A0 now=1205.000 epoch_ms=1700000001205 frame_timing={"callback_now_ms":1204,"receive_time_ms":1000,"presentation_time_ms":1200,"expected_display_time_ms":1216,"processing_duration_ms":8,"presented_frames":42,"rtp_timestamp":90000,"time_origin_ms":1700000000000,"receive_to_presentation_ms":200,"presentation_to_callback_ms":4}
+```
+
+For cross-process correlation, convert native timestamps to epoch milliseconds
+with `time_origin_ms + native_timestamp_ms`; do not subtract unrelated
+monotonic clocks. Presentation means compositor submission, not actual speaker
+playback. `processing_duration_ms` overlaps receive-to-presentation time: do not
+sum them as disjoint stages. A token identifies a turn, not uniquely its first
+encoded frame; RTP timestamps and frame counts aid correlation. Packaging,
+deployment, and ten warmed-turn real measurements are outside this diagnostic
+change; no latency improvement is claimed.
+
 Input mapping in voice-client mode:
 
 - `input.text` maps to the client protocol's `text.input`.

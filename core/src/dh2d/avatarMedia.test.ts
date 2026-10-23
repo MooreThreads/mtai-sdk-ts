@@ -67,14 +67,14 @@ function tiledStripeImageData(token: string | null, width: number): ImageData {
 }
 
 function createManualFrameSource() {
-  let callback: (() => void) | undefined
-  const requestFrame = (onFrame: () => void) => {
+  let callback: ((now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) => void) | undefined
+  const requestFrame = (onFrame: typeof callback) => {
     callback = onFrame
     return () => { callback = undefined }
   }
   return {
     requestFrame,
-    emitFrame: () => callback?.(),
+    emitFrame: (now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) => callback?.(now, metadata),
   }
 }
 
@@ -390,6 +390,30 @@ describe('createAvatarPlayback onTurnObserved', () => {
 })
 
 describe('createAvatarFrameRequester', () => {
+  test('forwards native callback timing metadata without changing cancellation', () => {
+    let callback: VideoFrameRequestCallback | undefined
+    const cancelVideoFrameCallback = jest.fn()
+    const video = {
+      requestVideoFrameCallback: (nativeCallback: VideoFrameRequestCallback) => {
+        callback = nativeCallback
+        return 73
+      },
+      cancelVideoFrameCallback,
+    } as unknown as HTMLVideoElement
+    const onFrame = jest.fn()
+    const cancel = createAvatarFrameRequester(video)!(onFrame)
+    const metadata: VideoFrameCallbackMetadata = {
+      receiveTime: 1000, presentationTime: 1200, expectedDisplayTime: 1216,
+      processingDuration: 0.008, presentedFrames: 42, rtpTimestamp: 90000,
+      width: 1920, height: 1080, mediaTime: 1,
+    }
+    callback!(1204, metadata)
+    expect(onFrame).toHaveBeenCalledWith(1204, metadata)
+    expect(onFrame.mock.calls[0][1]).toBe(metadata)
+    cancel()
+    expect(cancelVideoFrameCallback).toHaveBeenCalledWith(73)
+  })
+
   test('returns null when requestVideoFrameCallback is unavailable', () => {
     expect(createAvatarFrameRequester({} as HTMLVideoElement)).toBeNull()
   })
@@ -544,6 +568,132 @@ describe('createAvatarPlayback timing records', () => {
     logger.push = () => logger
     return { logger, lines }
   }
+
+  const emptyTiming = {
+    callback_now_ms: null, receive_time_ms: null, presentation_time_ms: null,
+    expected_display_time_ms: null, processing_duration_ms: null,
+    presented_frames: null, rtp_timestamp: null, time_origin_ms: null,
+    receive_to_presentation_ms: null, presentation_to_callback_ms: null,
+  }
+  const nativeMetadata = () => ({
+    receiveTime: 1000, presentationTime: 1200, expectedDisplayTime: 1216,
+    processingDuration: 0.008, presentedFrames: 42, rtpTimestamp: 90000,
+    width: 1920, height: 1080, mediaTime: 1,
+  })
+  const timing = (line: string) => JSON.parse(line.split(' frame_timing=')[1])
+
+  function timingFixture(onPlaybackEnded = jest.fn(), onTurnObserved = jest.fn()) {
+    const frames = createManualFrameSource()
+    const { logger, lines } = recordingLogger()
+    let image = stripeImageData('A0')
+    const playback = createAvatarPlayback({
+      logger, requestFrame: frames.requestFrame, sampleFrame: () => image,
+      onPlaybackEnded, onTurnObserved,
+    })
+    playback.start()
+    return { frames, logger, lines, playback, turn: (token: string) => { image = stripeImageData(token) } }
+  }
+
+  test('records native timing units and deltas from allowlisted fields only', () => {
+    const f = timingFixture()
+    const metadata = { ...nativeMetadata(), secret: 'never log', toJSON: () => { throw new Error('raw metadata') } }
+    f.frames.emitFrame(1204, metadata)
+    expect(timing(f.lines[0])).toEqual({
+      callback_now_ms: 1204, receive_time_ms: 1000, presentation_time_ms: 1200,
+      expected_display_time_ms: 1216, processing_duration_ms: 8,
+      presented_frames: 42, rtp_timestamp: 90000, time_origin_ms: performance.timeOrigin,
+      receive_to_presentation_ms: 200, presentation_to_callback_ms: 4,
+    })
+    expect(f.lines[0]).toMatch(/epoch_ms=\d+ frame_timing=/)
+  })
+
+  test('records absent and partial timing without reusing previous frame evidence', () => {
+    const f = timingFixture()
+    f.frames.emitFrame(1204, nativeMetadata())
+    f.turn('A1')
+    f.frames.emitFrame()
+    expect(timing(f.lines[1])).toEqual({ ...emptyTiming, time_origin_ms: performance.timeOrigin })
+    f.turn('A2')
+    f.frames.emitFrame(undefined, { receiveTime: 7 })
+    expect(timing(f.lines[2])).toEqual({ ...emptyTiming, receive_time_ms: 7, time_origin_ms: performance.timeOrigin })
+    f.turn('A3')
+    f.frames.emitFrame(undefined, null as unknown as Partial<VideoFrameCallbackMetadata>)
+    expect(timing(f.lines[3])).toEqual({ ...emptyTiming, time_origin_ms: performance.timeOrigin })
+  })
+
+  test('preserves zero values and signed timing differences', () => {
+    const origin = jest.spyOn(performance, 'timeOrigin', 'get').mockReturnValue(0)
+    try {
+      const f = timingFixture()
+      f.frames.emitFrame(0, { receiveTime: 2, presentationTime: 1, expectedDisplayTime: 0,
+        processingDuration: 0, presentedFrames: 0, rtpTimestamp: 0 })
+      expect(timing(f.lines[0])).toEqual({
+        callback_now_ms: 0, receive_time_ms: 2, presentation_time_ms: 1,
+        expected_display_time_ms: 0, processing_duration_ms: 0, presented_frames: 0,
+        rtp_timestamp: 0, time_origin_ms: 0, receive_to_presentation_ms: -1,
+        presentation_to_callback_ms: -1,
+      })
+    } finally { origin.mockRestore() }
+  })
+
+  test('normalizes malformed nonfinite and overflowing timing to null', () => {
+    const origin = jest.spyOn(performance, 'timeOrigin', 'get').mockReturnValue(Infinity)
+    try {
+      const f = timingFixture()
+      f.frames.emitFrame(NaN, { receiveTime: '1000', presentationTime: Infinity,
+        expectedDisplayTime: false, processingDuration: '0.008', presentedFrames: NaN,
+        rtpTimestamp: {} } as unknown as Partial<VideoFrameCallbackMetadata>)
+      expect(timing(f.lines[0])).toEqual(emptyTiming)
+      f.turn('A1')
+      f.frames.emitFrame(-Number.MAX_VALUE, { receiveTime: -Number.MAX_VALUE,
+        presentationTime: Number.MAX_VALUE, processingDuration: Number.MAX_VALUE })
+      expect(timing(f.lines[1])).toEqual({ ...emptyTiming,
+        callback_now_ms: -Number.MAX_VALUE, receive_time_ms: -Number.MAX_VALUE,
+        presentation_time_ms: Number.MAX_VALUE })
+    } finally { origin.mockRestore() }
+  })
+
+  test('snapshots timing before playback listeners mutate metadata and logs after listeners', () => {
+    const metadata = nativeMetadata()
+    const order: string[] = []
+    const f = timingFixture(jest.fn(() => {
+      order.push('ended')
+      metadata.receiveTime = 9999
+      metadata.presentationTime = 9999
+    }), jest.fn(() => { order.push('observed'); metadata.presentedFrames = 99 }))
+    f.frames.emitFrame()
+    order.length = 0
+    metadata.presentedFrames = 42
+    f.logger.log = (line: string) => { order.push('log'); f.lines.push(line) }
+    f.turn('A1')
+    f.frames.emitFrame(1204, metadata)
+    expect(order).toEqual(['ended', 'observed', 'log'])
+    expect(timing(f.lines[1])).toEqual({
+      callback_now_ms: 1204, receive_time_ms: 1000, presentation_time_ms: 1200,
+      expected_display_time_ms: 1216, processing_duration_ms: 8, presented_frames: 42,
+      rtp_timestamp: 90000, time_origin_ms: performance.timeOrigin,
+      receive_to_presentation_ms: 200, presentation_to_callback_ms: 4,
+    })
+  })
+
+  test('isolates throwing metadata getters and sinks from playback and the frame loop', () => {
+    const ended = jest.fn()
+    const observed = jest.fn()
+    const f = timingFixture(ended, observed)
+    const metadata = { get receiveTime(): number { throw new Error('getter down') } }
+    f.frames.emitFrame(1204, metadata)
+    expect(f.lines[0]).toMatch(/^avatar_turn_observed turn=A0 previous=- ended=- now=\d+\.\d{3} epoch_ms=\d+$/)
+    f.turn('A1')
+    f.frames.emitFrame(1204, nativeMetadata())
+    expect(timing(f.lines[1]).callback_now_ms).toBe(1204)
+    f.logger.log = () => { throw new Error('sink down') }
+    f.turn('A2')
+    f.frames.emitFrame(1204, metadata)
+    f.turn('A3')
+    f.frames.emitFrame(1204, nativeMetadata())
+    expect(ended.mock.calls.map(call => call[0])).toEqual(['A0', 'A1', 'A2'])
+    expect(observed.mock.calls.map(call => call[0])).toEqual(['A0', 'A1', 'A2', 'A3'])
+  })
 
   test('records the observed turn only when the decoded token changes', () => {
     const frames = createManualFrameSource()

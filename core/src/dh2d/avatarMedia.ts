@@ -11,7 +11,7 @@ export type AvatarFrameRequester = {
    * Requests the next video frame observation. Returns a cancellation
    * function. In production this is `video.requestVideoFrameCallback`.
    */
-  (onFrame: () => void): () => void,
+  (onFrame: (now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) => void): () => void,
 }
 
 export type AvatarFrameSampler = {
@@ -46,6 +46,34 @@ export function avatarTimingNow() {
     && typeof performance.now === "function" ? performance.now() : Date.now()
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function finiteDifference(end: number | null, start: number | null): number | null {
+  return end !== null && start !== null ? finiteNumber(end - start) : null
+}
+
+/** Snapshot only allowlisted primitives; never serialize native metadata itself. */
+function frameTimingSnapshot(now?: number, metadata?: Partial<VideoFrameCallbackMetadata>): string {
+  const callback = finiteNumber(now)
+  const receive = finiteNumber(metadata?.receiveTime)
+  const presentation = finiteNumber(metadata?.presentationTime)
+  const processing = finiteNumber(metadata?.processingDuration)
+  return JSON.stringify({
+    callback_now_ms: callback,
+    receive_time_ms: receive,
+    presentation_time_ms: presentation,
+    expected_display_time_ms: finiteNumber(metadata?.expectedDisplayTime),
+    processing_duration_ms: processing === null ? null : finiteNumber(processing * 1000),
+    presented_frames: finiteNumber(metadata?.presentedFrames),
+    rtp_timestamp: finiteNumber(metadata?.rtpTimestamp),
+    time_origin_ms: finiteNumber(typeof performance !== 'undefined' ? performance.timeOrigin : undefined),
+    receive_to_presentation_ms: finiteDifference(presentation, receive),
+    presentation_to_callback_ms: finiteDifference(callback, presentation),
+  })
+}
+
 /**
  * Watches the avatar video path for DH2D turn-stripe transitions and reports
  * `onPlaybackEnded(previousTurn)` at most once per session/turn when a
@@ -65,7 +93,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
   let cancelFrame: (() => void) | undefined = undefined
   let lastObservedTurnId: string | undefined = undefined
 
-  function observe() {
+  function observe(now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) {
     if (stopped) {
       return
     }
@@ -82,8 +110,14 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         const previousTurnId = lastObservedTurnId
         const at = changed ? avatarTimingNow() : 0
         const epochMs = changed ? Date.now() : 0
+        let frameTiming = ''
         if (changed) {
           lastObservedTurnId = observedTurnId
+          try {
+            frameTiming = ` frame_timing=${frameTimingSnapshot(now, metadata)}`
+          } catch {
+            // Native getters or snapshot failures may omit diagnostics, never playback.
+          }
         }
         if (endedTurnId !== undefined) {
           options.onPlaybackEnded(endedTurnId, "stripe", observedTurnId)
@@ -96,7 +130,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
           try {
             logger?.log(`avatar_turn_observed turn=${observedTurnId}`
               + ` previous=${previousTurnId ?? "-"} ended=${endedTurnId ?? "-"}`
-              + ` now=${at.toFixed(3)} epoch_ms=${epochMs}`)
+              + ` now=${at.toFixed(3)} epoch_ms=${epochMs}${frameTiming}`)
           } catch {
             // Observation logging is diagnostic only.
           }
@@ -195,14 +229,14 @@ export function createAvatarFrameSampler(video: HTMLVideoElement): AvatarFrameSa
  */
 export function createAvatarFrameRequester(video: HTMLVideoElement): AvatarFrameRequester | null {
   const requestVideoFrameCallback = (video as HTMLVideoElement & {
-    requestVideoFrameCallback?: (callback: (_: number) => void) => number,
+    requestVideoFrameCallback?: (callback: VideoFrameRequestCallback) => number,
     cancelVideoFrameCallback?: (handle: number) => void,
   })
   if (typeof requestVideoFrameCallback.requestVideoFrameCallback !== 'function') {
     return null
   }
   return onFrame => {
-    const handle: number | undefined = requestVideoFrameCallback.requestVideoFrameCallback.call(video, () => onFrame())
+    const handle: number | undefined = requestVideoFrameCallback.requestVideoFrameCallback.call(video, (now, metadata) => onFrame(now, metadata))
     return () => {
       if (handle !== undefined) {
         requestVideoFrameCallback.cancelVideoFrameCallback?.call(video, handle)
