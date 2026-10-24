@@ -208,7 +208,9 @@ export type DHOutputMessage =
    */
   | {
     type: 'command'
-    name: string
+    name?: string
+    /** Frontend-interpreted payload; transport does not restrict actions. */
+    [key: string]: any
   }
 
 

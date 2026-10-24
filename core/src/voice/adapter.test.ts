@@ -16,6 +16,17 @@ function event(partial: { type: string } & Record<string, any>): VoiceClientEven
   return partial as VoiceClientEvent
 }
 
+describe('opaque frontend commands', () => {
+  test('preserves arbitrary names and fields without interpreting routing fields', () => {
+    const adapter = createAdapter()
+    const command = { type: 'command', name: 'future-action', session_id: 'payload-only', turn_id: 'not-a-turn', nested: { values: [1, '值'] } }
+    expect(adapter.ingest(command)).toEqual([command])
+    expect(adapter.ingest({ type: 'command', operation: { arbitrary: true } })).toEqual([
+      { type: 'command', operation: { arbitrary: true } },
+    ])
+  })
+})
+
 describe('asr events become asr_process', () => {
   test('asr.partial becomes asr_process with completed false', () => {
     const adapter = createAdapter()

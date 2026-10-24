@@ -178,6 +178,10 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       return []
     }
     switch (event.type) {
+      case 'command':
+        // The connection owns the destination; command fields are opaque.
+        // No action schema, voice-state mutation or execution acknowledgement.
+        return [event as DHOutputMessage]
       case 'asr.partial':
       case 'asr.final': {
         if (event.session_id !== sessionId) return []

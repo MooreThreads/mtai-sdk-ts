@@ -620,6 +620,22 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('passes frontend commands unchanged without a tool acknowledgement', async () => {
+    const globals = setupGlobals()
+    try {
+      const { connection, ws } = await connectReady(createConfig(), fakeVideo())
+      const messages: any[] = []
+      connection.on('message', message => messages.push(message))
+      const before = ws.sent.length
+      const command = { type: 'command', name: 'restore-window', extra: { arbitrary: [1, '值'] } }
+      ws.receive(JSON.stringify(command))
+      expect(messages).toEqual([command])
+      expect(ws.sent.length).toBe(before)
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('adapts client events to app messages and binary frames to audio events', async () => {
     const globals = setupGlobals()
     try {
