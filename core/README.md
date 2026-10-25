@@ -42,6 +42,12 @@ surfaced as `audio_text`, streamed LLM output as `bot_output`, and a
 Avatar playback boundaries are decoded from the DH2D video turn stripe and
 reported to the client as `playback.ended`.
 
+The logical `voiceClient.sessionId` is encoded into the client WebSocket path
+and used unchanged in its session handshake; when omitted, it defaults to
+`avatar-channel-session`. Exactly `.` and `..` are rejected before connecting
+or retrying because browser URL normalization treats them as navigation.
+Other session IDs are unaffected, including IDs containing dots.
+
 ### Avatar frame timing diagnostics
 
 On each validated turn-token change, `avatar_turn_observed` retains its existing

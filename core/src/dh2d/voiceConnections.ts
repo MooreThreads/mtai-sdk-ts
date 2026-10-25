@@ -36,13 +36,7 @@ export type VoiceClientConnection = DH2DConnection & {
   readonly dispose: () => void,
 }
 
-function generateVoiceSessionId() {
-  const cryptoApi = (globalThis as any).crypto
-  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
-    return `voice_${cryptoApi.randomUUID()}` as string
-  }
-  return `voice_${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
-}
+const MAIN_VOICE_SESSION_ID = 'avatar-channel-session'
 
 function isFrontendToolCall(value: unknown): value is VoiceClientToolCall {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -108,11 +102,20 @@ function sanitizeFrontendToolResult(value: unknown): VoiceClientToolResult {
   return { ok: false, error: { code, message } }
 }
 
+function validateVoiceSessionId(sessionId: string): void {
+  // WHATWG URL/WebSocket normalization treats even encoded dot-only IDs as
+  // path navigation. Reject exactly these IDs before any connection/retry.
+  if (sessionId === '.' || sessionId === '..') {
+    throw new Error('voice client sessionId must not be "." or ".."')
+  }
+}
+
 /**
  * Builds the frontend-to-client websocket URL: the avatar mode and selected
  * `video_id` are connection-query parameters, never protocol messages.
  */
-export function voiceClientWebSocketUrl(base: string, videoId: string): string {
+export function voiceClientWebSocketUrl(base: string, videoId: string, sessionId: string): string {
+  validateVoiceSessionId(sessionId)
   const url = new URL(base)
   if (url.protocol === 'https:') {
     url.protocol = 'wss:'
@@ -122,6 +125,7 @@ export function voiceClientWebSocketUrl(base: string, videoId: string): string {
   if (!url.pathname || url.pathname === '/') {
     url.pathname = '/ws'
   }
+  url.pathname = `${url.pathname.replace(/\/$/, '')}/${encodeURIComponent(sessionId)}`
   url.searchParams.set('mode', 'avatar')
   url.searchParams.set('video_id', videoId)
   return url.toString()
@@ -227,7 +231,8 @@ async function connectOnce(
       drawCover(attemptLogger, elements)
     }
   })
-  const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId))
+  const sessionId = voiceConfig.sessionId!
+  const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId, sessionId))
   innerAbortable.onabort(() => {
     ws.close()
   })
@@ -259,7 +264,7 @@ async function connectOnce(
   }
 
   const adapter = createVoiceMessageAdapter({
-    sessionId: voiceConfig.sessionId || generateVoiceSessionId(),
+    sessionId,
     onClientSend: frame => sendFrame(JSON.stringify(frame)),
   })
 
@@ -621,12 +626,20 @@ export async function connectVoiceClient(
   if (!config.voiceClient) {
     throw new Error('voiceClient configuration is required')
   }
+  const sessionConfig = {
+    ...config,
+    voiceClient: {
+      ...config.voiceClient,
+      sessionId: config.voiceClient.sessionId || MAIN_VOICE_SESSION_ID,
+    },
+  }
+  validateVoiceSessionId(sessionConfig.voiceClient.sessionId)
   const rootLogger = logger.push((_, ...args) => _('[voice-connect]', ...args))
   for (let i = 0; ; i++) {
     try {
       return await withChild(abortable, async innerAbortable => {
         const tasks: Promise<VoiceClientConnection>[] = [
-          connectOnce(i, rootLogger, elements, config, innerAbortable),
+          connectOnce(i, rootLogger, elements, sessionConfig, innerAbortable),
         ]
         const connectTimeout = config.connectTimeout
         if (connectTimeout > 0) {

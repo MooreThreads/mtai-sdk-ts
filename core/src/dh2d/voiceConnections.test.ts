@@ -6,6 +6,7 @@ import {
   connectVoiceClient,
   disconnectVoiceClient,
   sendVoiceClientMessage,
+  voiceClientWebSocketUrl,
 } from './voiceConnections'
 import { createVoiceMessageAdapter } from '../voice/adapter'
 import { crc16 } from './turnStripe'
@@ -301,12 +302,59 @@ async function connectReady(config: any, video: any, canonicalSessionId = 'canon
 }
 
 describe('connectVoiceClient', () => {
+  test.each(['.', '..'])('rejects dot-only session identity %s in URL construction', sessionId => {
+    expect(() => voiceClientWebSocketUrl('ws://client/ws', 'actor', sessionId))
+      .toThrow('voice client sessionId must not be "." or ".."')
+  })
+
+  test.each(['.', '..'])('rejects dot-only session identity %s before connecting or retrying', async sessionId => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    let failure: unknown
+    const result = connectVoiceClient(logger, { video: fakeVideo() } as any,
+      createConfig({ voiceClient: { sessionId } }), scope).catch(error => { failure = error })
+    try {
+      await flushMicrotasks()
+      expect(FakeWebSocket.instances).toHaveLength(0)
+      expect(FakeRTCPeerConnection.instances).toHaveLength(0)
+      expect(failure).toEqual(new Error('voice client sessionId must not be "." or ".."'))
+    } finally {
+      scope.abort()
+      await result
+      globals.restore()
+    }
+  })
+
+  test.each(['.hidden', '..suffix', 'suffix..', '%2E'])('preserves other session identity %s', sessionId => {
+    expect(new URL(voiceClientWebSocketUrl('ws://client/ws', 'actor', sessionId)).pathname)
+      .toBe(`/ws/${encodeURIComponent(sessionId)}`)
+  })
+
+  test('encodes session identity while preserving endpoint prefix and query', () => {
+    expect(voiceClientWebSocketUrl('https://client/prefix/ws?trace=a%2Fb', 'actor /雪', 'session /雪'))
+      .toBe('wss://client/prefix/ws/session%20%2F%E9%9B%AA?trace=a%2Fb&mode=avatar&video_id=actor+%2F%E9%9B%AA')
+  })
+
   test('opens the client voice websocket with mode=avatar and video_id', async () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig(), video)
-      expect(ws.url).toBe('ws://client:8300/ws?mode=avatar&video_id=xiaomai')
+      expect(ws.url).toBe('ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai')
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('uses the known main identity for the default URL and session handshake', async () => {
+    const globals = setupGlobals()
+    try {
+      const { ws } = await connectReady(createConfig({
+        voiceClient: { interaction_endpoint: 'ws://client:8300', sessionId: '' },
+      }), fakeVideo())
+      const start = JSON.parse(ws.sent[0])
+      expect(start.session_id).toBe('avatar-channel-session')
+      expect(new URL(ws.url).pathname).toBe(`/ws/${encodeURIComponent(start.session_id)}`)
     } finally {
       globals.restore()
     }
@@ -317,7 +365,7 @@ describe('connectVoiceClient', () => {
     try {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig({ voiceClient: { interaction_endpoint: 'ws://client:8300/voice', sessionId: 'voice-1' } }), video)
-      expect(ws.url).toBe('ws://client:8300/voice?mode=avatar&video_id=xiaomai')
+      expect(ws.url).toBe('ws://client:8300/voice/voice-1?mode=avatar&video_id=xiaomai')
     } finally {
       globals.restore()
     }
@@ -501,7 +549,7 @@ describe('connectVoiceClient', () => {
         type: 'session.start', session_id: 'voice-1', protocol_version: 2,
       })
       expect(FakeWebSocket.instances.map(_ => _.url)).toEqual([
-        'ws://client:8300/ws?mode=avatar&video_id=xiaomai',
+        'ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai',
       ])
     } finally {
       globals.restore()
