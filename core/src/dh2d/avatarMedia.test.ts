@@ -449,9 +449,11 @@ describe('createAvatarFrameSampler', () => {
   class FakeContext {
     canvas: any
     drawImageCalls: any[][] = []
+    getImageDataCalls: unknown[][] = []
     constructor(canvas: any) { this.canvas = canvas }
     drawImage(...args: any[]) { this.drawImageCalls.push(args) }
-    getImageData() {
+    getImageData(...args: unknown[]) {
+      this.getImageDataCalls.push(args)
       return this.canvas.nextImage as ImageData
     }
   }
@@ -461,9 +463,54 @@ describe('createAvatarFrameSampler', () => {
     height = 0
     nextImage: ImageData | null = null
     context: FakeContext
+    getContextCalls: unknown[][] = []
     constructor() { this.context = new FakeContext(this) }
-    getContext() { return this.context }
+    getContext(...args: unknown[]) {
+      this.getContextCalls.push(args)
+      return this.context
+    }
   }
+
+  test('explicitly disables the frequent-readback hint and preserves full-width sampling across resize', () => {
+    const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+    const canvas = new FakeCanvas()
+    const createElement = jest.fn(() => canvas)
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true, value: { createElement },
+    })
+    try {
+      const video = { videoWidth: 0 } as HTMLVideoElement
+      const sampler = createAvatarFrameSampler(video)
+      expect(sampler()).toBeNull()
+      expect(createElement).not.toHaveBeenCalled()
+
+      Object.assign(video, { videoWidth: 1920 })
+      canvas.nextImage = tiledStripeImageData('Z9', 1920)
+      expect(sampler()).toBe(canvas.nextImage)
+      expect(sampler()).toBe(canvas.nextImage)
+      Object.assign(video, { videoWidth: 1280 })
+      canvas.nextImage = tiledStripeImageData('A1', 1280)
+      expect(sampler()).toBe(canvas.nextImage)
+
+      expect(createElement).toHaveBeenCalledTimes(1)
+      expect(createElement).toHaveBeenCalledWith('canvas')
+      expect(canvas.getContextCalls).toEqual([['2d', { willReadFrequently: false }]])
+      expect(canvas.context.drawImageCalls).toEqual([
+        [video, 0, 0, 1920, 8, 0, 0, 1920, 8],
+        [video, 0, 0, 1920, 8, 0, 0, 1920, 8],
+        [video, 0, 0, 1280, 8, 0, 0, 1280, 8],
+      ])
+      expect(canvas.context.getImageDataCalls).toEqual([
+        [0, 0, 1920, 8],
+        [0, 0, 1920, 8],
+        [0, 0, 1280, 8],
+      ])
+      expect([canvas.width, canvas.height]).toEqual([1280, 8])
+    } finally {
+      if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument)
+      else delete (globalThis as any).document
+    }
+  })
 
   test('samples every stripe repetition across the full frame width', () => {
     const created: FakeCanvas[] = []

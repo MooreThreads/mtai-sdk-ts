@@ -252,7 +252,9 @@ export function createAvatarFrameSampler(video: HTMLVideoElement): AvatarFrameSa
       canvas = document.createElement('canvas')
       canvas.width = width
       canvas.height = TURN_STRIPE_HEIGHT
-      context = canvas.getContext('2d') ?? undefined
+      // Prefer the GPU video-copy path: only this small stripe is read back.
+      // Explicit false avoids Chromium's implicit frequent-readback fallback.
+      context = canvas.getContext('2d', { willReadFrequently: false }) ?? undefined
     } else if (canvas.width !== width) {
       canvas.width = width
       canvas.height = TURN_STRIPE_HEIGHT
