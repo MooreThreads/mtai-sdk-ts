@@ -422,7 +422,7 @@ describe('createChannelBindingWorkflow', () => {
         requests.push({ url: String(input), init })
         return init?.method === 'DELETE'
           ? response({ status: 'unbound' })
-          : response({ operation_status: 'idle', has_linked_account: true })
+          : response({ operation_status: 'idle', has_linked_account: true }, 200, { 'x-binding-generation': '0' })
       },
     })
 
@@ -435,6 +435,7 @@ describe('createChannelBindingWorkflow', () => {
       url: 'http://127.0.0.1:8781/bindings',
       init: { method: 'DELETE' },
     })
+    expect(new Headers(requests[1]?.init?.headers).get('x-binding-generation')).toBe('0')
     workflow.dispose()
   })
 
