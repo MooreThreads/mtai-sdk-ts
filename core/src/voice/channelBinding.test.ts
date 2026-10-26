@@ -321,6 +321,61 @@ describe('createChannelBindingWorkflow', () => {
     workflow.dispose()
   })
 
+  test('queries sanitized binding status without an operation id', async () => {
+    const requests: { url: string, init?: RequestInit }[] = []
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (input, init) => {
+        requests.push({ url: String(input), init })
+        return response({ operation_status: 'waiting_for_scan', has_linked_account: true })
+      },
+    })
+
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'status' }))).resolves.toEqual({
+      ok: true,
+      result: { operation_status: 'waiting_for_scan', has_linked_account: true },
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe('http://127.0.0.1:8781/bindings')
+    expect(requests[0]?.init).toMatchObject({ signal: expect.any(AbortSignal) })
+    workflow.dispose()
+  })
+
+  test('unbinds the current binding through the backend', async () => {
+    const requests: { url: string, init?: RequestInit }[] = []
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (input, init) => {
+        requests.push({ url: String(input), init })
+        return response({ status: 'unbound' })
+      },
+    })
+
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'unbind' }))).resolves.toEqual({
+      ok: true,
+      result: { status: 'unbound' },
+    })
+    expect(workflow.snapshot).toBeUndefined()
+    expect(requests[0]).toMatchObject({
+      url: 'http://127.0.0.1:8781/bindings',
+      init: { method: 'DELETE' },
+    })
+    workflow.dispose()
+  })
+
+  test('reports no_bound_account_found when unbinding without a bound account', async () => {
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async () => response({ error: 'no_bound_account_found' }, 409),
+    })
+
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'unbind' }))).resolves.toEqual({
+      ok: false,
+      error: { code: 'no_bound_account_found', message: 'no_bound_account_found' },
+    })
+    workflow.dispose()
+  })
+
   test('rejects invalid bind_channel action shapes', async () => {
     const fetchImpl = jest.fn(async () => response(snapshot({ revision: 1 })))
     const workflow = createChannelBindingWorkflow({

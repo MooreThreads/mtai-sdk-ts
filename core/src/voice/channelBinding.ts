@@ -1,6 +1,11 @@
 export const CHANNEL_BINDING_TOOL_NAME = 'bind_channel' as const
 
-export type ChannelBindingAction = 'initiate' | 'cancel'
+export type ChannelBindingAction = 'initiate' | 'cancel' | 'status' | 'unbind'
+
+export type ChannelBindingStatus = {
+  operation_status: 'idle' | 'starting' | 'waiting_for_scan' | 'awaiting_verification' | 'completed' | 'failed' | 'cancelled',
+  has_linked_account: boolean,
+}
 
 const BINDING_STATES = new Set([
   'initiating',
@@ -93,6 +98,7 @@ const SAFE_MESSAGES: Record<string, string> = {
   invalid_request: 'WeChat binding request was invalid',
   unknown_operation: 'WeChat binding operation is no longer available',
   binding_unavailable: 'WeChat binding service unavailable',
+  no_bound_account_found: 'no_bound_account_found',
 }
 
 function safeError(code: string): ChannelBindingError {
@@ -101,6 +107,23 @@ function safeError(code: string): ChannelBindingError {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseBindingStatus(value: unknown): ChannelBindingStatus {
+  const statuses = new Set([
+    'idle', 'starting', 'waiting_for_scan', 'awaiting_verification',
+    'completed', 'failed', 'cancelled',
+  ])
+  if (!isRecord(value)
+      || typeof value.operation_status !== 'string'
+      || !statuses.has(value.operation_status)
+      || typeof value.has_linked_account !== 'boolean') {
+    throw new Error('invalid binding status')
+  }
+  return {
+    operation_status: value.operation_status as ChannelBindingStatus['operation_status'],
+    has_linked_account: value.has_linked_account,
+  }
 }
 
 function isTerminal(state: BindingState): boolean {
@@ -182,7 +205,7 @@ type ChannelBindingArguments = { channel: 'wechat', action: ChannelBindingAction
 
 function toolArgumentsAreValid(arguments_: unknown): arguments_ is ChannelBindingArguments {
   if (!isRecord(arguments_) || arguments_.channel !== 'wechat'
-      || (arguments_.action !== 'initiate' && arguments_.action !== 'cancel')) return false
+      || !['initiate', 'cancel', 'status', 'unbind'].includes(arguments_.action as string)) return false
   return Object.keys(arguments_).length === 2
 }
 
@@ -278,9 +301,12 @@ export function createChannelBindingWorkflow(
       throw safeError('binding_unavailable')
     }
     if (!response.ok) {
-      const code = response.status === 400
-        ? 'invalid_request'
-        : response.status === 404 ? 'unknown_operation' : 'binding_unavailable'
+      let body: unknown
+      try { body = await response.json() } catch { /* use the status fallback */ }
+      const reported = isRecord(body) && typeof body.error === 'string' ? body.error : undefined
+      const code = reported === 'no_bound_account_found' ? reported
+        : response.status === 400 ? 'invalid_request'
+          : response.status === 404 ? 'unknown_operation' : 'binding_unavailable'
       throw safeError(code)
     }
     try {
@@ -347,16 +373,38 @@ export function createChannelBindingWorkflow(
   }
 
   const initiate = async (): Promise<ChannelBindingSnapshot> => {
+    const generation = operationGeneration
     const value = await requestJson('bindings', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',
     })
     const snapshot = parseSnapshot(value)
-    if (disposed) throw safeError('binding_unavailable')
+    if (disposed || generation !== operationGeneration) throw safeError('binding_unavailable')
     reportSnapshot(snapshot)
     ensureMonitoring(snapshot)
     return cloneSnapshot(snapshot)
+  }
+
+  const queryStatus = async (): Promise<ChannelBindingStatus> => {
+    return parseBindingStatus(await requestJson('bindings'))
+  }
+
+  const clearLocalBindingState = () => {
+    operationGeneration += 1
+    operationId = undefined
+    current = undefined
+    initiation = undefined
+    monitors.clear()
+    for (const controller of operationControllers.values()) controller.abort()
+    operationControllers.clear()
+  }
+
+  const unbind = async (): Promise<{ status: 'unbound' }> => {
+    const value = await requestJson('bindings', { method: 'DELETE' })
+    if (!isRecord(value) || value.status !== 'unbound') throw new Error('invalid unbind result')
+    clearLocalBindingState()
+    return { status: 'unbound' }
   }
 
   const startInitiation = (): Promise<ChannelBindingSnapshot> => {
@@ -370,7 +418,13 @@ export function createChannelBindingWorkflow(
   }
 
   const cancelOperation = (id: string): boolean => {
-    if (disposed || operationId !== id || current === undefined) return false
+    if (disposed) return false
+    if (current === undefined && initiation !== undefined && id === '') {
+      operationGeneration += 1
+      initiation = undefined
+      return true
+    }
+    if (operationId !== id || current === undefined) return false
     if (current.state === 'cancelled') return true
     // A failed login stops monitoring, but its visible failure can be dismissed.
     if (current.state === 'bound') return false
@@ -402,7 +456,17 @@ export function createChannelBindingWorkflow(
         return { ok: false, error: invalidArgumentsError(call.arguments) }
       }
       try {
+        if (call.arguments.action === 'status') {
+          return { ok: true, result: await queryStatus() }
+        }
+        if (call.arguments.action === 'unbind') {
+          return { ok: true, result: await unbind() }
+        }
         if (call.arguments.action === 'cancel') {
+          if (operationId === undefined && initiation !== undefined
+              && cancelOperation('')) {
+            return { ok: true, result: { status: 'cancelled' } }
+          }
           if (operationId === undefined || current === undefined
               || current.state === 'cancelled' || !cancelOperation(operationId)) {
             return { ok: true, result: { status: 'not_active' } }
