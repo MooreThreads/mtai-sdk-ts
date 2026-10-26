@@ -188,8 +188,11 @@ const session = createDH2DSession(divElement, {
 ```
 
 The built-in `bind_channel` tool accepts `{ channel: 'wechat', action:
-'initiate' }` or `{ channel: 'wechat', action: 'cancel', operation_id }`.
-Cancellation is a frontend-only dismissal: it fences local snapshot delivery
+'initiate' }`, `{ channel: 'wechat', action: 'status' }`, or `{ channel: 'wechat',
+action: 'unbind' }`, as well as the existing frontend-only `cancel` action.
+`status` returns only `operation_status` and `has_linked_account`; `unbind`
+removes the linked account and returns `no_bound_account_found` when none exists.
+Cancellation is a frontend-only dismissal (the frontend selects its current operation): it fences local snapshot delivery
 and emits a sanitized `cancelled` snapshot without making a backend request;
 it does not cancel QR/login work. Verification codes are sent only through
 `workflow.verify(code)` and are never included in tool results or snapshots.

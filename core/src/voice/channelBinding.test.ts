@@ -321,6 +321,27 @@ describe('createChannelBindingWorkflow', () => {
     workflow.dispose()
   })
 
+  test('cancels a pending initiation before its POST completes', async () => {
+    const post = deferred<Response>()
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (_input, init) => init?.method === 'POST' ? post.promise : response({}),
+    })
+    const initiating = workflow.handleToolCall(toolCall())
+    await flush()
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'cancel' }))).resolves.toEqual({
+      ok: true,
+      result: { status: 'cancelled' },
+    })
+    post.resolve(response(snapshot({ state: 'initiating' })))
+    await expect(initiating).resolves.toEqual({
+      ok: false,
+      error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
+    })
+    expect(workflow.snapshot).toBeUndefined()
+    workflow.dispose()
+  })
+
   test('queries sanitized binding status without an operation id', async () => {
     const requests: { url: string, init?: RequestInit }[] = []
     const workflow = createChannelBindingWorkflow({

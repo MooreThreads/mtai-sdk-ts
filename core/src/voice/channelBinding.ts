@@ -231,6 +231,7 @@ export function createChannelBindingWorkflow(
   let operationId: string | undefined
   let operationGeneration = 0
   let initiation: Promise<ChannelBindingSnapshot> | undefined
+  let initiationController: AbortController | undefined
   const monitors = new Map<string, Promise<void>>()
   const operationControllers = new Map<string, AbortController>()
   let disposed = false
@@ -372,13 +373,13 @@ export function createChannelBindingWorkflow(
     monitors.set(id, tracked)
   }
 
-  const initiate = async (): Promise<ChannelBindingSnapshot> => {
+  const initiate = async (signal?: AbortSignal): Promise<ChannelBindingSnapshot> => {
     const generation = operationGeneration
     const value = await requestJson('bindings', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',
-    })
+    }, signal)
     const snapshot = parseSnapshot(value)
     if (disposed || generation !== operationGeneration) throw safeError('binding_unavailable')
     reportSnapshot(snapshot)
@@ -395,6 +396,8 @@ export function createChannelBindingWorkflow(
     operationId = undefined
     current = undefined
     initiation = undefined
+    initiationController?.abort()
+    initiationController = undefined
     monitors.clear()
     for (const controller of operationControllers.values()) controller.abort()
     operationControllers.clear()
@@ -409,9 +412,13 @@ export function createChannelBindingWorkflow(
 
   const startInitiation = (): Promise<ChannelBindingSnapshot> => {
     if (initiation !== undefined) return initiation
-    const pending = initiate()
+    initiationController = typeof AbortController === 'function' ? new AbortController() : undefined
+    const pending = initiate(initiationController?.signal)
     const joined = pending.finally(() => {
-      if (initiation === joined) initiation = undefined
+      if (initiation === joined) {
+        initiation = undefined
+        initiationController = undefined
+      }
     })
     initiation = joined
     return joined
@@ -421,7 +428,9 @@ export function createChannelBindingWorkflow(
     if (disposed) return false
     if (current === undefined && initiation !== undefined && id === '') {
       operationGeneration += 1
+      initiationController?.abort()
       initiation = undefined
+      initiationController = undefined
       return true
     }
     if (operationId !== id || current === undefined) return false
