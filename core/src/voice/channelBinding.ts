@@ -178,26 +178,15 @@ function endpointPath(base: URL, path: string): string {
   return new URL(path.replace(/^\/+/, ''), base).toString()
 }
 
-type ChannelBindingArguments =
-  | { channel: 'wechat', action: 'initiate' }
-  | { channel: 'wechat', action: 'cancel', operation_id: string }
+type ChannelBindingArguments = { channel: 'wechat', action: ChannelBindingAction }
 
 function toolArgumentsAreValid(arguments_: unknown): arguments_ is ChannelBindingArguments {
   if (!isRecord(arguments_) || arguments_.channel !== 'wechat'
       || (arguments_.action !== 'initiate' && arguments_.action !== 'cancel')) return false
-  if (arguments_.action === 'initiate') {
-    return Object.keys(arguments_).length === 2 && !('operation_id' in arguments_)
-  }
-  return Object.keys(arguments_).length === 3
-    && typeof arguments_.operation_id === 'string'
-    && !!arguments_.operation_id
+  return Object.keys(arguments_).length === 2
 }
 
 function invalidArgumentsError(arguments_: unknown): ChannelBindingError {
-  if (isRecord(arguments_) && arguments_.action === 'cancel'
-      && !('operation_id' in arguments_)) {
-    return { code: 'invalid_arguments', message: 'operation_id is required for cancellation' }
-  }
   if (isRecord(arguments_) && arguments_.channel !== undefined && arguments_.channel !== 'wechat') {
     return { code: 'invalid_arguments', message: 'channel must be "wechat"' }
   }
@@ -412,11 +401,9 @@ export function createChannelBindingWorkflow(
       }
       try {
         if (call.arguments.action === 'cancel') {
-          if (!cancelOperation(call.arguments.operation_id)) {
-            return {
-              ok: false,
-              error: { code: 'invalid_arguments', message: 'operation is not cancellable' },
-            }
+          if (operationId === undefined || current === undefined
+              || isTerminal(current.state) || !cancelOperation(operationId)) {
+            return { ok: true, result: { status: 'not_active' } }
           }
           return { ok: true, result: { status: 'cancelled' } }
         }
