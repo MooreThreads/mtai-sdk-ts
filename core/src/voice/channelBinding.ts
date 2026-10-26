@@ -372,7 +372,8 @@ export function createChannelBindingWorkflow(
   const cancelOperation = (id: string): boolean => {
     if (disposed || operationId !== id || current === undefined) return false
     if (current.state === 'cancelled') return true
-    if (isTerminal(current.state)) return false
+    // A failed login stops monitoring, but its visible failure can be dismissed.
+    if (current.state === 'bound') return false
     operationControllers.get(id)?.abort()
     operationControllers.delete(id)
     monitors.delete(id)
@@ -383,6 +384,7 @@ export function createChannelBindingWorkflow(
       revision: current.revision + 1,
       qr_url: null,
       verification: null,
+      ...(current.error !== undefined ? { error: null } : {}),
     }
     try {
       options.onSnapshot?.(cloneSnapshot(current))
@@ -402,7 +404,7 @@ export function createChannelBindingWorkflow(
       try {
         if (call.arguments.action === 'cancel') {
           if (operationId === undefined || current === undefined
-              || isTerminal(current.state) || !cancelOperation(operationId)) {
+              || current.state === 'cancelled' || !cancelOperation(operationId)) {
             return { ok: true, result: { status: 'not_active' } }
           }
           return { ok: true, result: { status: 'cancelled' } }

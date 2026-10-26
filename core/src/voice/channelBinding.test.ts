@@ -147,6 +147,86 @@ describe('createChannelBindingWorkflow', () => {
     workflow.dispose()
   })
 
+  test('dismisses a failed binding display through the ID-free cancel tool', async () => {
+    const poll = deferred<Response>()
+    const failedSeen = deferred<void>()
+    const seen: ChannelBindingSnapshot[] = []
+    const fetchImpl = jest.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') return response(snapshot({ state: 'qr', qr_url: 'https://qr.example/value' }))
+      return poll.promise
+    })
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781', fetch: fetchImpl,
+      onSnapshot: current => {
+        seen.push(current)
+        if (current.state === 'failed') failedSeen.resolve()
+      },
+    })
+    await workflow.handleToolCall(toolCall())
+    poll.resolve(response(snapshot({ state: 'failed', revision: 2, error: 'login_failed' })))
+    await failedSeen.promise
+    fetchImpl.mockClear()
+
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'cancel' })))
+      .resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+    expect(seen.map(current => current.state)).toEqual(['qr', 'failed', 'cancelled'])
+    expect(seen[seen.length - 1]).toEqual(snapshot({ state: 'cancelled', revision: 3, error: null }))
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'cancel' })))
+      .resolves.toEqual({ ok: true, result: { status: 'not_active' } })
+    expect(seen).toHaveLength(3)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    workflow.dispose()
+  })
+
+  test('dismisses a failed binding display through explicit operation cancellation', async () => {
+    const seen: ChannelBindingSnapshot[] = []
+    const fetchImpl = jest.fn(async () => response(snapshot({ state: 'failed', error: 'login_failed' })))
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781', fetch: fetchImpl,
+      onSnapshot: current => seen.push(current),
+    })
+    await workflow.handleToolCall(toolCall())
+    fetchImpl.mockClear()
+    expect(workflow.cancel('some-other-operation')).toBe(false)
+    expect(seen.map(current => current.state)).toEqual(['failed'])
+    expect(workflow.cancel('binding-1')).toBe(true)
+    expect(seen.map(current => current.state)).toEqual(['failed', 'cancelled'])
+    expect(workflow.snapshot).toEqual(snapshot({ state: 'cancelled', revision: 2, error: null }))
+    expect(fetchImpl).not.toHaveBeenCalled()
+    workflow.dispose()
+  })
+
+  test('fences verification completion after failed display dismissal', async () => {
+    const verification = deferred<Response>()
+    const poll = deferred<Response>()
+    const failedSeen = deferred<void>()
+    const seen: ChannelBindingSnapshot[] = []
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/verify')) return verification.promise
+        if (init?.method === 'POST') return response(snapshot({
+          state: 'verification', verification: { required: true, retry: false },
+        }))
+        return poll.promise
+      },
+      onSnapshot: current => {
+        seen.push(current)
+        if (current.state === 'failed') failedSeen.resolve()
+      },
+    })
+    await workflow.handleToolCall(toolCall())
+    const pending = workflow.verify('synthetic-code')
+    poll.resolve(response(snapshot({ state: 'failed', revision: 2, error: 'login_failed' })))
+    await failedSeen.promise
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'cancel' })))
+      .resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+    verification.resolve(response({ accepted: true }))
+    await expect(pending).resolves.toEqual({ accepted: false })
+    expect(seen.map(current => current.state)).toEqual(['verification', 'failed', 'cancelled'])
+    workflow.dispose()
+  })
+
   test('fences a verification response that completes after local cancellation', async () => {
     const verifyResponse = deferred<Response>()
     const monitorResponse = deferred<Response>()
@@ -228,7 +308,7 @@ describe('createChannelBindingWorkflow', () => {
     await flush()
   })
 
-  test.each([undefined, 'bound', 'failed'] as const)('cancel with %s operation is a harmless local no-op', async state => {
+  test.each([undefined, 'bound'] as const)('cancel with %s operation is a harmless local no-op', async state => {
     const fetchImpl = jest.fn(async () => response(snapshot({ state: state ?? 'bound' })))
     const workflow = createChannelBindingWorkflow({ endpoint: 'http://127.0.0.1:8781', fetch: fetchImpl })
     if (state) await workflow.handleToolCall(toolCall())
