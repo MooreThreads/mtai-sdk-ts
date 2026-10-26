@@ -98,6 +98,7 @@ const SAFE_MESSAGES: Record<string, string> = {
   invalid_request: 'WeChat binding request was invalid',
   unknown_operation: 'WeChat binding operation is no longer available',
   binding_unavailable: 'WeChat binding service unavailable',
+  binding_generation_stale: 'WeChat binding service unavailable',
   no_bound_account_found: 'no_bound_account_found',
 }
 
@@ -235,6 +236,7 @@ export function createChannelBindingWorkflow(
   const monitors = new Map<string, Promise<void>>()
   const operationControllers = new Map<string, AbortController>()
   let disposed = false
+  let serverGeneration = 0
   const workflowAbortController = typeof AbortController === 'function' ? new AbortController() : undefined
 
   const reportSnapshot = (snapshot: ChannelBindingSnapshot) => {
@@ -291,13 +293,28 @@ export function createChannelBindingWorkflow(
   ): Promise<unknown> => {
     if (disposed) throw safeError('binding_unavailable')
     let response: Response
+    const method = init?.method?.toUpperCase()
     try {
       const requestSignal = signal ?? workflowAbortController?.signal
-      const requestInit = requestSignal ? { ...init, signal: requestSignal } : init
+      const headers = new Headers(init?.headers)
+      if (serverGeneration !== undefined && (method === 'POST' || method === 'DELETE')) {
+        headers.set('X-Binding-Generation', String(serverGeneration))
+      }
+      const requestInit = requestSignal
+        ? { ...init, headers, signal: requestSignal }
+        : { ...init, headers }
       response = await fetchImpl(
         path instanceof URL ? path : endpointPath(base, path),
         requestInit,
       )
+      const reportedGeneration = response.headers?.get('x-binding-generation')
+      if (reportedGeneration !== null && reportedGeneration !== undefined && /^\d+$/.test(reportedGeneration)) {
+        const parsedGeneration = Number(reportedGeneration)
+        if (Number.isSafeInteger(parsedGeneration)) {
+          serverGeneration = method === 'POST' || method === 'DELETE'
+            ? Math.max(serverGeneration, parsedGeneration) : parsedGeneration
+        }
+      }
     } catch {
       throw safeError('binding_unavailable')
     }
@@ -305,7 +322,8 @@ export function createChannelBindingWorkflow(
       let body: unknown
       try { body = await response.json() } catch { /* use the status fallback */ }
       const reported = isRecord(body) && typeof body.error === 'string' ? body.error : undefined
-      const code = reported === 'no_bound_account_found' ? reported
+      const code = reported === 'binding_generation_stale' ? reported
+        : reported === 'no_bound_account_found' ? reported
         : response.status === 400 ? 'invalid_request'
           : response.status === 404 ? 'unknown_operation' : 'binding_unavailable'
       throw safeError(code)
@@ -375,11 +393,20 @@ export function createChannelBindingWorkflow(
 
   const initiate = async (signal?: AbortSignal): Promise<ChannelBindingSnapshot> => {
     const generation = operationGeneration
-    const value = await requestJson('bindings', {
+    const post = () => requestJson('bindings', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',
     }, signal)
+    let value: unknown
+    try {
+      value = await post()
+    } catch (error) {
+      if (!isRecord(error) || error.code !== 'binding_generation_stale'
+          || generation !== operationGeneration) throw error
+      await requestJson('bindings')
+      value = await post()
+    }
     const snapshot = parseSnapshot(value)
     if (disposed || generation !== operationGeneration) throw safeError('binding_unavailable')
     reportSnapshot(snapshot)
@@ -431,8 +458,25 @@ export function createChannelBindingWorkflow(
       initiationController?.abort()
       initiation = undefined
       initiationController = undefined
-      operationId = undefined
-      current = undefined
+      if (operationId !== undefined) {
+        operationControllers.get(operationId)?.abort()
+        operationControllers.delete(operationId)
+        monitors.delete(operationId)
+      }
+      if (current !== undefined && current.state !== 'bound') {
+        current = {
+          ...cloneSnapshot(current),
+          state: 'cancelled',
+          revision: current.revision + 1,
+          qr_url: null,
+          verification: null,
+          ...(current.error !== undefined ? { error: null } : {}),
+        }
+        try { options.onSnapshot?.(cloneSnapshot(current)) } catch { /* observer */ }
+      } else if (current === undefined || current.state !== 'bound') {
+        operationId = undefined
+        current = undefined
+      }
       return true
     }
     if (operationId !== id || current === undefined) return false

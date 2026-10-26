@@ -5,10 +5,11 @@ import {
   type VoiceClientToolCall,
 } from './channelBinding'
 
-function response(body: unknown, status = 200): Response {
+function response(body: unknown, status = 200, headers: HeadersInit = {}): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: new Headers(headers),
     json: async () => body,
   } as Response
 }
@@ -339,6 +340,57 @@ describe('createChannelBindingWorkflow', () => {
       error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
     })
     expect(workflow.snapshot).toBeUndefined()
+    workflow.dispose()
+  })
+
+  test('cancels a pending initiation even when an older operation is current', async () => {
+    const post = deferred<Response>()
+    let posts = 0
+    const seen: ChannelBindingSnapshot[] = []
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (_input, init) => {
+        if (init?.method !== 'POST') return response({})
+        posts += 1
+        return posts === 1
+          ? response(snapshot({ state: 'failed', error: 'login_failed' }))
+          : post.promise
+      },
+      onSnapshot: value => seen.push(value),
+    })
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: true, result: { status: 'initiated' },
+    })
+    const pending = workflow.handleToolCall(toolCall())
+    await flush()
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'cancel' }))).resolves.toEqual({
+      ok: true, result: { status: 'cancelled' },
+    })
+    expect(seen[seen.length - 1]?.state).toBe('cancelled')
+    post.resolve(response(snapshot({ state: 'initiating' })))
+    await expect(pending).resolves.toMatchObject({ ok: false })
+    workflow.dispose()
+  })
+
+  test('synchronizes generation before retrying a stale initiation', async () => {
+    const requests: { init?: RequestInit }[] = []
+    let count = 0
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      fetch: async (_input, init) => {
+        requests.push({ init })
+        count += 1
+        if (count === 1) return response({ error: 'binding_generation_stale' }, 409, { 'x-binding-generation': '1' })
+        if (count === 2) return response({ operation_status: 'idle', has_linked_account: false }, 200, { 'x-binding-generation': '1' })
+        return response(snapshot({ state: 'initiating' }), 200, { 'x-binding-generation': '1' })
+      },
+    })
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: true, result: { status: 'initiated' },
+    })
+    expect(new Headers(requests[0]?.init?.headers).get('x-binding-generation')).toBe('0')
+    expect(requests[1]?.init?.method).toBeUndefined()
+    expect(new Headers(requests[2]?.init?.headers).get('x-binding-generation')).toBe('1')
     workflow.dispose()
   })
 
