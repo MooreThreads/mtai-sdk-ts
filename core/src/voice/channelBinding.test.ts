@@ -420,7 +420,9 @@ describe('createChannelBindingWorkflow', () => {
       endpoint: 'http://127.0.0.1:8781',
       fetch: async (input, init) => {
         requests.push({ url: String(input), init })
-        return response({ status: 'unbound' })
+        return init?.method === 'DELETE'
+          ? response({ status: 'unbound' })
+          : response({ operation_status: 'idle', has_linked_account: true })
       },
     })
 
@@ -429,7 +431,7 @@ describe('createChannelBindingWorkflow', () => {
       result: { status: 'unbound' },
     })
     expect(workflow.snapshot).toBeUndefined()
-    expect(requests[0]).toMatchObject({
+    expect(requests[1]).toMatchObject({
       url: 'http://127.0.0.1:8781/bindings',
       init: { method: 'DELETE' },
     })
@@ -439,7 +441,9 @@ describe('createChannelBindingWorkflow', () => {
   test('reports no_bound_account_found when unbinding without a bound account', async () => {
     const workflow = createChannelBindingWorkflow({
       endpoint: 'http://127.0.0.1:8781',
-      fetch: async () => response({ error: 'no_bound_account_found' }, 409),
+      fetch: async (_input, init) => init?.method === 'DELETE'
+        ? response({ error: 'no_bound_account_found' }, 409)
+        : response({ operation_status: 'idle', has_linked_account: false }),
     })
 
     await expect(workflow.handleToolCall(toolCall({ channel: 'wechat', action: 'unbind' }))).resolves.toEqual({
