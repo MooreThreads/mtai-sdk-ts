@@ -426,13 +426,11 @@ export function createChannelBindingWorkflow(
 
   const cancelOperation = (id: string): boolean => {
     if (disposed) return false
-    if (initiation !== undefined && id === '') {
+    if (current === undefined && initiation !== undefined && id === '') {
       operationGeneration += 1
       initiationController?.abort()
       initiation = undefined
       initiationController = undefined
-      operationId = undefined
-      current = undefined
       return true
     }
     if (operationId !== id || current === undefined) return false
@@ -474,7 +472,8 @@ export function createChannelBindingWorkflow(
           return { ok: true, result: await unbind() }
         }
         if (call.arguments.action === 'cancel') {
-          if (initiation !== undefined && cancelOperation('')) {
+          if (operationId === undefined && initiation !== undefined
+              && cancelOperation('')) {
             return { ok: true, result: { status: 'cancelled' } }
           }
           if (operationId === undefined || current === undefined
@@ -542,8 +541,6 @@ export function createChannelBindingWorkflow(
       operationId = undefined
       monitors.clear()
       workflowAbortController?.abort()
-      initiationController?.abort()
-      initiationController = undefined
       for (const controller of operationControllers.values()) controller.abort()
       operationControllers.clear()
     },
