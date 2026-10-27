@@ -237,7 +237,6 @@ export function createChannelBindingWorkflow(
   const operationControllers = new Map<string, AbortController>()
   let disposed = false
   let serverGeneration = 0
-  let serverGenerationKnown = false
   const workflowAbortController = typeof AbortController === 'function' ? new AbortController() : undefined
 
   const reportSnapshot = (snapshot: ChannelBindingSnapshot) => {
@@ -298,7 +297,7 @@ export function createChannelBindingWorkflow(
     try {
       const requestSignal = signal ?? workflowAbortController?.signal
       const headers = new Headers(init?.headers)
-      if (method === 'POST' || (method === 'DELETE' && serverGenerationKnown)) {
+      if (serverGeneration !== undefined && (method === 'POST' || method === 'DELETE')) {
         headers.set('X-Binding-Generation', String(serverGeneration))
       }
       const requestInit = requestSignal
@@ -314,7 +313,6 @@ export function createChannelBindingWorkflow(
         if (Number.isSafeInteger(parsedGeneration)) {
           serverGeneration = method === 'POST' || method === 'DELETE'
             ? Math.max(serverGeneration, parsedGeneration) : parsedGeneration
-          serverGenerationKnown = true
         }
       }
     } catch {
@@ -433,7 +431,6 @@ export function createChannelBindingWorkflow(
   }
 
   const unbind = async (): Promise<{ status: 'unbound' }> => {
-    if (!serverGenerationKnown) await requestJson('bindings')
     const value = await requestJson('bindings', { method: 'DELETE' })
     if (!isRecord(value) || value.status !== 'unbound') throw new Error('invalid unbind result')
     clearLocalBindingState()
