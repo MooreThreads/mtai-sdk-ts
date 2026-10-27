@@ -433,7 +433,7 @@ export function createChannelBindingWorkflow(
   }
 
   const unbind = async (): Promise<{ status: 'unbound' }> => {
-    await requestJson('bindings')
+    if (!serverGenerationKnown) await requestJson('bindings')
     const value = await requestJson('bindings', { method: 'DELETE' })
     if (!isRecord(value) || value.status !== 'unbound') throw new Error('invalid unbind result')
     clearLocalBindingState()
