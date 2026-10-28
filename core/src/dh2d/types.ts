@@ -1,5 +1,5 @@
 import { DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, EventSource, UnionEqual } from "../types";
-import type { ChannelBindingCallbacks, VoiceClientToolHandler } from "../voice/channelBinding";
+import type { VoiceClientToolHandler } from "../voice/channelBinding";
 
 /**
  * Represents a connection to the server.
@@ -26,6 +26,10 @@ export type DH2DConnection = EventSource<DHConnectionEvents> & {
  * Represents the HTML elements used for the player.
  */
 export type DH2DPlayerElements = {
+  /** Untransformed host for SDK-owned UI. */
+  container?: HTMLElement
+  /** Releases player presentation listeners. */
+  dispose?: () => void
   /**
    * The video element used to display the video stream.
    */
@@ -64,10 +68,6 @@ export type DH2DVoiceClientConfig = {
    * discovery path; the consuming application supplies this value.
    */
   wechatPluginEndpoint?: string,
-  /**
-   * UI callbacks and the workflow handle for the configured binding endpoint.
-   */
-  wechatBinding?: ChannelBindingCallbacks,
   /**
    * Optional generic frontend tool handler. When omitted, a configured
    * `wechatPluginEndpoint` installs the built-in WeChat binding handler.

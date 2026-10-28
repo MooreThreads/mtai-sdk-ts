@@ -82,12 +82,6 @@ export type ChannelBindingWorkflow = {
   readonly snapshot: ChannelBindingSnapshot | undefined,
 }
 
-export type ChannelBindingCallbacks = {
-  onSnapshot?: (snapshot: ChannelBindingSnapshot) => void,
-  onError?: (error: ChannelBindingError) => void,
-  onWorkflow?: (workflow: ChannelBindingWorkflow) => void,
-}
-
 const SAFE_MESSAGES: Record<string, string> = {
   invalid_arguments: 'invalid binding arguments',
   invalid_request: 'WeChat binding request was invalid',
@@ -416,6 +410,7 @@ export function createChannelBindingWorkflow(
           && typeof error.message === 'string'
           ? { code: error.code, message: error.message }
           : safeError('binding_unavailable')
+        reportError(safe)
         return { ok: false, error: safe }
       }
     },

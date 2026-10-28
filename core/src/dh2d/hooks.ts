@@ -6,6 +6,7 @@ import { DH2DSessionConfig, DH2DPlayerElements, DH2DSession, ResolvedDH2DSession
 import { Abortable, Box } from "../types";
 import { box } from "../box";
 import { config as rootConfig } from "../config";
+import { createPlayerPresentation } from './playerPresentation';
 
 function defaultConfig(config?: DH2DSessionConfig): ResolvedDH2DSessionConfig {
     return {
@@ -63,9 +64,12 @@ function getOrCreatePlayer(parent: HTMLElement): DH2DPlayerElements {
         cover.style.width = "100%";
         cover.style.height = "100%";
     }
+    const dispose = createPlayerPresentation(container, video, cover, rootConfig().show_turn_id === true)
     return {
         video,
         cover,
+        container,
+        dispose,
     }
 }
 

@@ -1,4 +1,19 @@
 import { config, setConfig } from './config'
+import type { Config } from './types'
+import type { DH2DSessionConfig, DH2DVoiceClientConfig } from './dh2d/types'
+
+// Compile-time public API checks: UI observers and per-session stripe flags are not supported.
+const globalDisplay: Config = { endpoint: 'http://localhost', show_turn_id: true }
+const sessionDisplay: DH2DSessionConfig = {
+  // @ts-expect-error show_turn_id is global only
+  show_turn_id: true,
+}
+const bindingConfig: DH2DVoiceClientConfig = {
+  interaction_endpoint: 'ws://localhost',
+  // @ts-expect-error binding UI is SDK-owned, not consumer callbacks
+  wechatBinding: { onSnapshot() {}, onError() {}, onWorkflow() {} },
+}
+void globalDisplay; void sessionDisplay; void bindingConfig
 
 const DEFAULT_ENDPOINT = 'http://localhost:32101'
 

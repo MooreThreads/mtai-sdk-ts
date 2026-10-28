@@ -1,3 +1,4 @@
+/** @jest-environment jsdom */
 import { abortable, withChild } from '../abortable'
 import { setConfig } from '../config'
 import { createLogger } from '../log'
@@ -284,9 +285,9 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar', cover?: any) {
+async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar', cover?: any, container?: HTMLElement) {
   const scope = abortable()
-  const connecting = withChild(scope, child => connectVoiceClient(logger, { video, cover } as any, config, child))
+  const connecting = withChild(scope, child => connectVoiceClient(logger, { video, cover, container } as any, config, child))
   await flushMicrotasks()
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
   ws.open()
@@ -994,10 +995,9 @@ describe('connectVoiceClient', () => {
     }
   })
 
-  test('configures the direct WeChat endpoint and exposes its continuing workflow', async () => {
+  test('configures the direct WeChat endpoint and owns its UI without consumer callbacks', async () => {
     const globals = setupGlobals()
-    const workflowReady = deferred<any>()
-    const snapshots: any[] = []
+    const container = document.createElement('div')
     const pluginFetch = jest.fn(async (url: string, init?: RequestInit) => ({
       ok: true,
       status: 200,
@@ -1007,17 +1007,12 @@ describe('connectVoiceClient', () => {
     }))
     try {
       const video = fakeVideo()
-      const { ws } = await connectReady(createConfig({
+      const { ws, connection } = await connectReady(createConfig({
         voiceClient: {
           wechatPluginEndpoint: 'http://plugin.local:8781',
-          wechatBinding: {
-            onSnapshot: (snapshot: any) => snapshots.push(snapshot),
-            onWorkflow: (workflow: any) => workflowReady.resolve(workflow),
-          },
         },
-      }), video)
+      }), video, 'canonical-avatar', undefined, container)
       ;(globalThis as any).fetch = pluginFetch
-      await workflowReady.promise
       ws.receive(JSON.stringify({
         type: 'tool.call',
         session_id: 'voice-1',
@@ -1031,7 +1026,9 @@ describe('connectVoiceClient', () => {
         'http://plugin.local:8781/bindings',
         expect.objectContaining({ method: 'POST' }),
       )
-      expect(snapshots.map(snapshot => snapshot.state)).toEqual(['initiating', 'bound'])
+      expect(container.textContent).toContain('微信绑定成功')
+      connection.dispose()
+      expect(container.children).toHaveLength(0)
       expect(ws.sent.map((data: string) => JSON.parse(data))).toContainEqual({
         type: 'tool.result',
         session_id: 'voice-1',

@@ -15,6 +15,7 @@ import { createVoiceMicrophone } from "../voice/microphone"
 import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from "./types"
 import { avatarTimingNow, createAvatarPlayback } from "./avatarMedia"
 import { createReceiverStats } from "./receiverStats"
+import { createChannelBindingUI } from '../voice/channelBindingUI'
 
 /**
  * A DH2D connection whose voice-protocol traffic is carried by the voice
@@ -268,21 +269,19 @@ async function connectOnce(
     onClientSend: frame => sendFrame(JSON.stringify(frame)),
   })
 
+  let bindingUI: ReturnType<typeof createChannelBindingUI> | undefined
   const configuredBinding = voiceConfig.wechatPluginEndpoint
     ? createChannelBindingToolHandler({
       endpoint: voiceConfig.wechatPluginEndpoint,
-      onSnapshot: voiceConfig.wechatBinding?.onSnapshot,
-      onError: voiceConfig.wechatBinding?.onError,
+      onSnapshot: snapshot => bindingUI?.update(snapshot),
+      onError: error => bindingUI?.error(error),
     })
     : undefined
   const frontendToolHandler: VoiceClientToolHandler | undefined =
     voiceConfig.frontendToolHandler ?? configuredBinding?.handler
-  if (configuredBinding) {
-    try {
-      voiceConfig.wechatBinding?.onWorkflow?.(configuredBinding.workflow)
-    } catch {
-      // The consuming UI is an observer; a callback cannot break the voice path.
-    }
+  const bindingContainer = elements.container ?? elements.video.parentElement
+  if (configuredBinding && bindingContainer) {
+    bindingUI = createChannelBindingUI(bindingContainer, configuredBinding.workflow)
   }
 
   const handleFrontendToolCall = async (call: VoiceClientToolCall) => {
@@ -519,6 +518,7 @@ async function connectOnce(
     disposed = true
     running = false
     configuredBinding?.workflow.dispose()
+    bindingUI?.dispose()
     receiverStats.stop()
     avatarPlayback?.stop()
     stopMicrophone?.()

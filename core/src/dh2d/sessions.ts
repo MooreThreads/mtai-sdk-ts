@@ -97,6 +97,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             }
             closed = true
             rootAbortable.abort()
+            player.dispose?.()
             try {
                 if (connRef) {
                     await hooks.dh2d.disconnect(rootLogger, connRef, player, rootAbortable)

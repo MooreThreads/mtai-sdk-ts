@@ -244,6 +244,8 @@ export type Abortable = {
 }
 
 export type Config = {
+  /** Show the encoded top stripe; omitted/false crops it visually only. */
+  show_turn_id?: boolean,
   /**
    * The server endpoint URL.
    * @default 'http://localhost:32101'

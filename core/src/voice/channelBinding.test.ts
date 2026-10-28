@@ -54,6 +54,18 @@ function snapshot(overrides: Partial<ChannelBindingSnapshot>): ChannelBindingSna
 }
 
 describe('createChannelBindingWorkflow', () => {
+  test('reports a sanitized initiation failure to the SDK UI', async () => {
+    const onError = jest.fn()
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://plugin.local',
+      fetch: async () => { throw new Error('private backend details') },
+      onError,
+    })
+    const result = await workflow.handleToolCall(toolCall())
+    expect(onError).toHaveBeenCalledWith({ code: 'binding_unavailable', message: 'WeChat binding service unavailable' })
+    expect(JSON.stringify(result)).not.toContain('private backend details')
+    workflow.dispose()
+  })
   test('returns initiated before QR retrieval and continues revision-driven UI updates', async () => {
     const requests: { url: string, init?: RequestInit }[] = []
     const qrResponse = deferred<Response>()

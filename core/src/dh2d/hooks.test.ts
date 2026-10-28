@@ -74,7 +74,8 @@ function patchSessionHooks(captureVoiceConfig: (config: ResolvedDH2DSessionConfi
   const { restore } = patchHooks()
   const fixture = voiceConnectionFixture()
   const legacyConnectCalls: ResolvedDH2DSessionConfig[] = []
-  hooks.dh2d.getOrCreatePlayer = () => ({ video: {} } as any)
+  const disposePlayer = jest.fn()
+  hooks.dh2d.getOrCreatePlayer = () => ({ video: {}, dispose: disposePlayer } as any)
   hooks.dh2d.beforeConnectingSession = async () => undefined
   hooks.dh2d.connectVoiceClient = (async (_logger: any, _elements: any, config: ResolvedDH2DSessionConfig) => {
     captureVoiceConfig(config)
@@ -90,6 +91,7 @@ function patchSessionHooks(captureVoiceConfig: (config: ResolvedDH2DSessionConfi
   return {
     restore,
     legacyConnectCalls,
+    disposePlayer,
     fixture,
   }
 }
@@ -146,6 +148,7 @@ describe('createDH2DSession voice-client mode through global config', () => {
       expect(captured).toHaveLength(1)
       expect(captured[0].voiceClient).toEqual({ interaction_endpoint: 'wss://127.0.0.1:8782', dh2d_endpoint: 'http://dh2d.voice:32107' })
       await session.close()
+      expect(patched.disposePlayer).toHaveBeenCalledTimes(1)
     } finally {
       patched.restore()
       restoreFetch()

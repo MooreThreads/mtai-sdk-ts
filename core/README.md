@@ -170,8 +170,9 @@ const session = createDH2DSession(divElement, {
 
 Optional WeChat channel binding is configured explicitly on the voice client;
 the SDK does not discover a plugin endpoint. The endpoint exposes the
-revision-driven binding workflow and the UI receives sanitized snapshots and a
-workflow handle for verification:
+revision-driven binding workflow. The SDK renders its own plain DOM/CSS binding
+UI inside the player, including locally encoded QR, status, verification and fades.
+Do not provide application-owned binding callbacks or an additional overlay:
 
 ```typescript
 const session = createDH2DSession(divElement, {
@@ -179,22 +180,26 @@ const session = createDH2DSession(divElement, {
   voiceClient: {
     interaction_endpoint: 'ws://localhost:8300',
     wechatPluginEndpoint: 'http://127.0.0.1:8781',
-    wechatBinding: {
-      onSnapshot: snapshot => renderBinding(snapshot),
-      onWorkflow: workflow => { currentBindingWorkflow = workflow },
-    },
   },
 })
 ```
 
 The built-in `bind_channel` tool accepts `{ channel: 'wechat', action:
-'initiate' }` or `{ channel: 'wechat', action: 'cancel', operation_id }`.
+'initiate' }` or `{ channel: 'wechat', action: 'cancel' }`.
 Cancellation is a frontend-only dismissal: it fences local snapshot delivery
 and emits a sanitized `cancelled` snapshot without making a backend request;
 it does not cancel QR/login work. Verification codes are sent only through
-`workflow.verify(code)` and are never included in tool results or snapshots.
-Call the workflow's `dispose()` when the owning voice connection is retired;
-connection disposal performs this automatically.
+the SDK's verification form and are never included in tool results or snapshots.
+The SDK disposes the UI and workflow when the owning connection is retired.
+QR payloads are encoded locally using the framework-free MIT `qrcode-generator`
+dependency; no remote QR service or image URL interpretation is used.
+
+The global `setConfig({ endpoint: '...', show_turn_id: true })` option exposes
+the full video frame, including the encoded turn-ID stripe. Omission or `false`
+visually crops the stripe using uniform scaling and upward cropping, preserving
+the aspect ratio and horizontal center. This is **not** a session option. It is
+read when the player is created, like other global defaults; it does not subscribe
+to subsequent config updates. Original-frame stripe decoding is unchanged.
 
 Playback boundaries: a validated stripe transition from turn A to a
 different turn B reports `playback.ended` for A. The A→idle boundary (the
