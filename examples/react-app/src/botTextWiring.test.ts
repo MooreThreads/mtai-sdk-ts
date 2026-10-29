@@ -1,5 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+
+// Build core before running: exercise the real SDK adapter, not a mock stream.
+const { createVoiceMessageAdapter } = createRequire(import.meta.url)('../../../core/dist/voice/adapter.js')
 
 import type { DHOutputMessage } from 'mtai'
 import {
@@ -10,6 +14,30 @@ import {
   type BotTextDisplayEvent,
   type BotTextDisplayState,
 } from './botTextWiring.ts'
+
+test('real voice adapter cumulative outputs do not duplicate prefixes in the demo reducer', () => {
+  const adapter = createVoiceMessageAdapter({ sessionId: 'demo' })
+  let state = createInitialBotTextDisplay()
+  const callbacks: BotTextCallbacks = {
+    onBotOutput: (text) => { state = reduceBotTextDisplay(state, { kind: 'bot_output', text }) },
+    onFinalAssistantText: (content) => {
+      state = reduceBotTextDisplay(state, { kind: 'assistant_message_record', content })
+    },
+  }
+  const receive = (type: string, text?: string) => {
+    for (const message of adapter.ingest({ type, session_id: 'demo', turn_id: 'turn', text })) {
+      dispatchBotTextMessage(message, callbacks)
+    }
+  }
+  receive('text.output.delta', '甲')
+  assert.equal(state.botText, '甲')
+  receive('text.output.delta', '乙')
+  assert.equal(state.botText, '甲乙') // Assert before the final record can mask duplication.
+  receive('text.output.delta', '')
+  assert.equal(state.botText, '甲乙')
+  receive('turn.end')
+  assert.equal(state.botText, '甲乙')
+})
 
 function recordCalls(): BotTextCallbacks & {
   calls: { bot: string[], subtitle: string[], final: string[] },
@@ -23,11 +51,11 @@ function recordCalls(): BotTextCallbacks & {
   }
 }
 
-test('accumulates bot_output fragments in the displayed bot text', () => {
+test('replaces displayed bot text with each cumulative bot_output', () => {
   let state = createInitialBotTextDisplay()
 
   state = reduceBotTextDisplay(state, { kind: 'bot_output', text: '你好' })
-  state = reduceBotTextDisplay(state, { kind: 'bot_output', text: '，世界' })
+  state = reduceBotTextDisplay(state, { kind: 'bot_output', text: '你好，世界' })
 
   assert.equal(state.botText, '你好，世界')
   assert.equal(state.subtitleText, '')
@@ -113,7 +141,7 @@ test('falls back to onBotOutput for audio_text when no subtitle callback is prov
   assert.deepEqual(calls, ['spoken'])
 })
 
-test('routes bot_output fragments to onBotOutput even when subtitle callbacks are wired', () => {
+test('routes cumulative bot_output to onBotOutput even when subtitle callbacks are wired', () => {
   const callbacks = recordCalls()
 
   dispatchBotTextMessage({ type: 'bot_output', text: 'frag' }, callbacks)
@@ -165,7 +193,7 @@ test('a full turn keeps subtitles separate and finalizes bot text with the exact
     { type: 'bot_output', text: 'The answer ' },
     { type: 'audio_text', text: 'The answer is ' },
     { type: 'audio_text', text: 'The answer is 42.' },
-    { type: 'bot_output', text: 'is 42.' },
+    { type: 'bot_output', text: 'The answer is 42.' },
     { type: 'message_record', message: { role: 'assistant', content: 'The answer is 42.' } },
   ]
   for (const message of messages) {

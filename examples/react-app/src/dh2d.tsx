@@ -52,7 +52,7 @@ export const DH2D: FC<{
   },
   /**
    * Callback fired when the bot produces streamed output. Receives
-   * `bot_output` fragments; also receives `audio_text` when no
+   * Cumulative `bot_output` text; also receives `audio_text` when no
    * `onSubtitleOutput` is provided (legacy direct-DH2D mode reports spoken
    * bot text through `audio_text`).
    */
@@ -158,7 +158,7 @@ export const DH2D: FC<{
     });
 
     session.on('message', (message) => {
-      // Bot text wiring: streamed `bot_output` fragments, spoken
+      // Bot text wiring: cumulative `bot_output` text, spoken
       // `audio_text` subtitles, and finalized assistant `message_record`
       // content are routed to dedicated callbacks (see botTextWiring.ts).
       dispatchBotTextMessage(message, { onBotOutput, onSubtitleOutput, onFinalAssistantText });

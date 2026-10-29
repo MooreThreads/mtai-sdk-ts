@@ -1057,6 +1057,7 @@ describe('connectVoiceClient', () => {
       ws.receive(JSON.stringify({ type: 'turn.end', session_id: 'voice-1', turn_id: 't1' }))
       ws.receive(JSON.stringify({ type: 'conversation.state', session_id: 'voice-1', state: 'ended' }))
       expect(messages).toEqual([
+        { type: 'message_record', message: { role: 'user', content: '你好' } },
         { type: 'status_change', status: 'talking' },
         { type: 'bot_output', text: '答' },
         { type: 'audio_text', text: '答' },

@@ -63,7 +63,8 @@ function defaultRequestIdFactory() {
  * `message_record`, `status_change`).
  *
  * The adapter keeps per-session and per-turn state: accumulated `bot_output`
- * fragments keyed by `session_id + turn_id`, the current conversation state,
+ * fragments keyed by `session_id + turn_id` (emitted as replacement text),
+ * incremental audio subtitles, confirmed user records, the current conversation state,
  * the accepted capture turn, and any pending wakeup stop-then-start sequence.
  * Statuses transform strictly: `capture.start` reports `listening`, and
  * `capture.stop` or the acknowledgement of the current generation's typed
@@ -120,8 +121,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const fragments = new Map<string, string[]>()
   /** Turns that already emitted their derived message_record. */
   const finalizedTurns = new Set<string>()
-  /** Accumulated spoken subtitle text per live turn for Electron's replacement UI. */
-  const audioTextByTurn = new Map<string, string>()
+  /** ASR finals already confirmed as user records in this connection. */
+  const confirmedAsrTurns = new Set<string>()
+  let typedText: string | undefined
   /**
    * Request id of the current generation's typed input, if any. A
    * `text.accepted` acknowledgement for exactly this request — while its
@@ -163,6 +165,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     pendingWakeupStart = false
     pendingSleepStop = undefined
     typedRequestId = undefined
+    typedText = undefined
   }
 
   /** Sends a deferred frame only while its generation is still current. */
@@ -189,8 +192,18 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
           // The turn is retired; late ASR must never reach the app.
           return []
         }
+        const key = typeof event.turn_id === 'string' && event.turn_id ? turnKey(event.turn_id) : undefined
+        if (key && confirmedAsrTurns.has(key)) return []
         const text = typeof event.text === 'string' ? event.text : ''
-        return [{ type: 'asr_process', sentence: text, completed: event.type === 'asr.final' }]
+        const completed = event.type === 'asr.final'
+        const messages: DHOutputMessage[] = [{ type: 'asr_process', sentence: text, completed }]
+        if (completed) {
+          if (key) confirmedAsrTurns.add(key)
+          // Wakeup ASR is already submitted by the voice service. An
+          // asr_session final would cause legacy clients to submit it again.
+          if (text.trim()) messages.push({ type: 'message_record', message: { role: 'user', content: text } })
+        }
+        return messages
       }
       case 'text.output.delta': {
         if (event.session_id !== sessionId || typeof event.turn_id !== 'string') return []
@@ -201,7 +214,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         }
         const text = typeof event.text === 'string' ? event.text : ''
         fragments.set(key, [...(fragments.get(key) || []), text])
-        return [{ type: 'bot_output', text }]
+        return [{ type: 'bot_output', text: fragments.get(key)!.join('') }]
       }
       case 'audio.output.delta': {
         if (event.session_id !== sessionId) return []
@@ -213,17 +226,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         return subtitles
           .filter(segment => segment && (segment.source === 'main' || segment.source === 'narrator')
             && typeof segment.text === 'string')
-          .map(segment => {
-            // Electron replaces its subtitle text on each callback, so expose
-            // the complete spoken prefix rather than only this chunk's token.
-            if (typeof event.turn_id !== 'string' || !event.turn_id) {
-              return { type: 'audio_text', text: segment.text } as DHOutputMessage
-            }
-            const key = turnKey(event.turn_id)
-            const accumulated = `${audioTextByTurn.get(key) || ''}${segment.text}`
-            audioTextByTurn.set(key, accumulated)
-            return { type: 'audio_text', text: accumulated } as DHOutputMessage
-          })
+          .map(segment => ({ type: 'audio_text', text: segment.text } as DHOutputMessage))
       }
       case 'turn.end': {
         if (event.session_id !== sessionId || typeof event.turn_id !== 'string') return []
@@ -234,7 +237,6 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         finalizedTurns.add(key)
         const joined = (fragments.get(key) || []).join('')
         fragments.delete(key)
-        audioTextByTurn.delete(key)
         if (!joined) {
           return []
         }
@@ -286,7 +288,8 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
           pendingSleepStop.acceptedTurnId = event.turn_id
         }
         // The acknowledgement of the current typed input reports the
-        // accepted typed turn as `talking` — once per request. Wrong
+        // accepted typed turn as a user record followed by `talking` — once
+        // per request. Wrong
         // sessions, unknown or retired requests, missing turn ids, retired
         // turns, and duplicates never report a status.
         if (
@@ -296,8 +299,13 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
           && !!event.turn_id
           && !isRetiredTurn(event)
         ) {
+          const text = typedText
           typedRequestId = undefined
-          return [statusMessage('talking')]
+          typedText = undefined
+          const messages: DHOutputMessage[] = []
+          if (text?.trim()) messages.push({ type: 'message_record', message: { role: 'user', content: text } })
+          messages.push(statusMessage('talking'))
+          return messages
         }
         return []
       }
@@ -336,6 +344,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       // active, so the text is never held behind a stop-then-start sequence.
       const requestId = newRequestId()
       typedRequestId = requestId
+      typedText = userText
       return [
         { type: 'conversation.start', session_id: sessionId },
         { type: 'text.input', session_id: sessionId, request_id: requestId, text: userText },
@@ -358,6 +367,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       // `observeAvatarTurn`).
       const requestId = newRequestId()
       typedRequestId = requestId
+      typedText = userText
       pendingSleepStop = {
         generation: pendingMessageGeneration,
         requestId,
@@ -373,6 +383,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     invalidatePendingSequence()
     const requestId = newRequestId()
     typedRequestId = requestId
+    typedText = text
     return { type: 'text.input', session_id: sessionId, request_id: requestId, text }
   }
 
@@ -446,7 +457,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     conversationEnded = true
     captureTurnId = undefined
     fragments.clear()
-    audioTextByTurn.clear()
+    confirmedAsrTurns.clear()
     finalizedTurns.clear()
   }
 

@@ -37,8 +37,17 @@ endpoint for all other requests; a partial runtime config that omits
 `dh2d_endpoint` falls back to the global `endpoint` for those avatar
 operations. `wakeup`, `sleep`,
 and text input are translated to the client protocol, TTS subtitles are
-surfaced as `audio_text`, streamed LLM output as `bot_output`, and a
-`message_record` is derived from accumulated `bot_output` at `turn.end`.
+surfaced as incremental `audio_text` segments (main/narrator in wire order),
+streamed LLM output as cumulative/replacement `bot_output`, and an assistant
+`message_record` is derived from accumulated LLM output at `turn.end`.
+ASR progress uses `asr_process`; a nonblank final also emits a confirmed user
+`message_record`, once per identified turn. It never emits `asr_session`:
+legacy consumers resubmit completed `asr_session` text, whereas voice ASR is
+already submitted by the service. A matching current `text.accepted` confirms
+the original typed text as a user record before its explicit talking status.
+Sleep remains an explicit `status_change` from `conversation.state:ended`;
+no model identifier or compensating status is invented. Commands retain their
+opaque fields for the existing application's command handler.
 Avatar playback boundaries are decoded from the DH2D video turn stripe and
 reported to the client as `playback.ended`.
 

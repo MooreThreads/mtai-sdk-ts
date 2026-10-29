@@ -3,7 +3,7 @@ import type { DHOutputMessage } from 'mtai'
 /**
  * Bot-text callbacks offered by the DH2D demo component.
  *
- * - `onBotOutput` receives streamed `bot_output` fragments (legacy
+ * - `onBotOutput` receives cumulative `bot_output` text (legacy
  *   compatibility: it also receives `audio_text` when no
  *   `onSubtitleOutput` is provided, matching the legacy direct-DH2D mode
  *   that reports spoken bot text through `audio_text`).
@@ -20,7 +20,7 @@ export interface BotTextCallbacks {
 /**
  * Routes bot-text-bearing DH2D messages to the matching callback.
  *
- * `bot_output` fragments always go to `onBotOutput`. `audio_text` is a
+ * Cumulative `bot_output` text always goes to `onBotOutput`. `audio_text` is a
  * spoken subtitle and goes to `onSubtitleOutput`; when only the legacy
  * `onBotOutput` is provided it falls back there so existing consumers keep
  * working. Assistant `message_record` content is reported through
@@ -42,7 +42,7 @@ export function dispatchBotTextMessage(message: DHOutputMessage, callbacks: BotT
 
 /** Demo text display state: finalized assistant text and spoken subtitles. */
 export type BotTextDisplayState = {
-  /** Assistant text: accumulated `bot_output` fragments, replaced by the exact assistant `message_record` content. */
+  /** Assistant text: latest cumulative `bot_output`, replaced by the exact assistant `message_record` content. */
   botText: string,
   /** Spoken subtitle text (`audio_text`), displayed separately from the bot text. */
   subtitleText: string,
@@ -61,7 +61,7 @@ export type BotTextDisplayEvent =
 /**
  * Reduces demo text display state.
  *
- * `bot_output` fragments accumulate; an assistant `message_record` replaces
+ * `bot_output` replaces the current text; an assistant `message_record` replaces
  * the bot text with its exact content (never appends). `audio_text` updates
  * the separate subtitle display only. Leaving `talking` clears both
  * displays.
@@ -69,7 +69,7 @@ export type BotTextDisplayEvent =
 export function reduceBotTextDisplay(state: BotTextDisplayState, event: BotTextDisplayEvent): BotTextDisplayState {
   switch (event.kind) {
     case 'bot_output':
-      return { ...state, botText: state.botText + event.text }
+      return { ...state, botText: event.text }
     case 'audio_text':
       return { ...state, subtitleText: event.text }
     case 'assistant_message_record':

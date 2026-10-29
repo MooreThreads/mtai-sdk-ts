@@ -37,12 +37,13 @@ describe('asr events become asr_process', () => {
     ])
   })
 
-  test('asr.final becomes asr_process with completed true', () => {
+  test('asr.final emits progress then the confirmed user record', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
       type: 'asr.final', session_id: sessionId, turn_id: 't1', text: '你好',
     }))).toEqual([
       { type: 'asr_process', sentence: '你好', completed: true },
+      { type: 'message_record', message: { role: 'user', content: '你好' } },
     ])
   })
 
@@ -71,6 +72,7 @@ describe('asr events become asr_process', () => {
       type: 'asr.final', session_id: sessionId, text: '你好',
     }))).toEqual([
       { type: 'asr_process', sentence: '你好', completed: true },
+      { type: 'message_record', message: { role: 'user', content: '你好' } },
     ])
   })
 })
@@ -86,7 +88,7 @@ describe('text.output.delta becomes bot_output and accumulates per turn', () => 
     expect(adapter.ingest(event({
       type: 'text.output.delta', session_id: sessionId, turn_id: 't1', text: '，世界',
     }))).toEqual([
-      { type: 'bot_output', text: '，世界' },
+      { type: 'bot_output', text: '你好，世界' },
     ])
   })
 
@@ -110,7 +112,7 @@ describe('text.output.delta becomes bot_output and accumulates per turn', () => 
 })
 
 describe('audio.output.delta subtitles become audio_text in segment order', () => {
-  test('main and narrator segments emit accumulated text for Electron replacement UI', () => {
+  test('main and narrator segments emit incremental text for legacy history', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
       type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
@@ -120,13 +122,13 @@ describe('audio.output.delta subtitles become audio_text in segment order', () =
       ],
     }))).toEqual([
       { type: 'audio_text', text: '回答内容' },
-      { type: 'audio_text', text: '回答内容我先查一下。' },
+      { type: 'audio_text', text: '我先查一下。' },
     ])
     expect(adapter.ingest(event({
       type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
       subtitles: [{ source: 'main', text: '继续。' }],
     }))).toEqual([
-      { type: 'audio_text', text: '回答内容我先查一下。继续。' },
+      { type: 'audio_text', text: '继续。' },
     ])
   })
 
@@ -166,7 +168,7 @@ describe('audio.output.delta subtitles become audio_text in segment order', () =
   })
 })
 
-describe('accumulated audio_text is fenced by session, turn, and lifecycle', () => {
+describe('incremental audio_text is fenced by session, turn, and lifecycle', () => {
   test('subtitles from another session neither emit nor pollute this session turn', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
@@ -181,7 +183,7 @@ describe('accumulated audio_text is fenced by session, turn, and lifecycle', () 
     ])
   })
 
-  test('turn.end clears accumulated spoken text so late chunks and fresh turns stay isolated', () => {
+  test('turn.end fences late chunks while fresh turns remain isolated', () => {
     const adapter = createAdapter()
     adapter.ingest(event({
       type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
@@ -200,7 +202,7 @@ describe('accumulated audio_text is fenced by session, turn, and lifecycle', () 
     ])
   })
 
-  test('cancellation reset clears accumulated spoken text across all live turns', () => {
+  test('cancellation reset allows fresh spoken text across all live turns', () => {
     const adapter = createAdapter()
     adapter.ingest(event({
       type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
@@ -365,6 +367,7 @@ describe('typed input acknowledgements become talking', () => {
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
     }))).toEqual([
+      { type: 'message_record', message: { role: 'user', content: '你好' } },
       { type: 'status_change', status: 'talking' },
     ])
   })
@@ -375,6 +378,7 @@ describe('typed input acknowledgements become talking', () => {
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frames[1].request_id, turn_id: 't1',
     }))).toEqual([
+      { type: 'message_record', message: { role: 'user', content: '你好' } },
       { type: 'status_change', status: 'talking' },
     ])
   })
@@ -385,6 +389,7 @@ describe('typed input acknowledgements become talking', () => {
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
     }))).toEqual([
+      { type: 'message_record', message: { role: 'user', content: '你好' } },
       { type: 'status_change', status: 'talking' },
     ])
     expect(adapter.ingest(event({
@@ -451,6 +456,7 @@ describe('typed input acknowledgements become talking', () => {
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
     }))).toEqual([
+      { type: 'message_record', message: { role: 'user', content: '你好' } },
       { type: 'status_change', status: 'talking' },
     ])
   })
@@ -817,6 +823,7 @@ describe('sleep with text', () => {
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
     }))).toEqual([
+      { type: 'message_record', message: { role: 'user', content: '再见' } },
       { type: 'status_change', status: 'talking' },
     ])
   })
