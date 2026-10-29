@@ -121,15 +121,42 @@ describe('dh2d defaultConfig voiceClient inheritance', () => {
     expect(resolved.voiceClient).toEqual({ interaction_endpoint: 'ws://session:8300', dh2d_endpoint: 'http://session-dh2d:32107' })
   })
 
-  test('voiceClient stays unset when neither root nor session config provides it', () => {
+  test('uses SDK voice defaults when neither root nor session config provides it', () => {
     restoreDefaultConfig()
     const resolved = hooks.dh2d.defaultConfig({ videoId: 'xiaomai' })
-    expect(resolved.voiceClient).toBeUndefined()
+    expect(resolved.voiceClient).toEqual({
+      interaction_endpoint: 'http://127.0.0.1:8780',
+      dh2d_endpoint: 'http://127.0.0.1:32106',
+      sessionId: 'avatar-channel-session',
+      wechatPluginEndpoint: 'http://127.0.0.1:8781',
+    })
   })
 })
 
 describe('createDH2DSession voice-client mode through global config', () => {
   afterEach(restoreDefaultConfig)
+
+  test('default session uses voice transport and accepts the original config flow', async () => {
+    const captured: ResolvedDH2DSessionConfig[] = []
+    const patched = patchSessionHooks(config => captured.push(config))
+    const fetchSpy = jest.fn(() => { throw new Error('default voice session must not require legacy login') })
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = fetchSpy as any
+    const session = createDH2DSession({} as HTMLElement, { videoId: 'xiaomai', audioInput: true })
+    try {
+      await waitUntil(() => session.status === 'connected', 'default voice connection')
+      expect(captured[0].voiceClient?.sessionId).toBe('avatar-channel-session')
+      expect(captured[0].audioInput).toBe(true)
+      await session.config({ type: 'config', voice: 'legacy-voice' })
+      expect(patched.fixture.ws.sent).toEqual([])
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(patched.legacyConnectCalls).toHaveLength(0)
+    } finally {
+      await session.close()
+      patched.restore()
+      globalThis.fetch = originalFetch
+    }
+  })
 
   test('enters voice-client mode from the global config alone', async () => {
     setConfig({
@@ -180,8 +207,8 @@ describe('createDH2DSession voice-client mode through global config', () => {
     }
   })
 
-  test('stays in legacy mode when the global config has no voiceClient', async () => {
-    restoreDefaultConfig()
+  test('stays in legacy mode when voiceClient is explicitly disabled', async () => {
+    setConfig({ endpoint: DEFAULT_ENDPOINT, voiceClient: undefined })
     const restoreFetch = patchFetchLoggedIn()
     const captured: ResolvedDH2DSessionConfig[] = []
     let voiceConnectCalls = 0

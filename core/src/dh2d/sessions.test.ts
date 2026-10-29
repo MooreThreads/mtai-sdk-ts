@@ -1,4 +1,8 @@
 import { abortable } from '../abortable'
+import { setConfig } from '../config'
+import { createLogger } from '../log'
+
+afterEach(() => setConfig({ endpoint: 'http://localhost:32101' }))
 import { events } from '../events'
 import { hooks } from '../hooks'
 import { createDH2DSession } from './sessions'
@@ -130,6 +134,73 @@ describe('createDH2DSession login gate', () => {
     }
   }
 
+  test.each(['pending', 'reconnecting'] as const)('voice config is discarded before buffering or logging while %s', async state => {
+    const untilFailed = controllableUntilFailed()
+    const patched = patchSessionHooks({ voiceClientMode: true, untilFailedHook: untilFailed.hook })
+    const originalLogger = hooks.logger
+    const log = jest.fn()
+    hooks.logger = createLogger({ log, warn: log, error: log, debug: log })
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let connects = 0
+    hooks.dh2d.connectVoiceClient = (async () => {
+      connects++
+      if (state === 'pending' || connects === 2) await gate
+      return patched.fixture.connection
+    }) as typeof connectVoiceClient
+    const session = createDH2DSession({} as HTMLElement, { videoId: 'xiaomai' })
+    const secret = 'synthetic-config-secret-do-not-log'
+    const message = { type: 'config' as const, llm_service: { provider: 'openai' as const, token: secret } }
+    try {
+      if (state === 'reconnecting') {
+        await waitUntil(() => session.status === 'connected', 'initial connection')
+        untilFailed.failCurrentConnection()
+        await waitUntil(() => connects === 2, 'reconnect gate')
+      }
+      expect(session.status).toBe(state)
+      await session.config(message)
+      await session.send(message)
+      expect(JSON.stringify(log.mock.calls)).not.toContain(secret)
+      // Poison serialization after submission: a discarded config must never be
+      // retained in either the pending-message queue or reconnect config cache.
+      const serialize = jest.fn(() => { throw new Error('discarded config retained') })
+      Object.defineProperty(message, 'type', { get: serialize })
+      release()
+      await waitUntil(() => session.status === 'connected', 'connection after gate')
+      expect(serialize).not.toHaveBeenCalled()
+      expect(JSON.stringify(patched.fixture.ws.sent)).not.toContain(secret)
+      expect(patched.fixture.ws.sent).toEqual([])
+      expect(JSON.stringify(log.mock.calls)).not.toContain(secret)
+    } finally {
+      release()
+      await session.close()
+      hooks.logger = originalLogger
+      patched.restore()
+    }
+  })
+
+  test('legacy config is still buffered and replayed unchanged', async () => {
+    setConfig({ endpoint: 'http://localhost:32101', voiceClient: undefined })
+    const fetchMock = patchFetch(() => ({ ok: true, json: async () => ({ logged_in: true }) }))
+    const untilFailed = controllableUntilFailed()
+    const patched = patchSessionHooks({ voiceClientMode: false, untilFailedHook: untilFailed.hook })
+    const session = createDH2DSession({} as HTMLElement)
+    const message = { type: 'config' as const, voice: 'legacy-voice' }
+    try {
+      await session.config(message)
+      await waitUntil(() => session.status === 'connected', 'legacy connection')
+      expect(patched.fixture.ws.sent.map(data => JSON.parse(data))).toContainEqual(message)
+      patched.fixture.ws.sent.length = 0
+      untilFailed.failCurrentConnection()
+      await waitUntil(() => patched.legacyConnectCalls() === 2 && session.status === 'connected', 'legacy reconnect')
+      expect(patched.fixture.ws.sent.map(data => JSON.parse(data))).toContainEqual(message)
+    } finally {
+      await session.close()
+      patched.restore()
+      fetchMock.restore()
+    }
+  })
+
   test('voice-client mode skips the login gate when /api/v1/logged_in is gone', async () => {
     // The obsolete ai-service login endpoint must not even be requested in
     // voice-client mode; a definitive logged-out answer must not stop the
@@ -184,6 +255,7 @@ describe('createDH2DSession login gate', () => {
   })
 
   test('legacy mode still fails before connecting when not logged in', async () => {
+    setConfig({ endpoint: 'http://localhost:32101', voiceClient: undefined })
     const fetchMock = patchFetch(() => ({ ok: true, json: async () => ({ logged_in: false }) }))
     const untilFailed = controllableUntilFailed()
     const patched = patchSessionHooks({ voiceClientMode: false, untilFailedHook: untilFailed.hook })
@@ -202,6 +274,7 @@ describe('createDH2DSession login gate', () => {
   })
 
   test('legacy mode still requires login again on reconnect', async () => {
+    setConfig({ endpoint: 'http://localhost:32101', voiceClient: undefined })
     let loggedIn = true
     const fetchMock = patchFetch(() => ({ ok: true, json: async () => ({ logged_in: loggedIn }) }))
     const untilFailed = controllableUntilFailed()
@@ -282,7 +355,8 @@ describe('createDH2DSession voice-client mode', () => {
     }
   })
 
-  test('legacy mode is unchanged when voiceClient is not configured', async () => {
+  test('legacy mode is unchanged when voiceClient is explicitly disabled', async () => {
+    setConfig({ endpoint: 'http://localhost:32101', voiceClient: undefined })
     const restoreFetch = patchFetchLoggedIn()
     const { restore: restoreHooks } = patchHooks()
     const fixture = voiceConnectionFixture(false)
@@ -324,6 +398,7 @@ describe('createDH2DSession voice-client mode', () => {
 
 describe('createDH2DSession audio monitoring removal', () => {
   test('exposes no playback audio status and passes no audio-status wiring to untilFailed', async () => {
+    setConfig({ endpoint: 'http://localhost:32101', voiceClient: undefined })
     const restoreFetch = patchFetchLoggedIn()
     const { restore } = patchHooks()
     const fixture = voiceConnectionFixture(false)

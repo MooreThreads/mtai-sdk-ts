@@ -51,6 +51,9 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
     const evt = events<DH2DSessionEvents>()
     const messageBuffer: DHInputMessage[] = []
     const enqueueMessage = async (message: DHInputMessage) => {
+        // Voice config has no protocol equivalent and may contain credentials.
+        // Discard it before retaining or logging the original legacy payload.
+        if (realConfig.voiceClient != null && message.type === 'config') return
         messageBuffer.push(message)
         rootLogger.log(`connection not established, message is enqueued and will be sent ASAP: ${JSON.stringify(message)}`)
     }
@@ -78,6 +81,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
     let send: (message: DHInputMessage) => Promise<void> = enqueueMessage
     let configMsg: (DHInputMessage & { type: 'config' }) | undefined = undefined
     let sendConfig = async (message: DHInputMessage & { type: 'config' }) => {
+        if (realConfig.voiceClient != null) return
         configMsg = message
         await send(message)
     }

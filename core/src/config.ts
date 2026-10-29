@@ -1,12 +1,22 @@
 import { Config } from "./types";
 
-// Keys that every setConfig call must provide; other keys (for example the
-// optional voiceClient) may be freely included or omitted.
+// Explicit overrides retain replacement semantics; omitted keys use SDK defaults.
 const requiredKeys: (keyof Config)[] = ["endpoint"]
 
-let _config: Config = {
-    endpoint: 'http://localhost:32101'
+function defaults(): Config {
+    return {
+        endpoint: 'http://localhost:32101',
+        voiceClient: {
+            interaction_endpoint: 'http://127.0.0.1:8780',
+            dh2d_endpoint: 'http://127.0.0.1:32106',
+            sessionId: 'avatar-channel-session',
+            wechatPluginEndpoint: 'http://127.0.0.1:8781',
+        },
+        show_turn_id: false,
+    }
 }
+
+let _config: Config = defaults()
 
 export function config() {
     return {..._config}
@@ -18,5 +28,5 @@ export function setConfig(config: Config) {
             throw new Error(`config key ${key} is required`)
         }
     }
-    _config = {...config}
+    _config = {...defaults(), ...config}
 }

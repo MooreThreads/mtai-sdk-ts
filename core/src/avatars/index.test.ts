@@ -2,6 +2,7 @@ import { getAvatars } from './index'
 import { setConfig } from '../config'
 
 const DEFAULT_ENDPOINT = 'http://localhost:32101'
+const DEFAULT_DH2D_ENDPOINT = 'http://127.0.0.1:32106'
 
 function patchFetch(options: {
   ok?: boolean,
@@ -50,12 +51,12 @@ describe('getAvatars', () => {
     })
     try {
       const avatars = await getAvatars()
-      expect(fetchMock.calls).toEqual([`${DEFAULT_ENDPOINT}/api/v1/video_configs`])
+      expect(fetchMock.calls).toEqual([`${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs`])
       expect(avatars).toEqual([
         {
           id: 'xiaomai',
           name: 'Xiao Mai',
-          poster: `${DEFAULT_ENDPOINT}/api/v1/video_configs/xiaomai/poster`,
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/xiaomai/poster`,
         },
         {
           id: 'canna',
@@ -83,8 +84,8 @@ describe('getAvatars', () => {
       expect(posterById).toEqual({
         with_https: 'https://cdn.example.com/a.png',
         with_data: 'data:image/png;base64,AAAA',
-        with_relative: `${DEFAULT_ENDPOINT}/api/v1/video_configs/with_relative/poster`,
-        without_poster: `${DEFAULT_ENDPOINT}/api/v1/video_configs/without_poster/poster`,
+        with_relative: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/with_relative/poster`,
+        without_poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/without_poster/poster`,
       })
     } finally {
       fetchMock.restore()
@@ -92,7 +93,7 @@ describe('getAvatars', () => {
   })
 
   test('uses the configured endpoint and omits missing names', async () => {
-    setConfig({ endpoint: 'http://dh2d.server:9000' })
+    setConfig({ endpoint: 'http://dh2d.server:9000', voiceClient: undefined })
     const fetchMock = patchFetch({ body: { solo: {} } })
     try {
       const avatars = await getAvatars()

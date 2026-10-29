@@ -16,6 +16,12 @@ const bindingConfig: DH2DVoiceClientConfig = {
 void globalDisplay; void sessionDisplay; void bindingConfig
 
 const DEFAULT_ENDPOINT = 'http://localhost:32101'
+const DEFAULT_VOICE = {
+  interaction_endpoint: 'http://127.0.0.1:8780',
+  dh2d_endpoint: 'http://127.0.0.1:32106',
+  sessionId: 'avatar-channel-session',
+  wechatPluginEndpoint: 'http://127.0.0.1:8781',
+}
 
 function restoreDefaultConfig() {
   setConfig({ endpoint: DEFAULT_ENDPOINT })
@@ -28,9 +34,8 @@ describe('global sdk config', () => {
     expect(() => setConfig({} as any)).toThrow('config key endpoint is required')
   })
 
-  test('legacy defaults are preserved without voiceClient', () => {
-    restoreDefaultConfig()
-    expect(config()).toEqual({ endpoint: DEFAULT_ENDPOINT })
+  test('ships voice transport and display defaults without an installer', () => {
+    expect(config()).toEqual({ endpoint: DEFAULT_ENDPOINT, voiceClient: DEFAULT_VOICE, show_turn_id: false })
   })
 
   test('accepts an optional voiceClient and exposes it via config()', () => {
@@ -41,17 +46,17 @@ describe('global sdk config', () => {
     expect(config()).toEqual({
       endpoint: 'http://server:32101',
       voiceClient: { interaction_endpoint: 'https://127.0.0.1:8782', dh2d_endpoint: 'http://192.168.10.23:32107' },
+      show_turn_id: false,
     })
   })
 
-  test('voiceClient stays optional across setConfig calls', () => {
+  test('omitted voiceClient restores SDK defaults across setConfig calls', () => {
     setConfig({
       endpoint: 'http://server:32101',
       voiceClient: { interaction_endpoint: 'ws://client:8300', dh2d_endpoint: 'http://dh2d.voice:32107' },
     })
-    // A later setConfig without voiceClient must not fail with a
-    // "config key voiceClient is required" error and must drop the value.
+    // Each call resolves against SDK defaults, not the previous override.
     setConfig({ endpoint: 'http://other:32101' })
-    expect(config()).toEqual({ endpoint: 'http://other:32101' })
+    expect(config()).toEqual({ endpoint: 'http://other:32101', voiceClient: DEFAULT_VOICE, show_turn_id: false })
   })
 })

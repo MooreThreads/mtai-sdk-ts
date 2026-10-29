@@ -24,10 +24,22 @@ The digital human can be in one of several states:
 
 You can monitor these states through the status_change event
 
-## Voice-client avatar mode (opt-in)
+## Voice-client avatar mode (default)
 
-When the local voice client owns the digital-human session, configure
-`voiceClient` and keep the same session API. The SDK then talks to the voice
+`createDH2DSession(container, { videoId, audioInput })` uses voice transport without
+an application installer. SDK defaults are root `endpoint: 'http://localhost:32101'`,
+`show_turn_id: false`, and `voiceClient: { interaction_endpoint: 'http://127.0.0.1:8780',
+dh2d_endpoint: 'http://127.0.0.1:32106', sessionId: 'avatar-channel-session',
+wechatPluginEndpoint: 'http://127.0.0.1:8781' }`.
+
+`setConfig` still requires `endpoint`; omitted keys use fresh SDK defaults on each
+call. Explicit `voiceClient` objects replace (rather than deep-merge) the default
+object, and a per-session object overrides the global one. Explicit global
+`voiceClient: undefined` selects the legacy transport. Call `setConfig` before
+creating sessions only when overrides are needed. Original `session.config()`
+calls are safe: the SDK ignores them in voice mode.
+
+The SDK talks to the voice
 client for voice protocol traffic and exchanges the WebRTC offer directly with
 DH2D using the canonical session id the client reports; `voiceClient.interaction_endpoint`
 is the browser-to-local voice interaction websocket, and `voiceClient.dh2d_endpoint`
@@ -177,8 +189,8 @@ const session = createDH2DSession(divElement, {
 })
 ```
 
-Optional WeChat channel binding is configured explicitly on the voice client;
-the SDK does not discover a plugin endpoint. The endpoint exposes the
+WeChat channel binding defaults to the local plugin endpoint above and can be
+overridden via `voiceClient`; the SDK does not discover an endpoint. The endpoint exposes the
 revision-driven binding workflow. The SDK renders its own plain DOM/CSS binding
 UI inside the player, including locally encoded QR, status, verification and fades.
 Do not provide application-owned binding callbacks or an additional overlay:
