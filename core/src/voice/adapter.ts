@@ -18,6 +18,7 @@ export type VoiceClientFrame =
   | { type: 'conversation.start', session_id: string }
   | { type: 'conversation.stop', session_id: string }
   | { type: 'text.input', session_id: string, request_id: string, text: string }
+  | { type: 'command', session_id: string, request_id: string, arguments: { command: 'clear' } }
   | { type: 'audio.input.delta', direction: 'input', session_id: string, turn_id: string, byte_count: number }
   | { type: 'playback.ended', session_id: string, turn_id: string }
 
@@ -156,8 +157,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
    * Retires the session-scoped pending-message sequence explicitly.
    * Callers that translate an SDK action into adapter calls must invalidate
    * before their own validation (for example an input whose text turns out
-   * blank, or an input rejected for `bot_text`), so every SDK input action
-   * retires the previous sequence even when no frame follows. The adapter
+   * blank, or an input rejected for `bot_text`), so ordinary SDK input actions
+   * retire the previous sequence even when no frame follows. Ordered clear
+   * commands preserve it. The adapter
    * actions also invalidate internally, so an extra call is harmless.
    */
   function invalidatePendingSequence() {
@@ -184,6 +186,12 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       case 'command':
         // The connection owns the destination; command fields are opaque.
         // No action schema, voice-state mutation or execution acknowledgement.
+        return [event as DHOutputMessage]
+      case 'command.result':
+      case 'history.reset':
+        // Preserve requester correlation for the consumer, without changing
+        // active turn/playback state or scheduling additional client frames.
+        if (event.session_id !== sessionId) return []
         return [event as DHOutputMessage]
       case 'asr.partial':
       case 'asr.final': {
@@ -380,6 +388,10 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   }
 
   function textInput(text: string): VoiceClientFrame {
+    // Clear is ordered behind prior input, not a replacement for its acknowledgment.
+    if (text.trim() === '/clear') {
+      return { type: 'command', session_id: sessionId, request_id: newRequestId(), arguments: { command: 'clear' } }
+    }
     invalidatePendingSequence()
     const requestId = newRequestId()
     typedRequestId = requestId

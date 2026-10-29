@@ -669,6 +669,56 @@ describe('connectVoiceClient', () => {
     }
   })
 
+  test('clear input preserves the preceding text acknowledgment through the connection', async () => {
+    const globals = setupGlobals()
+    try {
+      const { connection, ws } = await connectReady(createConfig(), fakeVideo())
+      const messages: any[] = []
+      connection.on('message', message => messages.push(message))
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: 'before' })
+      const before = JSON.parse(ws.sent[ws.sent.length - 1] as string)
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: ' /clear ' })
+      ws.receive(JSON.stringify({ type: 'text.accepted', session_id: connection.voice.sessionId,
+        request_id: before.request_id, turn_id: 'A1' }))
+      expect(messages).toEqual([
+        { type: 'message_record', message: { role: 'user', content: 'before' } },
+        { type: 'status_change', status: 'talking' },
+      ])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('sends clear in submission order without cancellation and forwards correlated results', async () => {
+    const globals = setupGlobals()
+    try {
+      const { connection, ws } = await connectReady(createConfig(), fakeVideo())
+      const messages: any[] = []
+      connection.on('message', message => messages.push(message))
+      const before = ws.sent.length
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: 'before' })
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: '/clear' })
+      await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: 'after' })
+      const frames = ws.sent.slice(before).map((data: string) => JSON.parse(data))
+      expect(frames).toEqual([
+        { type: 'text.input', session_id: connection.voice.sessionId, request_id: expect.any(String), text: 'before' },
+        { type: 'command', session_id: connection.voice.sessionId, request_id: expect.any(String), arguments: { command: 'clear' } },
+        { type: 'text.input', session_id: connection.voice.sessionId, request_id: expect.any(String), text: 'after' },
+      ])
+      expect(new Set(frames.map(frame => frame.request_id)).size).toBe(3)
+      const result = { type: 'command.result', session_id: connection.voice.sessionId, request_id: frames[1].request_id,
+        command: 'clear', status: 'succeeded', result: { clear_committed: true } }
+      const reset = { type: 'history.reset', session_id: connection.voice.sessionId, request_id: frames[1].request_id,
+        history_epoch: 'after-clear', clear_committed: true }
+      ws.receive(JSON.stringify(result))
+      ws.receive(JSON.stringify(reset))
+      expect(messages).toEqual([result, reset])
+      expect(ws.sent.length).toBe(before + 3)
+    } finally {
+      globals.restore()
+    }
+  })
+
   test('passes frontend commands unchanged without a tool acknowledgement', async () => {
     const globals = setupGlobals()
     try {

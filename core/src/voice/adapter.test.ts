@@ -16,6 +16,51 @@ function event(partial: { type: string } & Record<string, any>): VoiceClientEven
   return partial as VoiceClientEvent
 }
 
+describe('ordered clear command', () => {
+  test('clear preserves acknowledgment of the preceding typed input', () => {
+    const adapter = createAdapter()
+    const before = adapter.textInput('before') as any
+    adapter.textInput('/clear')
+    expect(adapter.ingest({ type: 'text.accepted', session_id: sessionId,
+      request_id: before.request_id, turn_id: 'A1' })).toEqual([
+      { type: 'message_record', message: { role: 'user', content: 'before' } },
+      { type: 'status_change', status: 'talking' },
+    ])
+    expect(adapter.ingest({ type: 'text.accepted', session_id: sessionId,
+      request_id: before.request_id, turn_id: 'A1' })).toEqual([])
+  })
+
+  test.each(['/clear', '  /clear\n'])('promotes exact clear submission %j', text => {
+    const adapter = createVoiceMessageAdapter({ sessionId, requestIdFactory: () => 'clear-request' })
+    expect(adapter.textInput(text)).toEqual({
+      type: 'command', session_id: sessionId, request_id: 'clear-request', arguments: { command: 'clear' },
+    })
+    expect(adapter.ingest({ type: 'text.accepted', session_id: sessionId, request_id: 'clear-request', turn_id: 't1' })).toEqual([])
+  })
+
+  test.each(['hello', '/clear all', '/clearance', '/CLEAR', 'please /clear', '/clear\nhello'])('keeps ordinary text %j unchanged', text => {
+    const adapter = createVoiceMessageAdapter({ sessionId, requestIdFactory: () => 'text-request' })
+    expect(adapter.textInput(text)).toEqual({ type: 'text.input', session_id: sessionId, request_id: 'text-request', text })
+  })
+
+  test.each(['command.result', 'history.reset'])('forwards %s without losing requester correlation or changing active turns', type => {
+    const onClientSend = jest.fn()
+    const adapter = createAdapter(onClientSend)
+    adapter.ingest({ type: 'capture.start', session_id: sessionId, turn_id: 'active' })
+    adapter.ingest({ type: 'text.output.delta', session_id: sessionId, turn_id: 'active', text: 'before' })
+    const request = adapter.textInput('/clear') as any
+    adapter.textInput('after')
+    const result = type === 'command.result'
+      ? { type, session_id: sessionId, request_id: request.request_id, command: 'clear', status: 'succeeded', result: { clear_committed: true } }
+      : { type, session_id: sessionId, request_id: request.request_id, history_epoch: 'after-clear', clear_committed: true }
+    expect(adapter.ingest(result)).toEqual([result])
+    expect(adapter.ingest({ ...result, session_id: 'other' })).toEqual([])
+    expect(adapter.ingest({ type: 'text.output.delta', session_id: sessionId, turn_id: 'active', text: 'after' })).toEqual([{ type: 'bot_output', text: 'beforeafter' }])
+    expect(adapter.audioInput(new Uint8Array([1]))?.control.turn_id).toBe('active')
+    expect(onClientSend).not.toHaveBeenCalled()
+  })
+})
+
 describe('opaque frontend commands', () => {
   test('preserves arbitrary names and fields without interpreting routing fields', () => {
     const adapter = createAdapter()

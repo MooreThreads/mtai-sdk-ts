@@ -103,7 +103,7 @@ export type DHInputMessage =
   | { type: 'ping', timestamp: string }
 
 
-export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "asr_process", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt", "command"] as const
+export const DHOutputMessageType = ["audio_text", "bot_output", "message_record", "status_change", "pong", "asr_session", "asr_process", "session_ended", "start_tool_call", "finish_tool_call", "error", "rtt", "command", "command.result", "history.reset"] as const
 type ToolCall = {type: 'function' | 'official', function: {name: string, arguments?: Record<string, any>}} | {
   type: 'unknown'
 }
@@ -210,6 +210,13 @@ export type DHOutputMessage =
     type: 'command'
     name?: string
     /** Frontend-interpreted payload; transport does not restrict actions. */
+    [key: string]: any
+  }
+  /** Voice command outcomes and history notifications, forwarded unchanged. */
+  | {
+    type: 'command.result' | 'history.reset'
+    session_id: string
+    request_id?: string
     [key: string]: any
   }
 
