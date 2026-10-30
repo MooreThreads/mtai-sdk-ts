@@ -12,6 +12,7 @@ import {
   type VoiceClientToolResult,
 } from "../voice/channelBinding"
 import { createVoiceMicrophone } from "../voice/microphone"
+import { createVoiceInputControl } from '../voice/inputControl'
 import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from "./types"
 import { avatarTimingNow, createAvatarPlayback } from "./avatarMedia"
 import { createReceiverStats } from "./receiverStats"
@@ -244,10 +245,18 @@ async function connectOnce(
     pc.close()
   })
   const evt = events<DHConnectionEvents>()
+  const subscribeEvent = evt.on
+  evt.on = (event, handler) => {
+    const unsubscribe = subscribeEvent(event, handler)
+    if (event === 'message') adapter.replaySnapshot().forEach(message => (handler as (_: any) => void)(message))
+    return unsubscribe
+  }
   let canonicalSessionId: string | undefined = undefined
   let sessionLogger = attemptLogger
   let avatarPlayback: ReturnType<typeof createAvatarPlayback> | undefined = undefined
-  let stopMicrophone: (() => void) | undefined = undefined
+  const acceptedOutputTurns = new Set<string>()
+  const pendingOutputStops = new Set<string>()
+  const reportedOutputTurns = new Set<string>()
   const receiverStats = createReceiverStats({ pc, logger: attemptLogger })
   let disposed = false
 
@@ -268,8 +277,36 @@ async function connectOnce(
 
   const adapter = createVoiceMessageAdapter({
     sessionId,
+    controlledInput: true,
     onClientSend: frame => sendFrame(JSON.stringify(frame)),
   })
+
+  const inputControl = createVoiceInputControl({ sessionId,
+    create: (onPcm, onLost) => {
+      // Host-default routing cannot prove that an application-supplied
+      // stream belongs to the selected physical source. Fail that override
+      // explicitly rather than silently capturing a different device.
+      if (config.audioInput !== true) throw new Error('host-default microphone input unavailable or overridden')
+      return createVoiceMicrophone({ audioInput: config.audioInput, logger: attemptLogger, onPcm, onLost })
+    },
+    send: frame => sendFrame(frame instanceof Uint8Array ? frame : JSON.stringify(frame)),
+  })
+  innerAbortable.onabort(inputControl.dispose)
+
+  function acknowledgePlaybackEnd(turnId: string, source?: 'stripe' | 'lifecycle', nextTurnId?: string) {
+    if (reportedOutputTurns.has(turnId)) return
+    reportedOutputTurns.add(turnId)
+    acceptedOutputTurns.delete(turnId)
+    // Point 6 is the existing receipt send boundary, independent of whether
+    // frame observation is available. A stop receipt follows the explicit
+    // native clear-buffer/stop protocol, not an inferred stripe or timer.
+    try {
+      sessionLogger.log(`avatar_playback_ended_sent turn=${turnId}`
+        + ` next=${nextTurnId ?? '-'} source=${source ?? 'stripe'}`
+        + ` now=${avatarTimingNow().toFixed(3)} epoch_ms=${Date.now()}`)
+    } catch { /* diagnostics must not suppress the receipt */ }
+    sendFrame(JSON.stringify(adapter.playbackEnded(turnId)))
+  }
 
   let bindingUI: ReturnType<typeof createChannelBindingUI> | undefined
   const configuredBinding = voiceConfig.wechatPluginEndpoint
@@ -458,17 +495,26 @@ async function connectOnce(
           .catch(reject)
         return
       }
+      if (message.type === 'audio.output.start' && message.session_id === adapter.sessionId
+          && typeof message.turn_id === 'string' && message.turn_id && !reportedOutputTurns.has(message.turn_id)) {
+        acceptedOutputTurns.add(message.turn_id)
+      }
       if (message.type === 'playback.stop') {
         // Explicit playback lifecycle end: the A-to-idle boundary. DH2D idle
         // frames are undecodable, so the boundary comes from this
         // protocol-safe signal and is never inferred from invalid stripes.
         // The signal is validated against this connection's voice session
-        // and the currently tracked avatar turn: a stop targeted at another
-        // session or at a retired/queued turn must never retire the tracked
-        // turn.
+        // and the accepted output/currently tracked turn. A queued accepted
+        // turn is acknowledged by ID, without ending a different current turn.
+        // The native client clears its output buffer before forwarding stop.
         if (message.session_id === undefined || message.session_id === adapter.sessionId) {
           const turnId = typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : undefined
-          avatarPlayback?.notifyMediaEnded(turnId)
+          const accepted = turnId !== undefined && acceptedOutputTurns.has(turnId)
+          if (avatarPlayback) avatarPlayback.notifyMediaEnded(turnId, accepted)
+          else if (accepted && turnId !== undefined) {
+            pendingOutputStops.add(turnId)
+            acknowledgePlaybackEnd(turnId, 'lifecycle')
+          }
         }
       }
       if (message.type === 'tool.call') {
@@ -480,34 +526,16 @@ async function connectOnce(
         // adapter output and never a legacy start/finish presentation event.
         return
       }
+      if (message.type === 'session.state' && message.session_id === adapter.sessionId && message.state === 'connected') inputControl.synchronize()
+      inputControl.ingest(message)
       for (const adapted of adapter.ingest(message)) {
         evt.emit('message', adapted)
       }
     }
   })
 
-  // Microphone PCM wiring: `audioInput` captures through the Web Audio API
-  // and delivers each batch to the client as an input `audio.input.delta` control
-  // frame immediately followed by its binary PCM payload. The adapter only
-  // accepts batches while a capture turn is active.
-  let microphoneReady: Promise<void> = Promise.resolve()
-  if (config.audioInput) {
-    const microphone = createVoiceMicrophone({
-      audioInput: config.audioInput,
-      logger: attemptLogger,
-      onPcm: pcm => {
-        const batch = adapter.audioInput(pcm)
-        if (!batch) {
-          return
-        }
-        sendFrame(JSON.stringify(batch.control))
-        sendFrame(batch.binary)
-      },
-    })
-    stopMicrophone = microphone.stop
-    innerAbortable.onabort(microphone.stop)
-    microphoneReady = microphone.ready
-  }
+  // Input preparation is client-commanded and independent of media/text
+  // connection readiness. Merely connecting never acquires a microphone.
 
   // Fences this connection generation. Detaching the websocket callbacks and
   // stopping the microphone prevents stale callbacks and queued events from a
@@ -523,7 +551,7 @@ async function connectOnce(
     bindingUI?.dispose()
     receiverStats.stop()
     avatarPlayback?.stop()
-    stopMicrophone?.()
+    inputControl.dispose()
     ws.onopen = null
     ws.onclose = null
     ws.onmessage = null
@@ -532,7 +560,7 @@ async function connectOnce(
   innerAbortable.onabort(dispose)
 
   await Promise.race([
-    Promise.all([avatarReady, videoReady, handshakeReady, microphoneReady]),
+    Promise.all([avatarReady, videoReady, handshakeReady]),
     failure,
   ])
 
@@ -546,20 +574,7 @@ async function connectOnce(
       logger: sessionLogger,
       requestFrame: frameRequester,
       sampleFrame: hooks.dh2d.createAvatarFrameSampler(elements.video),
-      onPlaybackEnded: (turnId, source, nextTurnId) => {
-        // Timing point 6: stamped at the send boundary so the return leg can
-        // be paired with the client's receipt record (point 5). `next` is the
-        // token that arrived in the same decoded frame, when there was one.
-        // A diagnostic sink must never suppress the acknowledgement.
-        try {
-          sessionLogger.log(`avatar_playback_ended_sent turn=${turnId}`
-            + ` next=${nextTurnId ?? "-"} source=${source ?? "stripe"}`
-            + ` now=${avatarTimingNow().toFixed(3)} epoch_ms=${Date.now()}`)
-        } catch {
-          // Sending the playback boundary outranks the timing record.
-        }
-        sendFrame(JSON.stringify(adapter.playbackEnded(turnId)))
-      },
+      onPlaybackEnded: acknowledgePlaybackEnd,
       onTurnObserved: turnId => {
         adapter.observeAvatarTurn(turnId)
       },
@@ -574,6 +589,8 @@ async function connectOnce(
     })
     avatarPlayback = playback
     playback.start()
+    for (const turnId of pendingOutputStops) playback.notifyMediaEnded(turnId, true)
+    pendingOutputStops.clear()
     const stopPlayback = () => {
       receiverStats.stop()
       playback.stop()

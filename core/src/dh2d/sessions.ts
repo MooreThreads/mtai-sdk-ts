@@ -49,6 +49,14 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         aborted = true
     })
     const evt = events<DH2DSessionEvents>()
+    let latestVoiceStatus: DHOutputMessage | undefined
+    const on: typeof evt.on = (event, handler) => {
+        const unsubscribe = evt.on(event, handler)
+        if (event === 'message' && latestVoiceStatus && !closed && status === 'connected') {
+            (handler as (_: DHOutputMessage) => void)({ ...latestVoiceStatus })
+        }
+        return unsubscribe
+    }
     const messageBuffer: DHInputMessage[] = []
     const enqueueMessage = async (message: DHInputMessage) => {
         // Voice config has no protocol equivalent and may contain credentials.
@@ -118,7 +126,8 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 await hooks.dh2d.afterClosingSession(session)
             }
         },
-        ...(({ on, off }) => ({ on, off }))(evt),
+        on,
+        off: evt.off,
     }
 
     evt.on("statuschange", _ => {
@@ -133,6 +142,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         if (message.type === "session_ended") {
             session.close()
         } else {
+            if (realConfig.voiceClient != null && message.type === 'status_change') latestVoiceStatus = { ...message }
             evt.emit("message", message)
         }
     }
@@ -142,6 +152,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         function emitStatus(_status: typeof DH2DSessionStatus[number]) {
             sessionLogger.log(`status changing from ${status} to ${_status}`)
             status = _status
+            if (_status !== 'connected') latestVoiceStatus = undefined
             evt.emit("statuschange", _status)
         }
         await withChild(rootAbortable, _ => hooks.dh2d.beforeConnectingSession(session, _))

@@ -388,7 +388,7 @@ describe('connectVoiceClient', () => {
       await flushMicrotasks()
       expect(ws.prematureSends).toEqual([])
       expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
-        { type: 'session.start', session_id: 'voice-1', protocol_version: 2 },
+        { type: 'session.start', session_id: 'voice-1', protocol_version: 2, capabilities: ['session-snapshot-v1', 'audio-input-control-v1'] },
       ])
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
       await flushMicrotasks()
@@ -547,7 +547,7 @@ describe('connectVoiceClient', () => {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig(), video)
       expect(JSON.parse(ws.sent[0])).toEqual({
-        type: 'session.start', session_id: 'voice-1', protocol_version: 2,
+        type: 'session.start', session_id: 'voice-1', protocol_version: 2, capabilities: ['session-snapshot-v1', 'audio-input-control-v1'],
       })
       expect(FakeWebSocket.instances.map(_ => _.url)).toEqual([
         'ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai',
@@ -586,29 +586,19 @@ describe('connectVoiceClient', () => {
     }
   })
 
-  test('a microphone acquisition failure fails the connection attempt and retries', async () => {
-    jest.useFakeTimers()
+  test('microphone preparation failure reports a source error without losing playback connection', async () => {
     const globals = setupGlobals()
-    globals.setGetUserMedia(jest.fn()
-      .mockRejectedValueOnce(new Error('no microphone'))
-      .mockResolvedValue(new FakeMicrophoneStream()))
-    const scope = abortable()
+    globals.setGetUserMedia(jest.fn().mockRejectedValue(new Error('private microphone failure')))
     try {
-      const video = fakeVideo()
-      const config = createConfig({ audioInput: true })
-      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, config, child))
+      const { ws, connection } = await connectReady(createConfig({ audioInput: true }), fakeVideo())
+      ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 }))
       await flushMicrotasks()
-      expect(FakeWebSocket.instances.length).toBe(1)
-      jest.advanceTimersByTime(2000)
-      await flushMicrotasks()
-      expect(FakeWebSocket.instances.length).toBe(2)
-      scope.abort()
-      await expect(connecting).rejects.toThrow('connection aborted')
-    } finally {
-      jest.useRealTimers()
-      scope.abort()
-      globals.restore()
-    }
+      expect(JSON.parse(ws.sent[ws.sent.length - 1])).toEqual({
+        type: 'audio.input.error', session_id: 'voice-1', state_epoch: 'e', source_revision: 1, code: 'initialization_failed',
+      })
+      expect(connection.sessionId).toBe('canonical-avatar')
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    } finally { globals.restore() }
   })
 
   test('exchanges the offer directly with the canonical DH2D session', async () => {
@@ -682,7 +672,6 @@ describe('connectVoiceClient', () => {
         request_id: before.request_id, turn_id: 'A1' }))
       expect(messages).toEqual([
         { type: 'message_record', message: { role: 'user', content: 'before' } },
-        { type: 'status_change', status: 'talking' },
       ])
     } finally {
       globals.restore()
@@ -745,6 +734,9 @@ describe('connectVoiceClient', () => {
       connection.on('message', m => messages.push(m))
       connection.on('audio', a => audio.push(a))
       ws.receive(JSON.stringify({ type: 'capture.start', session_id: 'voice-1', turn_id: 't1' }))
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision: 1,
+        state: { conversation: { state: 'voice', phase: 'capturing' },
+          audio_input: { source: 'xunfei', status: 'capturing', source_revision: 1, capture_turn_id: 't1' } } }))
       ws.receive(JSON.stringify({ type: 'text.output.delta', session_id: 'voice-1', turn_id: 't1', text: 'hi' }))
       ws.receive(JSON.stringify({ type: 'audio.output.delta', session_id: 'voice-1', turn_id: 't1', subtitles: [{ source: 'main', text: 'spoken' }] }))
       ws.receive(new ArrayBuffer(8))
@@ -1102,10 +1094,16 @@ describe('connectVoiceClient', () => {
       await sendVoiceClientMessage(ws as any, connection.voice, { type: 'input', text: '你好' })
       const input = ws.sent.map((d: string) => JSON.parse(d)).find((m: any) => m.type === 'text.input')!
       ws.receive(JSON.stringify({ type: 'text.accepted', session_id: 'voice-1', request_id: input.request_id, turn_id: 't1' }))
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision: 1,
+        state: { conversation: { state: 'text', phase: 'responding' },
+          audio_input: { source: null, status: 'unavailable', source_revision: 0, capture_turn_id: null } } }))
       ws.receive(JSON.stringify({ type: 'text.output.delta', session_id: 'voice-1', turn_id: 't1', text: '答' }))
       ws.receive(JSON.stringify({ type: 'audio.output.delta', session_id: 'voice-1', turn_id: 't1', subtitles: [{ source: 'main', text: '答' }] }))
       ws.receive(JSON.stringify({ type: 'turn.end', session_id: 'voice-1', turn_id: 't1' }))
       ws.receive(JSON.stringify({ type: 'conversation.state', session_id: 'voice-1', state: 'ended' }))
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision: 2,
+        state: { conversation: { state: 'ended', phase: 'idle' },
+          audio_input: { source: null, status: 'unavailable', source_revision: 0, capture_turn_id: null } } }))
       expect(messages).toEqual([
         { type: 'message_record', message: { role: 'user', content: '你好' } },
         { type: 'status_change', status: 'talking' },
@@ -1127,9 +1125,17 @@ describe('connectVoiceClient', () => {
     hooks.dh2d.createAvatarFrameRequester = () => null as any
     try {
       const video = fakeVideo()
-      const { connection } = await connectReady(createConfig(), video)
+      const { connection, ws } = await connectReady(createConfig(), video)
       expect(connection.sessionId).toBe('canonical-avatar')
       expect(typeof connection.stopPlayback).toBe('function')
+      ws.receive(JSON.stringify({ type: 'audio.output.start', session_id: 'voice-1', turn_id: 'B2' }))
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'unknown' }))
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'foreign', turn_id: 'B2' }))
+      const receipts = () => ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(receipts()).toEqual([])
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))
+      expect(receipts()).toEqual([{ type: 'playback.ended', session_id: 'voice-1', turn_id: 'B2' }])
       connection.stopPlayback()
     } finally {
       hooks.dh2d.createAvatarFrameRequester = originalRequester
@@ -1208,6 +1214,69 @@ describe('connectVoiceClient', () => {
         { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
         { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A1' },
       ])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('accepted stop before playback observer setup retains its receipt obligation', async () => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    try {
+      const video = fakeVideo()
+      const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+      await flushMicrotasks()
+      const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+      ws.open()
+      await flushMicrotasks()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
+      await flushMicrotasks()
+      ws.receive(JSON.stringify({ type: 'audio.output.start', session_id: 'voice-1', turn_id: 'B2' }))
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))
+      const receipts = () => ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(receipts()).toEqual([{ type: 'playback.ended', session_id: 'voice-1', turn_id: 'B2' }])
+      const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
+      pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [{ id: 's' }] })
+      video.dispatch('canplay')
+      await connecting
+      expect(receipts()).toEqual([{ type: 'playback.ended', session_id: 'voice-1', turn_id: 'B2' }])
+      globals.setSample('B2')
+      globals.emitFrame()
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))
+      expect(receipts()).toHaveLength(1)
+    } finally {
+      scope.abort()
+      globals.restore()
+    }
+  })
+
+  test.each([false, true])('accepted output stop before its first stripe emits one receipt (other current: %s)', async (otherCurrent) => {
+    const globals = setupGlobals()
+    try {
+      const { ws } = await connectReady(createConfig(), fakeVideo())
+      if (otherCurrent) {
+        globals.setSample('A0')
+        globals.emitFrame()
+      }
+      ws.receive(JSON.stringify({ type: 'audio.output.start', session_id: 'voice-1', turn_id: 'B2' }))
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'foreign', turn_id: 'B2' }))
+      const receipts = () => ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+      expect(receipts()).toEqual([])
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))
+      ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))
+      expect(receipts()).toEqual([{ type: 'playback.ended', session_id: 'voice-1', turn_id: 'B2' }])
+      // A late stopped-turn stripe must not retire A0 or reopen B2.
+      globals.setSample('B2')
+      globals.emitFrame()
+      expect(receipts()).toHaveLength(1)
+      if (otherCurrent) {
+        ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'A0' }))
+        expect(receipts()).toEqual([
+          { type: 'playback.ended', session_id: 'voice-1', turn_id: 'B2' },
+          { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
+        ])
+      }
     } finally {
       globals.restore()
     }
@@ -1467,7 +1536,27 @@ describe('voice-client sleep with text sequencing', () => {
   })
 })
 
+const inputIdentity = { session_id: 'voice-1', state_epoch: 'input-epoch', source_revision: 1 }
+async function prepareMicrophone(ws: FakeWebSocket) {
+  ws.receive(JSON.stringify({ type: 'audio.input.prepare', ...inputIdentity }))
+  await flushMicrotasks()
+}
+
 describe('voice-client microphone input', () => {
+  test('Xunfei snapshot drives and replays listening without acquiring a frontend microphone', async () => {
+    const globals = setupGlobals()
+    try {
+      const { ws, connection } = await connectReady(createConfig({ audioInput: true }), fakeVideo())
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision: 1,
+        state: { conversation: { state: 'voice', phase: 'capturing' },
+          audio_input: { source: 'xunfei', status: 'capturing', source_revision: 1, capture_turn_id: 'A' } } }))
+      const messages: any[] = []
+      connection.on('message', message => messages.push(message))
+      expect(messages).toEqual([{ type: 'status_change', status: 'listening' }])
+      expect(FakeMicrophoneAudioContext.instances).toHaveLength(0)
+      expect(ws.sent).toHaveLength(1)
+    } finally { globals.restore() }
+  })
   test('no microphone is opened when audio input is disabled', async () => {
     const globals = setupGlobals()
     try {
@@ -1484,21 +1573,24 @@ describe('voice-client microphone input', () => {
     try {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig({ audioInput: true }), video)
+      expect(FakeMicrophoneAudioContext.instances).toHaveLength(0)
+      await prepareMicrophone(ws)
       globals.triggerMicrophone(new Float32Array([0, 0.5, -0.5, 1]))
-      // Without an accepted capture turn nothing is sent.
-      expect(ws.sent.length).toBe(1)
-      ws.receive(JSON.stringify({ type: 'capture.start', session_id: 'voice-1', turn_id: 't1' }))
+      // Ready but not capturing: only handshake and ready acknowledgement.
+      expect(ws.sent.length).toBe(2)
+      ws.receive(JSON.stringify({ type: 'capture.start', ...inputIdentity, turn_id: 't1' }))
       globals.triggerMicrophone(new Float32Array([0, 0.5, -0.5, 1]))
-      expect(ws.sent.length).toBe(3)
-      expect(JSON.parse(ws.sent[1])).toEqual({
-        type: 'audio.input.delta', direction: 'input',
-        session_id: 'voice-1', turn_id: 't1', byte_count: 8,
+      expect(ws.sent.length).toBe(5)
+      expect(JSON.parse(ws.sent[2])).toEqual({ type: 'capture.started', ...inputIdentity, turn_id: 't1' })
+      expect(JSON.parse(ws.sent[3])).toEqual({
+        type: 'audio.input.delta', direction: 'input', ...inputIdentity, turn_id: 't1', byte_count: 8,
       })
-      expect(ws.sent[2]).toBeInstanceOf(Uint8Array)
-      expect(Array.from(ws.sent[2] as Uint8Array)).toEqual([0, 0, 0, 0x40, 0x01, 0xc0, 0xff, 0x7f])
-      ws.receive(JSON.stringify({ type: 'capture.stop', session_id: 'voice-1', turn_id: 't1' }))
+      expect(ws.sent[4]).toBeInstanceOf(Uint8Array)
+      expect(Array.from(ws.sent[4] as Uint8Array)).toEqual([0, 0, 0, 0x40, 0x01, 0xc0, 0xff, 0x7f])
+      ws.receive(JSON.stringify({ type: 'capture.stop', ...inputIdentity, turn_id: 't1' }))
       globals.triggerMicrophone(new Float32Array([0.5]))
-      expect(ws.sent.length).toBe(3)
+      expect(ws.sent.length).toBe(6)
+      expect(FakeMicrophoneAudioContext.instances).toHaveLength(1)
     } finally {
       globals.restore()
     }
@@ -1510,29 +1602,33 @@ describe('voice-client microphone input', () => {
       const video = fakeVideo()
       globals.setMicrophoneSampleRate(48000)
       const { ws } = await connectReady(createConfig({ audioInput: true }), video)
-      ws.receive(JSON.stringify({ type: 'capture.start', session_id: 'voice-1', turn_id: 't1' }))
+      await prepareMicrophone(ws)
+      ws.receive(JSON.stringify({ type: 'capture.start', ...inputIdentity, turn_id: 't1' }))
       globals.triggerMicrophone(new Float32Array([0, 9, 9, 0.5, 9, 9]))
-      expect(ws.sent.length).toBe(3)
-      expect(JSON.parse(ws.sent[1])).toEqual({
-        type: 'audio.input.delta', direction: 'input',
-        session_id: 'voice-1', turn_id: 't1', byte_count: 4,
+      expect(ws.sent.length).toBe(5)
+      expect(JSON.parse(ws.sent[3])).toEqual({
+        type: 'audio.input.delta', direction: 'input', ...inputIdentity, turn_id: 't1', byte_count: 4,
       })
-      expect(Array.from(ws.sent[2] as Uint8Array)).toEqual([0, 0, 0, 0x40])
+      expect(Array.from(ws.sent[4] as Uint8Array)).toEqual([0, 0, 0, 0x40])
     } finally {
       globals.restore()
     }
   })
 
-  test('uses a provided MediaStream without getUserMedia and keeps its tracks alive on disconnect', async () => {
+  test('unreconciled MediaStream override reports unavailable and never stops application tracks', async () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
       const stream = new FakeMicrophoneStream()
-      const { connection } = await connectReady(
+      const { connection, ws } = await connectReady(
         createConfig({ audioInput: stream as unknown as MediaStream }), video)
+      await prepareMicrophone(ws)
       await disconnectVoiceClient(logger, connection, { video }, abortable())
       expect(stream.audioTracks[0].stop).not.toHaveBeenCalled()
-      expect(FakeMicrophoneAudioContext.instances[0].closed).toBe(true)
+      expect(FakeMicrophoneAudioContext.instances).toHaveLength(0)
+      expect(JSON.parse(ws.sent[ws.sent.length - 1])).toEqual({
+        type: 'audio.input.error', ...inputIdentity, code: 'unavailable',
+      })
     } finally {
       globals.restore()
     }
@@ -1542,7 +1638,8 @@ describe('voice-client microphone input', () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
-      const { connection } = await connectReady(createConfig({ audioInput: true }), video)
+      const { connection, ws } = await connectReady(createConfig({ audioInput: true }), video)
+      await prepareMicrophone(ws)
       const stream = FakeMicrophoneStream.instances[0]
       await disconnectVoiceClient(logger, connection, { video }, abortable())
       expect(stream.audioTracks[0].stop).toHaveBeenCalled()
@@ -1596,7 +1693,7 @@ describe('sendVoiceClientMessage', () => {
     adapter.ingest({ type: 'conversation.state', session_id: 'voice-1', state: 'voice' })
     await sendVoiceClientMessage(ws as any, adapter, { type: 'wakeup', text: '   ' })
     expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
-      { type: 'conversation.stop', session_id: 'voice-1' },
+      { type: 'conversation.start', session_id: 'voice-1' },
     ])
   })
 

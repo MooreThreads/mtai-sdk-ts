@@ -22,13 +22,17 @@ export type VoiceMicrophoneOptions = {
   logger?: Logger,
   /** Receives mono PCM16 little-endian batches at `VOICE_INPUT_SAMPLE_RATE`. */
   onPcm: (_: Uint8Array) => void,
+  /** Prepared/capturing track ended independently of explicit local release. */
+  onLost?: () => void,
 }
 
 export type VoiceMicrophone = {
   /** Resolves when capture is running; rejects when capture cannot start. */
   ready: Promise<void>,
   /** Stops capture and releases resources acquired by this microphone. */
-  stop: () => void,
+  stop: () => void | Promise<void>,
+  /** Rebind a turn-owned callback without reopening capture resources. */
+  setOnPcm: (_: (data: Uint8Array) => void) => void,
 }
 
 /**
@@ -60,13 +64,27 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
   const { audioInput, logger, onPcm } = options
   let stopped = false
   let audioContext: AudioContext | undefined
+  let closing: Promise<void> = Promise.resolve()
   let acquiredStream: MediaStream | undefined
+  const trackCleanup: (() => void)[] = []
+  let processor: ScriptProcessorNode | undefined
+  let listener = onPcm
+  function setOnPcm(callback: (data: Uint8Array) => void) {
+    listener = callback
+    if (!processor) return
+    const bound = listener
+    processor.onaudioprocess = event => {
+      if (stopped || !audioContext) return
+      bound(encodePcm16Mono(event.inputBuffer.getChannelData(0), audioContext.sampleRate))
+    }
+  }
 
   function release() {
+    trackCleanup.splice(0).forEach(cleanup => cleanup())
     if (audioContext) {
       const context = audioContext
       audioContext = undefined
-      void context.close().catch(() => undefined)
+      closing = context.close().catch(() => undefined)
     }
     if (acquiredStream) {
       const stream = acquiredStream
@@ -76,11 +94,11 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
   }
 
   function stop() {
-    if (stopped) {
-      return
+    if (!stopped) {
+      stopped = true
+      release()
     }
-    stopped = true
-    release()
+    return closing
   }
 
   const ready = (async () => {
@@ -90,6 +108,7 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
       if (typeof AudioContextCtor !== 'function') {
         throw new Error('voice microphone input requires an AudioContext')
       }
+      if (audioInput === false) throw new Error('microphone input disabled')
       const stream = typeof audioInput === 'boolean'
         ? await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true }, video: false })
         : audioInput
@@ -102,16 +121,20 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
       if (typeof audioInput === 'boolean') {
         acquiredStream = stream
       }
+      for (const track of stream.getAudioTracks()) {
+        const ended = () => {
+          if (stopped) return
+          stop()
+          options.onLost?.()
+        }
+        track.addEventListener?.('ended', ended)
+        trackCleanup.push(() => track.removeEventListener?.('ended', ended))
+      }
       const context = new AudioContextCtor() as AudioContext
       audioContext = context
       const source = context.createMediaStreamSource(stream)
-      const processor = context.createScriptProcessor(PROCESSOR_BUFFER_SIZE, 1, 1)
-      processor.onaudioprocess = event => {
-        if (stopped) {
-          return
-        }
-        onPcm(encodePcm16Mono(event.inputBuffer.getChannelData(0), context.sampleRate))
-      }
+      processor = context.createScriptProcessor(PROCESSOR_BUFFER_SIZE, 1, 1)
+      setOnPcm(listener)
       // A ScriptProcessorNode only runs while connected to a destination; a
       // zero-gain sink keeps the graph pumping without echoing the capture.
       const sink = context.createGain()
@@ -119,14 +142,13 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
       source.connect(processor)
       processor.connect(sink)
       sink.connect(context.destination)
-      void context.resume().catch(error => {
-        logger?.error('failed to resume the voice microphone context', error)
-      })
+      await context.resume()
+      if (stopped) release()
     } catch (error) {
       release()
       throw error
     }
   })()
 
-  return { ready, stop }
+  return { ready, stop, setOnPcm }
 }

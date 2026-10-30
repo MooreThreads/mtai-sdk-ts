@@ -201,6 +201,16 @@ export function createTurnTransitionTracker() {
     return { endedTurnId: previous, observedTurnId: undefined }
   }
 
+  /** Explicit stop of an accepted turn, including one not observed yet.
+   * Retire only that ID; a different currently observed turn is untouched.
+   */
+  function endAcceptedTurn(turnId: string): TurnTransition {
+    if (currentTurn === turnId) currentTurn = undefined
+    if (reported.has(turnId)) return { endedTurnId: undefined, observedTurnId: undefined }
+    reported.add(turnId)
+    return { endedTurnId: turnId, observedTurnId: undefined }
+  }
+
   /** The currently tracked turn, or undefined while none is tracked. */
   function currentTurnId(): string | undefined {
     return currentTurn
@@ -211,5 +221,5 @@ export function createTurnTransitionTracker() {
     reported.clear()
   }
 
-  return { observe, endCurrent, currentTurn: currentTurnId, reset }
+  return { observe, endCurrent, endAcceptedTurn, currentTurn: currentTurnId, reset }
 }

@@ -156,12 +156,7 @@ change; no latency improvement is claimed.
 Input mapping in voice-client mode:
 
 - `input.text` maps to the client protocol's `text.input`.
-- `wakeup` with `text` sends `conversation.start` followed immediately by
-  `text.input` for that text (`conversation.start` is idempotent while a
-  conversation is already active, so a text-bearing wakeup is never held
-  behind a stop-then-start sequence). Without text, `wakeup` keeps its
-  existing behavior: start the conversation, or stop-then-start when a
-  conversation is currently active.
+- `wakeup` sends one `conversation.start`; with `text`, it follows immediately with `text.input`. Start requests fresh capture: the client owns interruption, cancellation settlement and matching existing playback receipts. The SDK never sequences stop→ended→start. In Xunfei mode frontend starts are ignored; the client-owned native wake stream initiates capture.
 - `sleep` with `text` sends only `text.input` and defers `conversation.stop`
   until the avatar has finished playing that message out: the client's
   `text.accepted` acknowledgement is correlated (by `request_id`) to the
@@ -233,21 +228,18 @@ retired or still-queued turn never retires the turn currently playing.
 
 Pending-message sequencing: at most one pending sequence exists per voice
 session. Any new `wakeup`, `input`, or `sleep` action — and any disconnect
-or reset — cancels the previous pending sequence, so a deferred
-`conversation.start` (stop-then-start wakeup) or the deferred
+or reset — cancels the previous pending sequence, so the deferred
 `conversation.stop` of a text-bearing sleep can never fire after it was
-superseded. Acknowledgements for a retired request, and transitions for a
+superseded. A fresh `asr_session start` also cancels obsolete sleep sequencing. Wakeup no longer has a deferred start. Acknowledgements for a retired request, and transitions for a
 turn the avatar never validated, never complete a sequence; no timeout,
 polling limit, or synthetic idle transition is ever fabricated, and
 `turn.end` is never treated as an avatar playback boundary. If the browser
 cannot report per-frame video callbacks, avatar transitions cannot be
 observed and a text-bearing sleep simply never sends its deferred stop.
 
-Microphone input: configure `audioInput: true` (default device) or pass a
-`MediaStream`. Captured audio is delivered to the voice client as an input
-`audio.chunk` control frame immediately followed by its binary payload:
-mono PCM16 little-endian at 16 kHz, sent only while a capture turn is
-accepted. Disconnecting a voice-client session fences the retired
+Managed microphone input: configure `audioInput: true` to consent to the host-selected default frontend input. Connecting alone does not open it. Client `audio.input.prepare` initializes a usable AudioContext and sends ready; capture commands gate forwarding without reopening resources; release frees owned resources. `audioInput:false` reports unavailable input without disabling text/playback. Application-supplied MediaStream overrides cannot be reconciled with the host's selected source and report unavailable rather than silently using another microphone; application tracks remain owned by the application. The standalone microphone utility still supports supplied streams explicitly.
+
+Captured mono 16-kHz PCM16 uses `audio.input.delta` with session/epoch/source revision/turn fences, immediately followed by binary PCM. `capture.started` is sent before PCM and `capture.stopped` fences late callbacks. Xunfei mode requires no frontend microphone. `session.snapshot` alone drives listening/talking/sleeping projection, including Xunfei capture; applying snapshots never executes device commands or emits intents. Latest projection is replayed to late application listeners. Disconnecting a voice-client session fences the retired
 connection: late websocket events, microphone batches, and stripe evidence
 are dropped, and the video element's stream is cleared.
 

@@ -214,14 +214,17 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
      * stripes still never emit. When `turnId` names the turn the signal
      * targets, it is validated against the currently tracked turn: a stop
      * targeted at a retired, queued, or otherwise different turn must never
-     * retire the tracked one. A signal without a turn id ends the tracked
-     * turn (turn-agnostic lifecycle end).
+     * retire the tracked one. The connection may explicitly identify an
+     * accepted output turn when processing its matching playback.stop; that
+     * retires just that ID even before its first stripe. A signal without a
+     * turn id ends the tracked turn (turn-agnostic lifecycle end).
      */
-    notifyMediaEnded(turnId?: string) {
-      if (turnId !== undefined && tracker.currentTurn() !== turnId) {
+    notifyMediaEnded(turnId?: string, acceptedOutput = false) {
+      if (turnId !== undefined && tracker.currentTurn() !== turnId && !acceptedOutput) {
         return
       }
-      const { endedTurnId } = tracker.endCurrent()
+      const { endedTurnId } = acceptedOutput && turnId !== undefined
+        ? tracker.endAcceptedTurn(turnId) : tracker.endCurrent()
       if (endedTurnId !== undefined) {
         options.onPlaybackEnded(endedTurnId, "lifecycle")
       }

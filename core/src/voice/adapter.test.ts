@@ -662,18 +662,16 @@ describe('SDK actions translate to client frames', () => {
     ])
   })
 
-  test('wakeup while active stops, waits for the ended boundary, then starts', () => {
+  test('wakeup while active sends one start and never restarts from an ended snapshot', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
     expect(adapter.wakeup()).toEqual([
-      { type: 'conversation.stop', session_id: sessionId },
+      { type: 'conversation.start', session_id: sessionId },
     ])
     expect(sent).toEqual([])
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
-    expect(sent).toEqual([
-      { type: 'conversation.start', session_id: sessionId },
-    ])
+    expect(sent).toEqual([])
   })
 
   test('wakeup with text sends conversation.start then text.input, never a stop', () => {
@@ -707,7 +705,7 @@ describe('SDK actions translate to client frames', () => {
     ])
   })
 
-  test('wakeup with text interrupts a pending wakeup start', () => {
+  test('wakeup with text after wakeup never schedules another start', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
@@ -719,19 +717,17 @@ describe('SDK actions translate to client frames', () => {
     expect(sent).toEqual([])
   })
 
-  test('a second wakeup while a stop-then-start is pending does not double start', () => {
+  test('each wakeup sends one explicit start without a deferred extra start', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
-    adapter.wakeup()
-    adapter.wakeup()
+    expect(adapter.wakeup()).toEqual([{ type: 'conversation.start', session_id: sessionId }])
+    expect(adapter.wakeup()).toEqual([{ type: 'conversation.start', session_id: sessionId }])
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
-    expect(sent).toEqual([
-      { type: 'conversation.start', session_id: sessionId },
-    ])
+    expect(sent).toEqual([])
   })
 
-  test('sleep cancels a pending wakeup start', () => {
+  test('sleep after wakeup cannot cause a deferred restart', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
@@ -820,7 +816,7 @@ describe('asr_session maps to the conversation lifecycle that owns listening', (
     ])
   })
 
-  test('asr_session stop cancels a pending wakeup start', () => {
+  test('asr_session stop after wakeup cannot cause a deferred restart', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
@@ -852,7 +848,7 @@ describe('sleep with text', () => {
     ])
   })
 
-  test('sleep with text interrupts a pending wakeup start', () => {
+  test('sleep with text after wakeup cannot cause a deferred restart', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
@@ -895,39 +891,37 @@ describe('sleep with text', () => {
 })
 
 describe('pending message sequencing interruption', () => {
-  function armPendingWakeupStart(adapter: ReturnType<typeof createAdapter>) {
+  function sendWakeupStart(adapter: ReturnType<typeof createAdapter>) {
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
     expect(adapter.wakeup()).toEqual([
-      { type: 'conversation.stop', session_id: sessionId },
+      { type: 'conversation.start', session_id: sessionId },
     ])
   }
 
-  test('a new text input interrupts a pending wakeup start', () => {
+  test('a new text input after wakeup cannot cause a deferred restart', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
-    armPendingWakeupStart(adapter)
+    sendWakeupStart(adapter)
     adapter.textInput('new input')
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
     expect(sent).toEqual([])
   })
 
-  test('a new asr_session start does not interrupt a pending wakeup start', () => {
+  test('asr_session start after wakeup sends no additional deferred start', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
-    armPendingWakeupStart(adapter)
+    sendWakeupStart(adapter)
     expect(adapter.asrSession('start')).toEqual([
       { type: 'conversation.start', session_id: sessionId },
     ])
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
-    expect(sent).toEqual([
-      { type: 'conversation.start', session_id: sessionId },
-    ])
+    expect(sent).toEqual([])
   })
 
-  test('reset interrupts a pending wakeup start', () => {
+  test('reset after wakeup cannot cause a deferred restart', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
-    armPendingWakeupStart(adapter)
+    sendWakeupStart(adapter)
     adapter.reset()
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' }))
     expect(sent).toEqual([])
@@ -1059,7 +1053,7 @@ describe('sleep with text waits for the avatar turn transition', () => {
     expect(sent).toEqual([])
   })
 
-  test('a new asr_session start does not interrupt the pending sleep sequence', () => {
+  test('a fresh asr_session start invalidates the obsolete pending sleep sequence', () => {
     const sent: any[] = []
     const adapter = createAdapter(frame => sent.push(frame))
     armPendingSleep(adapter)
@@ -1068,9 +1062,7 @@ describe('sleep with text waits for the avatar turn transition', () => {
     ])
     adapter.observeAvatarTurn('A1')
     adapter.observeAvatarTurn('B2')
-    expect(sentStops(sent)).toEqual([
-      { type: 'conversation.stop', session_id: sessionId },
-    ])
+    expect(sentStops(sent)).toEqual([])
   })
 
   test('an asr_session stop interrupts the pending sleep sequence like a sleep', () => {

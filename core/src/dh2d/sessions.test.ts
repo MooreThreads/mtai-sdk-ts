@@ -134,6 +134,35 @@ describe('createDH2DSession login gate', () => {
     }
   }
 
+  test('public session listeners receive latest voice snapshot indicator and not a retired connection projection', async () => {
+    const untilFailed = controllableUntilFailed()
+    const patched = patchSessionHooks({ voiceClientMode: true, untilFailedHook: untilFailed.hook })
+    const session = createDH2DSession({} as HTMLElement, { videoId: 'xiaomai' })
+    try {
+      await waitUntil(() => session.status === 'connected', 'voice connection')
+      patched.fixture.emit('message', { type: 'status_change', status: 'listening' })
+      const late: any[] = []
+      session.on('message', message => late.push(message))
+      expect(late).toEqual([{ type: 'status_change', status: 'listening' }])
+      late[0].status = 'sleeping'
+      const second: any[] = []
+      session.on('message', message => second.push(message))
+      expect(second).toEqual([{ type: 'status_change', status: 'listening' }])
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      hooks.dh2d.connectVoiceClient = (async () => { await gate; return patched.fixture.connection }) as typeof connectVoiceClient
+      untilFailed.failCurrentConnection()
+      await waitUntil(() => session.status === 'reconnecting', 'reconnect')
+      const stale: any[] = []
+      session.on('message', message => stale.push(message))
+      expect(stale).toEqual([])
+      release()
+    } finally {
+      await session.close()
+      patched.restore()
+    }
+  })
+
   test.each(['pending', 'reconnecting'] as const)('voice config is discarded before buffering or logging while %s', async state => {
     const untilFailed = controllableUntilFailed()
     const patched = patchSessionHooks({ voiceClientMode: true, untilFailedHook: untilFailed.hook })

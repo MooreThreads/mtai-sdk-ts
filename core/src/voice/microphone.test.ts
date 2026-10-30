@@ -248,3 +248,23 @@ describe('createVoiceMicrophone', () => {
     }
   })
 })
+
+test('prepared track loss notifies and cleans up; explicit stop removes the listener', async () => {
+  const stream = new FakeMediaStream()
+  let ended!: () => void
+  const track = stream.audioTracks[0] as any
+  track.addEventListener = jest.fn((name: string, callback: () => void) => { ended = callback })
+  track.removeEventListener = jest.fn()
+  const globals = stubGlobals({ getUserMedia: jest.fn(async () => stream) })
+  const onLost = jest.fn()
+  try {
+    const mic = createVoiceMicrophone({ audioInput: true, onPcm() {}, onLost })
+    await mic.ready
+    ended()
+    expect(onLost).toHaveBeenCalledTimes(1)
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(track.removeEventListener).toHaveBeenCalledWith('ended', ended)
+    ended()
+    expect(onLost).toHaveBeenCalledTimes(1)
+  } finally { globals.restore() }
+})

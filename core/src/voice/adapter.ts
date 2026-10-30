@@ -1,4 +1,5 @@
 import { DHOutputMessage, DHStatus } from "../types"
+import { createSessionSnapshotProjection } from './sessionSnapshot'
 
 /**
  * Wire frames of the voice MVP frontend-to-client protocol that this SDK
@@ -14,7 +15,7 @@ export type VoiceSubtitleSegment = {
 
 /** Control frames the SDK sends to the voice client. */
 export type VoiceClientFrame =
-  | { type: 'session.start', session_id: string, protocol_version: number }
+  | { type: 'session.start', session_id: string, protocol_version: number, capabilities?: string[] }
   | { type: 'conversation.start', session_id: string }
   | { type: 'conversation.stop', session_id: string }
   | { type: 'text.input', session_id: string, request_id: string, text: string }
@@ -46,6 +47,7 @@ export type VoiceMessageAdapterOptions = {
   onClientSend?: (_: VoiceClientFrame) => void,
   /** Generates typed-input correlation handles. */
   requestIdFactory?: () => string,
+  controlledInput?: boolean,
 }
 
 const PROTOCOL_VERSION = 2
@@ -66,14 +68,11 @@ function defaultRequestIdFactory() {
  * The adapter keeps per-session and per-turn state: accumulated `bot_output`
  * fragments keyed by `session_id + turn_id` (emitted as replacement text),
  * incremental audio subtitles, confirmed user records, the current conversation state,
- * the accepted capture turn, and any pending wakeup stop-then-start sequence.
- * Statuses transform strictly: `capture.start` reports `listening`, and
- * `capture.stop` or the acknowledgement of the current generation's typed
- * input (`text.accepted`) reports `talking`; only `conversation.state:ended`
- * reports `sleeping`. No other event invents or changes a status —
- * `text.output.delta`/`audio.output.*` frames, `turn.end`, and non-ended
- * `conversation.state` modes preserve the current active status — and
- * `sleep_talking` is never emitted.
+ * the accepted capture turn, and any pending sleep-with-text sequence.
+ * Managed connections derive all statuses from general session.snapshot,
+ * independently of the selected capture source. Capture commands execute
+ * actions elsewhere, and snapshots never execute actions. Transport-only
+ * embedders retain their legacy command-derived projection explicitly.
  * Turns are fenced at `turn.end`: duplicate terminal events never produce
  * duplicate records, and late `text.output.delta` fragments, `audio.output.delta`
  * subtitles, ASR events, or `capture.start`/`capture.stop` controls from a
@@ -93,12 +92,10 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const { sessionId } = options
   const onClientSend = options.onClientSend
   const newRequestId = options.requestIdFactory ?? defaultRequestIdFactory()
+  let snapshots = createSessionSnapshotProjection(sessionId)
 
   let conversationEnded = true
   let captureTurnId: string | undefined = undefined
-  let pendingWakeupStart = false
-  /** Generation captured when the pending wakeup start was armed. */
-  let pendingWakeupStartGeneration = 0
   /**
    * Monotonic generation of the session-scoped pending-message sequence.
    * Every new wakeup, input, or sleep action — and every reset — retires the
@@ -164,7 +161,6 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
    */
   function invalidatePendingSequence() {
     pendingMessageGeneration++
-    pendingWakeupStart = false
     pendingSleepStop = undefined
     typedRequestId = undefined
     typedText = undefined
@@ -183,6 +179,11 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
       return []
     }
     switch (event.type) {
+      case 'session.state':
+        if (event.session_id === sessionId && event.state === 'connected') snapshots = createSessionSnapshotProjection(sessionId)
+        return []
+      case 'session.snapshot':
+        return snapshots.ingest(event)
       case 'command':
         // The connection owns the destination; command fields are opaque.
         // No action schema, voice-state mutation or execution acknowledgement.
@@ -260,7 +261,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         if (typeof event.turn_id === 'string' && event.turn_id) {
           captureTurnId = event.turn_id
         }
-        return [statusMessage('listening')]
+        return options.controlledInput ? [] : [statusMessage('listening')]
       }
       case 'capture.stop': {
         if (event.session_id !== sessionId) return []
@@ -275,7 +276,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         if (conversationEnded) {
           return []
         }
-        return [statusMessage('talking')]
+        return options.controlledInput ? [] : [statusMessage('talking')]
       }
       case 'text.accepted': {
         if (event.session_id !== sessionId) return []
@@ -312,7 +313,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
           typedText = undefined
           const messages: DHOutputMessage[] = []
           if (text?.trim()) messages.push({ type: 'message_record', message: { role: 'user', content: text } })
-          messages.push(statusMessage('talking'))
+          if (!options.controlledInput) messages.push(statusMessage('talking'))
           return messages
         }
         return []
@@ -323,12 +324,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         conversationEnded = ended
         if (ended) {
           captureTurnId = undefined
-          if (pendingWakeupStart) {
-            const generation = pendingWakeupStartGeneration
-            pendingWakeupStart = false
-            sendDeferred(generation, { type: 'conversation.start', session_id: sessionId })
-          }
-          return [statusMessage('sleeping')]
+          return options.controlledInput ? [] : [statusMessage('sleeping')]
         }
         return []
       }
@@ -340,16 +336,16 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   }
 
   function startFrame(): VoiceClientFrame {
-    return { type: 'session.start', session_id: sessionId, protocol_version: PROTOCOL_VERSION }
+    return { type: 'session.start', session_id: sessionId, protocol_version: PROTOCOL_VERSION,
+      ...(options.controlledInput ? { capabilities: ['session-snapshot-v1', 'audio-input-control-v1'] } : {}) }
   }
 
   function wakeup(text?: string): VoiceClientFrame[] {
     invalidatePendingSequence()
     const userText = messageText(text)
     if (userText !== undefined) {
-      // Text-bearing wakeup always opens the conversation immediately:
-      // `conversation.start` is idempotent while a conversation is already
-      // active, so the text is never held behind a stop-then-start sequence.
+      // The client owns interruption and fresh capture admission. Send the
+      // intent immediately; never sequence a frontend stop/ended/start.
       const requestId = newRequestId()
       typedRequestId = requestId
       typedText = userText
@@ -358,12 +354,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         { type: 'text.input', session_id: sessionId, request_id: requestId, text: userText },
       ]
     }
-    if (conversationEnded && !pendingWakeupStart) {
-      return [{ type: 'conversation.start', session_id: sessionId }]
-    }
-    pendingWakeupStart = true
-    pendingWakeupStartGeneration = pendingMessageGeneration
-    return [{ type: 'conversation.stop', session_id: sessionId }]
+    return [{ type: 'conversation.start', session_id: sessionId }]
   }
 
   function sleep(text?: string): VoiceClientFrame[] {
@@ -401,16 +392,17 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
 
   /**
    * Maps an SDK `asr_session` control to the client conversation lifecycle
-   * that owns listening: `start` opens listening (`conversation.start`, the
-   * client ignores it while already listening) and never cancels pending
-   * sequencing; `stop` ends listening (`conversation.stop`) and, acting
-   * exactly like a text-less sleep, retires the pending sequence.
+   * that owns listening: `start` requests fresh capture (`conversation.start`,
+   * the client owns interruption/admission); both fresh start and stop
+   * retire obsolete pending sleep sequencing.
    */
   function asrSession(command: 'start' | 'stop'): VoiceClientFrame[] {
     if (command === 'stop') {
       invalidatePendingSequence()
       return [{ type: 'conversation.stop', session_id: sessionId }]
     }
+    pendingMessageGeneration++
+    pendingSleepStop = undefined
     return [{ type: 'conversation.start', session_id: sessionId }]
   }
 
@@ -465,6 +457,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   }
 
   function reset() {
+    snapshots = createSessionSnapshotProjection(sessionId)
     invalidatePendingSequence()
     conversationEnded = true
     captureTurnId = undefined
@@ -487,6 +480,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     observeAvatarTurn,
     reset,
     invalidatePendingSequence,
+    replaySnapshot: () => snapshots.replay(),
   }
 }
 
