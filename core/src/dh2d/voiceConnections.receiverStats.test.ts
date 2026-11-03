@@ -48,18 +48,18 @@ function config() {
     voiceClient: { interaction_endpoint: 'ws://client:8300', dh2d_endpoint: 'http://dh2d:32107', sessionId: 'voice-1' } } as any
 }
 function validStripe(token: string): ImageData {
-  const data = new Uint8ClampedArray(64 * 8 * 4).fill(128)
-  const bytes = [token.charCodeAt(0), token.charCodeAt(1)]
+  const data = new Uint8ClampedArray(64 * 12 * 4).fill(128)
+  const bytes = [2, 0, token.charCodeAt(0), token.charCodeAt(1)]
   let crc = 0xffff
   for (const byte of bytes) { crc ^= byte << 8; for (let bit = 0; bit < 8; bit++) crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1; crc &= 0xffff }
   const payload = [...bytes, crc >> 8, crc & 0xff]
   const bits = payload.flatMap(byte => Array.from({ length: 8 }, (_, index) => (byte >> (7 - index)) & 1))
-  for (let row = 0; row < 2; row++) for (let col = 0; col < 16; col++) for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+  for (let row = 0; row < 3; row++) for (let col = 0; col < 16; col++) for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
     const value = bits[row * 16 + col] ? 235 : 16
     const index = ((row * 4 + y) * 64 + col * 4 + x) * 4
     data[index] = data[index + 1] = data[index + 2] = value; data[index + 3] = 255
   }
-  return { data, width: 64, height: 8 } as ImageData
+  return { data, width: 64, height: 12 } as ImageData
 }
 
  test('integrates ready baseline, asynchronous changed-token sampling, and public retirement', async () => {

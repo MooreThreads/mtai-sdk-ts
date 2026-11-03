@@ -110,6 +110,8 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
   let cancelFrame: (() => void) | undefined = undefined
   let lastObservedTurnId: string | undefined = undefined
   let generation = 0
+  let observerStartedEpochMs: number | null = null
+  const startedTurns = new Set<string>()
 
   function observe(now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) {
     if (stopped) {
@@ -120,7 +122,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       const image = options.sampleFrame()
       const samplingEndMs = timingNowOrNull()
       if (image != null) {
-        const { tokens } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
+        const { tokens, packet } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
         const decodingEndMs = timingNowOrNull()
         const { endedTurnId, observedTurnId } = tracker.observe(tokens)
         // The tracker repeats the current turn on every frame, so a timing
@@ -129,8 +131,10 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         // send-side record precedes the observation record.
         const changed = observedTurnId !== undefined && observedTurnId !== lastObservedTurnId
         const previousTurnId = lastObservedTurnId
-        const at = changed ? avatarTimingNow() : 0
-        const epochMs = changed ? Date.now() : 0
+        const firstActive = observedTurnId !== undefined && packet?.rawAudioActive === true && !startedTurns.has(observedTurnId)
+        if (firstActive) startedTurns.add(observedTurnId)
+        const at = changed || firstActive ? avatarTimingNow() : 0
+        const epochMs = changed || firstActive ? Date.now() : 0
         const context = changed ? {
           rtpTimestamp: safeMetadataNumber(metadata, 'rtpTimestamp'),
           callbackNowMs: finiteNumber(now),
@@ -139,9 +143,10 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
           })(),
         } : undefined
         const observationGeneration = generation
+        const observationStartedEpochMs = observerStartedEpochMs
         let frameTiming = ''
-        if (changed) {
-          lastObservedTurnId = observedTurnId
+        if (changed) lastObservedTurnId = observedTurnId
+        if (changed || firstActive) {
           try {
             frameTiming = ` frame_timing=${frameTimingSnapshot(now, metadata)}`
           } catch {
@@ -153,6 +158,13 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         }
         if (observedTurnId !== undefined) {
           options.onTurnObserved?.(observedTurnId)
+        }
+        if (firstActive) {
+          try {
+            logger?.log(`avatar_response_started turn=${observedTurnId} stripe_version=2 raw_active=1`
+              + ` generation=${observationGeneration} epoch_ms=${epochMs}`
+              + ` observer_started_epoch_ms=${observationStartedEpochMs}${frameTiming}`)
+          } catch { /* onset diagnostics must not affect playback */ }
         }
         if (changed) {
           // A diagnostic sink must never break playback or the frame loop.
@@ -195,7 +207,13 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       }
       stopped = false
       generation++
+      try {
+        const now = timingNowOrNull()
+        const origin = finiteNumber(typeof performance !== 'undefined' ? performance.timeOrigin : undefined)
+        observerStartedEpochMs = now !== null && origin !== null ? finiteNumber(origin + now) : null
+      } catch { observerStartedEpochMs = null }
       tracker.reset()
+      startedTurns.clear()
       lastObservedTurnId = undefined
       cancelFrame = options.requestFrame(observe)
     },
@@ -203,6 +221,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       stopped = true
       generation++
       tracker.reset()
+      startedTurns.clear()
       lastObservedTurnId = undefined
       cancelFrame?.()
       cancelFrame = undefined
@@ -234,7 +253,7 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
 
 /**
  * Creates a production `AvatarFrameSampler` for a `<video>` element playing
- * the DH2D avatar stream. The sampler copies the topmost 8 rows across the
+ * the DH2D avatar stream. The sampler copies the topmost 12 rows across the
  * full video width so every 64-pixel stripe repetition is decoded — a
  * damaged first copy then still leaves the repeated copies as evidence.
  * No per-frame canvas allocation happens after creation; the canvas is only

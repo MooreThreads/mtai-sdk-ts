@@ -152,14 +152,15 @@ function fakeCover() {
 }
 
 function stripeImageData(token: string): ImageData {
-  const crc = crc16(Uint8Array.from([token.charCodeAt(0), token.charCodeAt(1)]))
-  const payload = [token.charCodeAt(0), token.charCodeAt(1), (crc >> 8) & 0xff, crc & 0xff]
+  const body = [2, 0, token.charCodeAt(0), token.charCodeAt(1)]
+  const crc = crc16(Uint8Array.from(body))
+  const payload = [...body, (crc >> 8) & 0xff, crc & 0xff]
   const bits: number[] = []
   for (const byte of payload) {
     for (let i = 7; i >= 0; i--) bits.push((byte >> i) & 1)
   }
-  const data = new Uint8ClampedArray(64 * 8 * 4)
-  for (let row = 0; row < 2; row++) {
+  const data = new Uint8ClampedArray(64 * 12 * 4)
+  for (let row = 0; row < 3; row++) {
     for (let col = 0; col < 16; col++) {
       const bit = bits[row * 16 + col]
       for (let y = 0; y < 4; y++) {
@@ -172,7 +173,7 @@ function stripeImageData(token: string): ImageData {
       }
     }
   }
-  return { data, width: 64, height: 8 } as ImageData
+  return { data, width: 64, height: 12 } as ImageData
 }
 
 const logger = createLogger({

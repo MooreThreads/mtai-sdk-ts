@@ -5,65 +5,36 @@ import {
 } from './avatarMedia'
 import { crc16 } from './turnStripe'
 
-function payloadOf(token: string): number[] {
-  const crc = crc16(Uint8Array.from([token.charCodeAt(0), token.charCodeAt(1)]))
-  return [token.charCodeAt(0), token.charCodeAt(1), (crc >> 8) & 0xff, crc & 0xff]
+function payloadOf(token: string, active = false): number[] {
+  const body = [2, active ? 1 : 0, token.charCodeAt(0), token.charCodeAt(1)]
+  const crc = crc16(Uint8Array.from(body))
+  return [...body, (crc >> 8) & 0xff, crc & 0xff]
 }
 
-function stripeImageData(token: string | null, width = 64): ImageData {
-  const data = new Uint8ClampedArray(width * 8 * 4).fill(128)
-  if (token) {
-    const bits: number[] = []
-    for (const byte of payloadOf(token)) {
-      for (let i = 7; i >= 0; i--) bits.push((byte >> i) & 1)
-    }
-    for (let row = 0; row < 2; row++) {
-      for (let col = 0; col < 16; col++) {
-        const bit = bits[row * 16 + col]
-        for (let y = 0; y < 4; y++) {
-          for (let x = 0; x < 4; x++) {
-            const value = bit ? 235 : 16
-            const i = ((row * 4 + y) * width + col * 4 + x) * 4
-            data[i] = value
-            data[i + 1] = value
-            data[i + 2] = value
-            data[i + 3] = 255
-          }
-        }
-      }
-    }
-  }
-  return { data, width, height: 8 } as ImageData
+function stripeImageData(token: string | null, width = 64, active = false): ImageData {
+  return tiledStripeImageData(token, width, active)
 }
 
-/** An ImageData whose top rows tile the stripe across the full width. */
-function tiledStripeImageData(token: string | null, width: number): ImageData {
-  const data = new Uint8ClampedArray(width * 8 * 4).fill(128)
+/** V2 test fixture, 64x12 blocks tiled across the full frame width. */
+function tiledStripeImageData(token: string | null, width: number, active = false): ImageData {
+  const data = new Uint8ClampedArray(width * 12 * 4).fill(128)
   if (token) {
-    const bits: number[] = []
-    for (const byte of payloadOf(token)) {
-      for (let i = 7; i >= 0; i--) bits.push((byte >> i) & 1)
-    }
-    const repetitions = Math.floor(width / 64)
-    for (let rep = 0; rep < repetitions; rep++) {
-      for (let row = 0; row < 2; row++) {
+    const bits = payloadOf(token, active).flatMap(byte => Array.from({ length: 8 }, (_, i) => (byte >> (7-i)) & 1))
+    for (let rep = 0; rep < Math.floor(width / 64); rep++) {
+      for (let row = 0; row < 3; row++) {
         for (let col = 0; col < 16; col++) {
-          const bit = bits[row * 16 + col]
           for (let y = 0; y < 4; y++) {
             for (let x = 0; x < 4; x++) {
-              const value = bit ? 235 : 16
               const i = ((row * 4 + y) * width + rep * 64 + col * 4 + x) * 4
-              data[i] = value
-              data[i + 1] = value
-              data[i + 2] = value
-              data[i + 3] = 255
+              data[i] = data[i+1] = data[i+2] = bits[row * 16 + col] ? 235 : 16
+              data[i+3] = 255
             }
           }
         }
       }
     }
   }
-  return { data, width, height: 8 } as ImageData
+  return { data, width, height: 12 } as ImageData
 }
 
 function createManualFrameSource() {
@@ -83,6 +54,38 @@ function createManualFrameSource() {
 }
 
 describe('createAvatarPlayback', () => {
+  test('reserved idle token starts only on its first active frame, independent of end ACK', () => {
+    const frames = createManualFrameSource(), logs: string[] = [], ended: string[] = []
+    let image = stripeImageData('B1', 64, false)
+    const playback = createAvatarPlayback({requestFrame: frames.requestFrame, sampleFrame: () => image,
+      onPlaybackEnded: id => ended.push(id), logger: {log: (...args: any[]) => logs.push(args.join(' ')), error: jest.fn()} as any})
+    const beforeStart = performance.timeOrigin + performance.now()
+    playback.start()
+    const afterStart = performance.timeOrigin + performance.now()
+    frames.emitFrame(100, {presentationTime: 90})
+    expect(logs.filter(l => l.includes('avatar_response_started'))).toHaveLength(0)
+    image = stripeImageData('B1', 64, true)
+    frames.emitFrame(200, {presentationTime: 180})
+    frames.emitFrame(220, {presentationTime: 210})
+    image = stripeImageData('B1', 64, false); frames.emitFrame()
+    image = stripeImageData('B1', 64, true); frames.emitFrame()
+    expect(logs.filter(l => l.includes('avatar_response_started'))).toHaveLength(1)
+    const onset = logs.find(l => l.includes('avatar_response_started'))!
+    expect(onset).toContain('"presentation_time_ms":180')
+    const observerStart = Number(/observer_started_epoch_ms=([\d.]+)/.exec(onset)?.[1])
+    expect(observerStart).toBeGreaterThanOrEqual(beforeStart)
+    expect(observerStart).toBeLessThanOrEqual(afterStart)
+    expect(ended).toEqual([])
+    image = stripeImageData('C2', 64, true); frames.emitFrame(300, {presentationTime: 280})
+    expect(logs.filter(l => l.includes('avatar_response_started'))).toHaveLength(2)
+    expect(ended).toEqual(['B1'])
+    playback.notifyMediaEnded('C2'); expect(ended).toEqual(['B1', 'C2'])
+    image = stripeImageData('C2', 64, true); frames.emitFrame()
+    expect(logs.filter(l => l.includes('avatar_response_started'))).toHaveLength(2)
+    playback.stop(); playback.start(); frames.emitFrame()
+    expect(logs.filter(l => l.includes('avatar_response_started'))).toHaveLength(3)
+    playback.stop()
+  })
   test('reports the previous turn once on a validated transition', () => {
     const frames = createManualFrameSource()
     const ended: string[] = []
@@ -496,16 +499,16 @@ describe('createAvatarFrameSampler', () => {
       expect(createElement).toHaveBeenCalledWith('canvas')
       expect(canvas.getContextCalls).toEqual([['2d', { willReadFrequently: false }]])
       expect(canvas.context.drawImageCalls).toEqual([
-        [video, 0, 0, 1920, 8, 0, 0, 1920, 8],
-        [video, 0, 0, 1920, 8, 0, 0, 1920, 8],
-        [video, 0, 0, 1280, 8, 0, 0, 1280, 8],
+        [video, 0, 0, 1920, 12, 0, 0, 1920, 12],
+        [video, 0, 0, 1920, 12, 0, 0, 1920, 12],
+        [video, 0, 0, 1280, 12, 0, 0, 1280, 12],
       ])
       expect(canvas.context.getImageDataCalls).toEqual([
-        [0, 0, 1920, 8],
-        [0, 0, 1920, 8],
-        [0, 0, 1280, 8],
+        [0, 0, 1920, 12],
+        [0, 0, 1920, 12],
+        [0, 0, 1280, 12],
       ])
-      expect([canvas.width, canvas.height]).toEqual([1280, 8])
+      expect([canvas.width, canvas.height]).toEqual([1280, 12])
     } finally {
       if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument)
       else delete (globalThis as any).document
@@ -533,13 +536,13 @@ describe('createAvatarFrameSampler', () => {
         const sampled = sampler()
         expect(sampled).not.toBeNull()
         expect(canvas.width).toBe(1920)
-        expect(canvas.height).toBe(8)
+        expect(canvas.height).toBe(12)
         expect(canvas.context.drawImageCalls.length).toBeGreaterThan(0)
         for (const call of canvas.context.drawImageCalls) {
-          expect(call).toEqual([video, 0, 0, 1920, 8, 0, 0, 1920, 8])
+          expect(call).toEqual([video, 0, 0, 1920, 12, 0, 0, 1920, 12])
         }
         expect(sampled!.width).toBe(1920)
-        expect(sampled!.height).toBe(8)
+        expect(sampled!.height).toBe(12)
         break canvasLoop
       }
       expect(created.length).toBe(1)
@@ -910,7 +913,7 @@ describe('createAvatarPlayback timing records', () => {
     const frames = createManualFrameSource()
     const lines: string[] = []
     const logger: any = { log: (line: string) => lines.push(line), warn: () => undefined, error: () => undefined, push: () => logger }
-    const times = [10, 20, 35, 40]
+    const times = [0, 10, 20, 35, 40] // observer-start clock, then frame callback clocks
     const now = jest.spyOn(performance, 'now').mockImplementation(() => times.shift() ?? 40)
     try {
       const playback = createAvatarPlayback({

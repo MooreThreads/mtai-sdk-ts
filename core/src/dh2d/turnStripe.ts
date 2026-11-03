@@ -1,27 +1,15 @@
 /**
- * DH2D avatar video turn-stripe decoding.
- *
- * DH2D stamps the active voice turn token into the topmost 8 pixel rows of
- * every avatar video frame when the session opted into turn metadata. The
- * 64x8 pixel region at the top-left (repeated every 64 pixels horizontally)
- * encodes 32 bits as a 16x2 grid of 4x4 grayscale cells (black=0, white=1):
- *
- *   byte 0: turn token character 0 (ASCII)
- *   byte 1: turn token character 1 (ASCII)
- *   byte 2: CRC16/CCITT-FALSE high byte
- *   byte 3: CRC16/CCITT-FALSE low byte
- *
- * A cell is read by averaging its 4x4 luminance values and thresholding at
- * 128. Frames whose payload is absent, undecodable, or CRC-invalid carry no
- * turn information and must never emit a playback boundary. This mirrors the
- * server-side encoder (`rtc.py turn_stripe_template`) and the e2e harness
- * decoder (`decode_stripe`).
+ * DH2D stripe V2: 64x12 repeated blocks, 16x3 cells of 4x4 pixels.
+ * Six bytes: version02, raw-active bit0 (other flags zero), two ASCII
+ * alphanumeric token bytes, then big-endian CCITT-FALSE CRC of bytes0..3.
+ * Invalid copies are ignored; conflicting valid packets invalidate the frame.
+ * Undecodable evidence is never interpreted as idle or a playback boundary.
  */
 
 /** Number of horizontal pixels occupied by one stripe repetition. */
 export const TURN_STRIPE_WIDTH = 64
 /** Number of topmost rows occupied by the stripe. */
-export const TURN_STRIPE_HEIGHT = 8
+export const TURN_STRIPE_HEIGHT = 12
 /** Luminance threshold separating black (0) from white (1) cells. */
 export const TURN_STRIPE_THRESHOLD = 128
 
@@ -45,7 +33,7 @@ export function crc16(payload: Uint8Array): number {
 }
 
 function cellAverage(luma: ArrayLike<number>, width: number, cellX: number, cellY: number): number {
-  // Each cell is 4x4 pixels; the stripe grid is 16 cells wide, 2 cells tall.
+  // Each cell is 4x4 pixels; the stripe grid is 16 cells wide, 3 cells tall.
   let sum = 0
   for (let y = 0; y < 4; y++) {
     for (let x = 0; x < 4; x++) {
@@ -55,52 +43,56 @@ function cellAverage(luma: ArrayLike<number>, width: number, cellX: number, cell
   return sum / 16
 }
 
-function decodeRepetition(luma: ArrayLike<number>, width: number, originX: number): string | null {
-  const bytes = new Uint8Array(4)
-  for (let row = 0; row < 2; row++) {
+export type TurnStripePacket = { turnId: string, rawAudioActive: boolean }
+
+function decodeRepetition(luma: ArrayLike<number>, width: number, originX: number): TurnStripePacket | null {
+  const bytes = new Uint8Array(6)
+  for (let row = 0; row < 3; row++) {
     for (let col = 0; col < 16; col++) {
       const bit = cellAverage(luma, width, originX / 4 + col, row) > TURN_STRIPE_THRESHOLD ? 1 : 0
       bytes[row * 2 + (col >> 3)] = (bytes[row * 2 + (col >> 3)] << 1) | bit
     }
   }
-  const token = String.fromCharCode(bytes[0], bytes[1])
-  const crc = (bytes[2] << 8) | bytes[3]
-  if (crc !== crc16(bytes.subarray(0, 2))) {
+  const token = String.fromCharCode(bytes[2], bytes[3])
+  const crc = (bytes[4] << 8) | bytes[5]
+  if (bytes[0] !== 2 || (bytes[1] & 0xfe) !== 0
+      || !TURN_TOKEN_PATTERN.test(token) || crc !== crc16(bytes.subarray(0, 4))) {
     return null
   }
-  return token
+  return { turnId: token, rawAudioActive: (bytes[1] & 1) !== 0 }
 }
 
 export type TurnStripeDecodeResult = {
   /** Valid tokens decoded from the frame, one per repetition, in order. */
   tokens: string[],
-  /** Number of repetitions that failed CRC validation. */
+  /** Number of invalid repetitions (CRC, version, flags or token). */
   failures: number,
+  /** The complete agreeing V2 packet, or null when evidence is undecodable. */
+  packet: TurnStripePacket | null,
 }
 
 /**
- * Decode every 64-pixel stripe repetition from the topmost 8 rows of a frame.
+ * Decode every 64-pixel stripe repetition from the topmost 12 rows of a frame.
  * `luma` is the full-frame grayscale/luminance raster of `width` columns.
  */
 export function decodeTurnStripe(luma: ArrayLike<number>, width: number): TurnStripeDecodeResult {
-  const tokens: string[] = []
+  const packets: TurnStripePacket[] = []
   let failures = 0
-  if (typeof width !== 'number' || width < TURN_STRIPE_WIDTH) {
-    return { tokens, failures }
+  if (!Number.isInteger(width) || width < TURN_STRIPE_WIDTH || luma.length < width * TURN_STRIPE_HEIGHT) {
+    return { tokens: [], failures, packet: null }
   }
   for (let x = 0; x + TURN_STRIPE_WIDTH <= width; x += TURN_STRIPE_WIDTH) {
-    const token = decodeRepetition(luma, width, x)
-    if (token === null) {
-      failures++
-    } else {
-      tokens.push(token)
-    }
+    const packet = decodeRepetition(luma, width, x)
+    if (packet === null) failures++
+    else packets.push(packet)
   }
-  return { tokens, failures }
+  const first = packets[0]
+  const packet = first && packets.every(p => p.turnId === first.turnId && p.rawAudioActive === first.rawAudioActive) ? first : null
+  return { tokens: packet ? packets.map(p => p.turnId) : [], failures, packet }
 }
 
 /**
- * Extract the luminance of the topmost 8 rows across the full frame width
+ * Extract the luminance of the topmost 12 rows across the full frame width
  * from RGBA `ImageData`-like video frame pixels, ready for
  * `decodeTurnStripe` (which decodes every 64-pixel repetition).
  */

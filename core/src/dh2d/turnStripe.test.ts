@@ -6,13 +6,9 @@ import {
 } from './turnStripe'
 
 function payloadOf(token: string): number[] {
-  const crc = crc16(Uint8Array.from([token.charCodeAt(0), token.charCodeAt(1)]))
-  return [
-    token.charCodeAt(0),
-    token.charCodeAt(1),
-    (crc >> 8) & 0xff,
-    crc & 0xff,
-  ]
+  const body = [2, 1, token.charCodeAt(0), token.charCodeAt(1)]
+  const crc = crc16(Uint8Array.from(body))
+  return [...body, (crc >> 8) & 0xff, crc & 0xff]
 }
 
 function bitsOf(payload: number[]): number[] {
@@ -25,11 +21,11 @@ function bitsOf(payload: number[]): number[] {
   return bits
 }
 
-/** Build one 64x8 stripe region for a token: rows of luminance values. */
+/** Build one 64x12 V2 stripe region for a token: rows of luminance values. */
 function stripeRegion(token: string): number[][] {
   const bits = bitsOf(payloadOf(token))
   const region: number[][] = []
-  for (let row = 0; row < 2; row++) {
+  for (let row = 0; row < 3; row++) {
     for (let py = 0; py < 4; py++) {
       const line: number[] = []
       for (let col = 0; col < 16; col++) {
@@ -50,7 +46,7 @@ function frameWithStripe(token: string, width: number, height: number, filler = 
   const frame: number[] = []
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (y < 8) {
+      if (y < 12) {
         frame.push(region[y][x % 64])
       } else {
         frame.push(filler)
@@ -98,7 +94,7 @@ describe('decodeTurnStripe', () => {
   })
 
   test('a frame without a stripe decodes nothing and never throws', () => {
-    const frame = new Array(64 * 8).fill(90)
+    const frame = new Array(64 * 12).fill(90)
     const { tokens, failures } = decodeTurnStripe(frame, 64)
     expect(tokens).toEqual([])
     expect(failures).toBe(1)
@@ -106,7 +102,7 @@ describe('decodeTurnStripe', () => {
 
   test('uses the average-luminance threshold 128', () => {
     // Cell averages of exactly 128 read as 0; 129 reads as 1.
-    const frame = new Array(64 * 8).fill(128)
+    const frame = new Array(64 * 12).fill(128)
     // Build a valid payload with all-zero bits except none: CRC of token
     // '\0\0' is 0x2ec9, so all-zero cells are invalid by CRC; use that to
     // confirm thresholding: all cells at exactly 128 => all bits 0 => CRC
@@ -117,10 +113,10 @@ describe('decodeTurnStripe', () => {
 })
 
 describe('stripeLumaFromImageData', () => {
-  test('extracts the top-left 64x8 grayscale region as luminance', () => {
+  test('extracts the top-left 64x12 grayscale region as luminance', () => {
     const region = stripeRegion('B7')
-    const data = new Uint8ClampedArray(64 * 8 * 4)
-    for (let y = 0; y < 8; y++) {
+    const data = new Uint8ClampedArray(64 * 12 * 4)
+    for (let y = 0; y < 12; y++) {
       for (let x = 0; x < 64; x++) {
         const value = region[y][x]
         const i = (y * 64 + x) * 4
@@ -130,16 +126,16 @@ describe('stripeLumaFromImageData', () => {
         data[i + 3] = 255
       }
     }
-    const luma = stripeLumaFromImageData({ data, width: 64, height: 8 } as ImageData)
-    expect(luma.length).toBe(64 * 8)
+    const luma = stripeLumaFromImageData({ data, width: 64, height: 12 } as ImageData)
+    expect(luma.length).toBe(64 * 12)
     expect(luma).toEqual(region.flat())
   })
 
   test('extracts every repetition across the full top-row width', () => {
     const region = stripeRegion('B7')
     const width = 192
-    const data = new Uint8ClampedArray(width * 8 * 4)
-    for (let y = 0; y < 8; y++) {
+    const data = new Uint8ClampedArray(width * 12 * 4)
+    for (let y = 0; y < 12; y++) {
       for (let x = 0; x < width; x++) {
         const value = region[y][x % 64]
         const i = (y * width + x) * 4
@@ -149,8 +145,8 @@ describe('stripeLumaFromImageData', () => {
         data[i + 3] = 255
       }
     }
-    const luma = stripeLumaFromImageData({ data, width, height: 8 } as ImageData)
-    expect(luma.length).toBe(width * 8)
+    const luma = stripeLumaFromImageData({ data, width, height: 12 } as ImageData)
+    expect(luma.length).toBe(width * 12)
     expect(decodeTurnStripe(luma, width).tokens).toEqual(['B7', 'B7', 'B7'])
   })
 })
