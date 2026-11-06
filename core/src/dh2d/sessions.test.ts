@@ -5,6 +5,7 @@ import { createLogger } from '../log'
 afterEach(() => setConfig({ endpoint: 'http://localhost:32101' }))
 import { events } from '../events'
 import { hooks } from '../hooks'
+import { globalDH2DSessions } from './hooks'
 import { createDH2DSession } from './sessions'
 import { createVoiceMessageAdapter } from '../voice/adapter'
 import { VoiceClientConnection, connectVoiceClient, disconnectVoiceClient } from './voiceConnections'
@@ -459,4 +460,138 @@ describe('createDH2DSession audio monitoring removal', () => {
   })
 })
 
-void abortable
+it.each([false, true])('observes automatic close failure without hiding explicit errors (automatic=%s)', async automatic => {
+  jest.useFakeTimers()
+  const { restore } = patchHooks()
+  const fixture = voiceConnectionFixture()
+  const failure = new Error('disconnect failed')
+  hooks.dh2d.getOrCreatePlayer = () => ({ video: {} } as any)
+  hooks.dh2d.connectVoiceClient = (async () => fixture.connection) as any
+  hooks.dh2d.disconnectVoiceClient = async () => { throw failure }
+  hooks.dh2d.untilFailed = async (_l, _c, _p, _config, scope) => new Promise<void>(resolve => scope.onabort(resolve))
+  globalDH2DSessions.value = []
+  const session = createDH2DSession({} as HTMLElement, { voiceClient: { interaction_endpoint: 'ws://client' } } as any)
+  const unhandled = jest.fn()
+  process.on('unhandledRejection', unhandled)
+  try {
+    await jest.advanceTimersByTimeAsync(0)
+    expect(session.status).toBe('connected')
+    if (automatic) fixture.emit('message', { type: 'session_ended' })
+    else await expect(session.close()).rejects.toBe(failure)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(unhandled).not.toHaveBeenCalled()
+    expect(globalDH2DSessions.value).toEqual([])
+  } finally {
+    await session.close()
+    process.off('unhandledRejection', unhandled)
+    restore()
+    globalDH2DSessions.value = []
+    jest.useRealTimers()
+  }
+})
+
+function deferredCleanup() {
+  let resolve!: () => void
+  const promise = new Promise<void>(r => { resolve = r })
+  return { promise, resolve }
+}
+
+it.each([false, true])('holds the shared slot through actual cleanup beyond close wait (voice=%s)', async voice => {
+  jest.useFakeTimers()
+  const { restore } = patchHooks()
+  const restoreFetch = patchFetchLoggedIn()
+  const cleanup = deferredCleanup()
+  const entered = deferredCleanup()
+  const fixture = voiceConnectionFixture(voice)
+  const connect = jest.fn(async () => fixture.connection)
+  const disconnect = jest.fn(async () => { entered.resolve(); await cleanup.promise })
+  const defaultConfig = hooks.dh2d.defaultConfig
+  hooks.dh2d.defaultConfig = config => ({ ...defaultConfig(config), voiceClient: voice ? { interaction_endpoint: 'ws://client' } : undefined } as any)
+  hooks.dh2d.getOrCreatePlayer = () => ({ video: {} } as any)
+  hooks.dh2d.connect = connect as any
+  hooks.dh2d.connectVoiceClient = connect as any
+  hooks.dh2d.disconnect = disconnect
+  hooks.dh2d.disconnectVoiceClient = disconnect
+  hooks.dh2d.untilFailed = async (_l, _c, _p, _config, scope) => new Promise<void>(resolve => scope.onabort(resolve))
+  globalDH2DSessions.value = []
+  const old = createDH2DSession({} as HTMLElement)
+  let replacement: ReturnType<typeof createDH2DSession> | undefined
+  try {
+    await jest.advanceTimersByTimeAsync(0)
+    expect(connect).toHaveBeenCalledTimes(1)
+    let closed = false
+    const closing = old.close().then(() => { closed = true })
+    await entered.promise
+    replacement = createDH2DSession({} as HTMLElement)
+    await jest.advanceTimersByTimeAsync(3000)
+    await closing
+    expect(closed).toBe(true)
+    await jest.advanceTimersByTimeAsync(1000)
+    expect(globalDH2DSessions.value).toEqual([old])
+    expect(connect).toHaveBeenCalledTimes(1)
+    cleanup.resolve()
+    await jest.advanceTimersByTimeAsync(1000)
+    expect(globalDH2DSessions.value).toEqual([replacement])
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(disconnect).toHaveBeenCalledTimes(1)
+  } finally {
+    cleanup.resolve()
+    await old.close()
+    await replacement?.close()
+    restore()
+    restoreFetch()
+    globalDH2DSessions.value = []
+    jest.useRealTimers()
+  }
+})
+
+it.each(['failure', 'cancel', 'waiting'])('releases registration exactly once after initial %s', async mode => {
+  jest.useFakeTimers()
+  const { restore } = patchHooks()
+  const originalRelease = hooks.dh2d.afterClosingSession
+  const release = jest.fn(originalRelease)
+  const started = deferredCleanup()
+  const finish = deferredCleanup()
+  const fixture = voiceConnectionFixture()
+  const disconnect = jest.fn(async () => {})
+  hooks.dh2d.afterClosingSession = release
+  hooks.dh2d.getOrCreatePlayer = () => ({ video: {} } as any)
+  hooks.dh2d.connectVoiceClient = jest.fn(async () => {
+    started.resolve()
+    await finish.promise
+    if (mode === 'failure') throw new Error('initial failure')
+    return fixture.connection
+  }) as any
+  hooks.dh2d.disconnectVoiceClient = disconnect
+  const blocker = {} as any
+  globalDH2DSessions.value = mode === 'waiting' ? [blocker] : []
+  const session = createDH2DSession({} as HTMLElement, { voiceClient: { interaction_endpoint: 'ws://client' } } as any)
+  try {
+    if (mode !== 'waiting') await started.promise
+    const closing = session.close().catch(error => error)
+    if (mode !== 'waiting') {
+      await jest.advanceTimersByTimeAsync(3000)
+      expect(globalDH2DSessions.value).toEqual([session])
+      expect(release).not.toHaveBeenCalled()
+    }
+    finish.resolve()
+    await jest.advanceTimersByTimeAsync(0)
+    await closing
+    expect(globalDH2DSessions.value).toEqual(mode === 'waiting' ? [blocker] : [])
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(disconnect).toHaveBeenCalledTimes(mode === 'cancel' ? 1 : 0)
+    await session.close()
+    expect(release).toHaveBeenCalledTimes(1)
+    if (mode === 'waiting') {
+      globalDH2DSessions.value = []
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(hooks.dh2d.connectVoiceClient).not.toHaveBeenCalled()
+    }
+  } finally {
+    finish.resolve()
+    await session.close()
+    restore()
+    globalDH2DSessions.value = []
+    jest.useRealTimers()
+  }
+})

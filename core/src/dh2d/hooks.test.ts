@@ -1,6 +1,8 @@
+import { abortable } from '../abortable'
 import { config as rootConfig, setConfig } from '../config'
 import { events } from '../events'
 import { hooks } from '../hooks'
+import { globalDH2DSessions, untilSessionCountLessThanOrEqualTo } from './hooks'
 import { createDH2DSession } from './sessions'
 import { createVoiceMessageAdapter } from '../voice/adapter'
 import {
@@ -9,6 +11,32 @@ import {
   disconnectVoiceClient,
 } from './voiceConnections'
 import { DH2DSessionConfig, ResolvedDH2DSessionConfig } from './types'
+
+it('claims current shared capacity atomically and retires cancelled waiters', async () => {
+  jest.useFakeTimers()
+  const gate = untilSessionCountLessThanOrEqualTo(0)
+  const old = {} as any, first = {} as any, second = {} as any, cancelled = {} as any
+  const scopes = [abortable(), abortable(), abortable()]
+  globalDH2DSessions.value = [old]
+  const waits = [gate(first, scopes[0]), gate(second, scopes[1]), gate(cancelled, scopes[2])]
+  try {
+    globalDH2DSessions.value = []
+    scopes[2].abort()
+    await jest.advanceTimersByTimeAsync(1000)
+    expect(globalDH2DSessions.value).toEqual([first])
+    globalDH2DSessions.value = []
+    await jest.advanceTimersByTimeAsync(1000)
+    expect(globalDH2DSessions.value).toEqual([second])
+    await Promise.all(waits)
+    globalDH2DSessions.value = []
+    expect(jest.getTimerCount()).toBe(0)
+  } finally {
+    scopes.forEach(scope => scope.abort())
+    await Promise.all(waits)
+    globalDH2DSessions.value = []
+    jest.useRealTimers()
+  }
+})
 
 const DEFAULT_ENDPOINT = 'http://localhost:32101'
 

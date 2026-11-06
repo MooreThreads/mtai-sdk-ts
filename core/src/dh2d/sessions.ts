@@ -95,7 +95,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
     }
 
     let closed = false
-    let connRef: DH2DConnection | undefined = undefined
     const player = hooks.dh2d.getOrCreatePlayer(parent)
     const session: DH2DSession = {
         get sessionId() { return realConfig.sessionId },
@@ -111,9 +110,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             rootAbortable.abort()
             player.dispose?.()
             try {
-                if (connRef) {
-                    await hooks.dh2d.disconnect(rootLogger, connRef, player, rootAbortable)
-                }
                 await Promise.race([completed, new Promise(r => setTimeout(r, 3000))])
             } catch (e: any) {
                 rootLogger.error(e)
@@ -122,8 +118,6 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 }
                 evt.emit("statuschange", "failed")
                 throw e
-            } finally {
-                await hooks.dh2d.afterClosingSession(session)
             }
         },
         on,
@@ -140,7 +134,9 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
 
     function onMessage(message: DHOutputMessage) {
         if (message.type === "session_ended") {
-            session.close()
+            // close already logs failures; only explicit callers receive its
+            // rejection. Server events have no caller to observe that promise.
+            void session.close().catch(() => {})
         } else {
             if (realConfig.voiceClient != null && message.type === 'status_change') latestVoiceStatus = { ...message }
             evt.emit("message", message)
@@ -178,8 +174,15 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 : hooks.dh2d.disconnect
         let connection!: DH2DConnection
         let terminalStatus: 'closed' | 'failed' = 'closed'
+        let ownsConnection = false
+        const disconnectOwned = async () => {
+            if (!ownsConnection) return
+            ownsConnection = false
+            await disconnectHook(sessionLogger, connection, player, abortable())
+        }
         try {
             connection = await withChild(rootAbortable, (_) => connectHook(rootLogger, player, realConfig, _))
+            ownsConnection = true
             if (aborted) {
                 emitStatus("closed")
                 send = notConnected
@@ -197,7 +200,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             if (aborted) {
                 emitStatus("closed")
                 send = notConnected
-                await withChild(rootAbortable, (_) => disconnectHook(sessionLogger, connection, player, _))
+                await disconnectOwned()
                 return
             }
             emitStatus("connected")
@@ -214,7 +217,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 })
                 emitStatus("reconnecting")
                 send = enqueueMessage
-                await withChild(rootAbortable, _ => disconnectHook(sessionLogger, connection, player, _))
+                await disconnectOwned()
                 if (aborted) {
                     emitStatus("closed")
                     send = notConnected
@@ -227,6 +230,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                     return
                 }
                 connection = await withChild(rootAbortable, _ => connectHook(rootLogger, player, realConfig, _))
+                ownsConnection = true
                 realConfig.sessionId = connection.sessionId
                 sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
                 connection.on("message", onMessage)
@@ -244,9 +248,12 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         } finally {
             send = notConnected
             emitStatus(terminalStatus)
-            if (connection) disconnectHook(sessionLogger, connection, player, abortable())
+            await disconnectOwned()
         }
-    })()
+    })().finally(() => hooks.dh2d.afterClosingSession(session))
+    // The operation can fail before a caller closes the session. Observe it
+    // without changing the rejection seen by close's existing wait.
+    void completed.catch(() => {})
 
     return session
 }

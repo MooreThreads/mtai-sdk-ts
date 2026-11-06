@@ -35,9 +35,10 @@ export type VoiceClientConnection = DH2DConnection & {
   /**
    * Fences this connection generation: detaches the client websocket
    * callbacks, stops the microphone pipeline, and clears the video source,
-   * so traffic from a retired connection can never reach the app.
+   * so traffic from a retired connection can never reach the app. Fencing is
+   * synchronous; the returned completion joins owned asynchronous retirement.
    */
-  readonly dispose: () => void,
+  readonly dispose: () => void | Promise<void>,
 }
 
 const MAIN_VOICE_SESSION_ID = 'avatar-channel-session'
@@ -221,24 +222,18 @@ async function connectOnce(
   innerAbortable: Abortable,
 ): Promise<VoiceClientConnection> {
   const voiceConfig = config.voiceClient!
+  const offerController = new AbortController()
+  innerAbortable.onabort(() => offerController.abort())
+  const offers: Promise<void>[] = []
   const attemptLogger = logger.push((_, ...args) => _(`[attempt:${time}]`, ...args))
   attemptLogger.log('enter')
   let running = true
   innerAbortable.onabort(() => {
     running = false
   })
-  // Freeze the last rendered avatar frame over the video element when this
-  // attempt tears down, so the reconnect wait never exposes the black video
-  // node. The handler is registered before every teardown handler that clears
-  // the frame (`video.srcObject = null`), and abort handlers run in
-  // registration order, so the cover is drawn while the frame still exists.
-  // The next `canplay` hides it again.
+  let ownedStream: MediaStream | undefined
+  const ownsVideo = () => ownedStream !== undefined && elements.video.srcObject === ownedStream
   let videoVisible = false
-  innerAbortable.onabort(() => {
-    if (videoVisible) {
-      drawCover(attemptLogger, elements)
-    }
-  })
   const sessionId = voiceConfig.sessionId!
   const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId, sessionId))
   innerAbortable.onabort(() => {
@@ -398,8 +393,9 @@ async function connectOnce(
   })
 
   let acknowledgeProtocol!: () => void
-  const protocolReady = new Promise<void>(resolve => {
+  const protocolReady = new Promise<void>((resolve, reject) => {
     acknowledgeProtocol = resolve
+    innerAbortable.onabort(() => reject(new Error('connection aborted')))
   })
   function failProtocol(detail: string) {
     const protocolError = new VoiceProtocolError(`voice protocol handshake failed: ${detail}`)
@@ -415,12 +411,13 @@ async function connectOnce(
     }
   }
 
-  const videoReady = new Promise<void>(resolve => {
+  const videoReady = new Promise<void>((resolve, reject) => {
+    innerAbortable.onabort(() => reject(new Error('connection aborted')))
     const video = elements.video
     let videoTrack = false
     let audioTrack = false
     const onTrack = (event: RTCTrackEvent) => {
-      if (!running) return
+      if (!running || (ownedStream !== undefined && !ownsVideo())) return
       if (event.track.kind === 'video') {
         sessionLogger.log('video track added')
         videoTrack = true
@@ -429,24 +426,27 @@ async function connectOnce(
         audioTrack = true
       }
       if (videoTrack && audioTrack) {
-        video.srcObject = event.streams[0]
-        innerAbortable.onabort(() => video.srcObject = null)
+        ownedStream = event.streams[0]
+        video.srcObject = ownedStream
         sessionLogger.log('video source ready')
       }
     }
     pc.addEventListener('track', onTrack)
     innerAbortable.onabort(() => pc.removeEventListener('track', onTrack))
     const onCanPlay = () => {
+      if (!running || !ownsVideo()) return
       video.removeEventListener('canplay', onCanPlay)
       videoVisible = true
       const cover = elements.cover
       sessionLogger.log('video canplay')
       video.play()
       if (cover != null && cover.style.opacity != '0') {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          if (!running || !ownsVideo()) return
           cover.style.opacity = '0'
           resolve()
         }, 500)
+        innerAbortable.onabort(() => clearTimeout(timer))
       } else {
         resolve()
       }
@@ -456,6 +456,7 @@ async function connectOnce(
   })
 
   const avatarReady = new Promise<void>((resolve, reject) => {
+    innerAbortable.onabort(() => reject(new Error('connection aborted')))
     ws.onmessage = (event: MessageEvent) => {
       if (!running || disposed) return
       if (typeof event.data !== 'string') {
@@ -515,11 +516,12 @@ async function connectOnce(
         const encodedSessionId = encodeURIComponent(canonicalSessionId)
         const pcUrl = new URL(`${offerEndpoint.replace(/\/+$/, '')}/api/v1/session/${encodedSessionId}/offer`)
         pcUrl.protocol = pcUrl.protocol === 'https:' || pcUrl.protocol === 'wss:' ? 'https:' : 'http:'
-        connectPc(pc, pcUrl.toString())
-          .then(() => {
-            sessionLogger.log('pc connected')
-            resolve()
-          })
+        const offer = connectPc(pc, pcUrl.toString(), offerController.signal)
+        offers.push(offer)
+        offer.then(() => {
+          sessionLogger.log('pc connected')
+          resolve()
+        })
           .catch(reject)
         return
       }
@@ -585,31 +587,54 @@ async function connectOnce(
   // stopping the microphone prevents stale callbacks and queued events from a
   // retired connection from reaching the app; the video source is cleared so
   // no retired stream keeps rendering.
+  let retirement: Promise<void> | undefined
   const dispose = () => {
-    if (disposed) {
-      return
-    }
+    if (retirement) return retirement
     disposed = true
+    // Fence input immediately, but retain its asynchronous acquisition/stop
+    // retirement alongside signalling work. Abort callbacks cannot await it;
+    // attempt failure and normal disconnect both join this same result.
+    const inputRetirement = inputControl.dispose()
+    retirement = Promise.allSettled([avatarReady, videoReady, handshakeReady, protocolReady, ...offers, inputRetirement]).then(results => {
+      const inputResult = results[results.length - 1]
+      if (inputResult.status === 'rejected') throw inputResult.reason
+    })
+    void retirement.catch(() => {})
+    if (ownsVideo() && videoVisible) drawCover(attemptLogger, elements)
     running = false
     configuredBinding?.workflow.dispose()
     bindingUI?.dispose()
     receiverStats.stop()
     avatarPlayback?.stop()
-    inputControl.dispose()
     ws.onopen = null
     ws.onclose = null
     ws.onmessage = null
-    elements.video.srcObject = null
+    if (ownsVideo()) elements.video.srcObject = null
+    innerAbortable.abort()
+    return retirement
   }
   innerAbortable.onabort(dispose)
 
-  await Promise.race([
-    Promise.all([avatarReady, videoReady, handshakeReady, protocolReady]),
-    failure,
-  ])
-
-  if (!running || disposed) {
-    throw new Error('connection aborted')
+  try {
+    await Promise.race([
+      Promise.all([avatarReady, videoReady, handshakeReady, protocolReady]),
+      failure,
+    ])
+    if (!running || disposed || !ownsVideo()) {
+      throw new Error('connection aborted')
+    }
+  } catch (error) {
+    innerAbortable.abort()
+    // Cancellation fences continuations, but native/non-cooperative work still
+    // owns the attempt until it actually settles.
+    try {
+      await dispose()
+    } catch (retirementError) {
+      if (!(error instanceof VoiceProtocolError)) throw retirementError
+      // A failed cleanup must not turn a terminal protocol rejection into a retry.
+      attemptLogger.error(retirementError)
+    }
+    throw error
   }
   receiverStats.request({ performanceOriginMs: typeof performance !== 'undefined' ? performance.timeOrigin : null })
   const frameRequester = hooks.dh2d.createAvatarFrameRequester(elements.video)
@@ -657,7 +682,7 @@ function connectionBase(
   canonicalSessionId: string | undefined,
   adapter: VoiceMessageAdapter,
   stopPlayback: () => void,
-  dispose: () => void,
+  dispose: () => void | Promise<void>,
   failure: Promise<never>,
 ): Diff<VoiceClientConnection, { on: unknown, off: unknown }> {
   return {
@@ -679,8 +704,9 @@ function connectionBase(
  * by `dh_2d_session_ready` is used for the direct WebRTC offer exchange
  * through the configured `voiceClient.dh2d_endpoint`; no DH2D command websocket
  * is opened and no second avatar session is created.
- * The configured `connectTimeout` bounds each attempt so a stalled attempt
- * can never hang the connection loop.
+ * The configured `connectTimeout` triggers cancellation of a stalled attempt.
+ * Owned work must still retire before retrying; non-cooperative work can keep
+ * retirement pending without a forced cleanup deadline.
  */
 export async function connectVoiceClient(
   logger: Logger,
@@ -713,14 +739,28 @@ export async function connectVoiceClient(
             setTimeout(() => reject(new Error(`connect timeout after ${connectTimeout}ms`)), connectTimeout)
           }))
         }
-        return await Promise.race(tasks)
+        try {
+          return await Promise.race(tasks)
+        } catch (error) {
+          innerAbortable.abort()
+          const [attempt] = await Promise.allSettled([tasks[0]])
+          // Retirement may outlast the timer, but a protocol rejection stays terminal.
+          if (attempt.status === 'rejected' && attempt.reason instanceof VoiceProtocolError) throw attempt.reason
+          throw error
+        }
       })
     } catch (e: any) {
       rootLogger.error(e)
       if (e instanceof VoiceProtocolError || e.message === 'connection aborted') {
         throw e
       }
-      await new Promise(resolve => setTimeout(resolve, 2000))
+      await withChild(abortable, scope => new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 2000)
+        scope.onabort(() => {
+          clearTimeout(timer)
+          reject(new Error('connection aborted'))
+        })
+      }))
     }
   }
 }
@@ -752,21 +792,18 @@ export async function disconnectVoiceClient(
   logger.log('enter')
   void abortable
   try {
-    // Freeze the last rendered frame over the video node before `dispose()`
-    // clears the source: the reconnect wait must show the last frame, not the
-    // black video element. The next `canplay` hides the cover again.
-    drawCover(logger, elements)
+    // Only the owning connection may freeze or detach its media in dispose().
     // Fence the retired connection first: no stale websocket callback,
     // microphone batch, or queued event may reach the app afterwards.
-    connection.dispose?.()
+    const retirement = connection.dispose?.()
     connection.stopPlayback?.()
     connection.voice?.reset()
     connection.ws.close()
     connection.pc.close()
-    elements.video.srcObject = null
     for (const event of DHConnectionEventTypes) {
       connection.off(event)
     }
+    await retirement
   } catch (e) {
     logger.error(e)
     throw e

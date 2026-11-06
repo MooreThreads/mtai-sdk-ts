@@ -277,6 +277,22 @@ are dropped, and the video element's stream is cleared.
 
 ## Integrate Digital Human
 
+Legacy and voice-client sessions use the same global admission slot. On asset
+replacement, close the old session before creating its replacement. Closing
+cancels obsolete connection/retry work; the slot remains registered until that
+work and its owned disconnect cleanup actually finish. `session.close()` retains
+its existing 3-second caller wait: if that wait expires first, the caller may
+continue, but the replacement still waits for the old slot to be released.
+There is no forced release or new cleanup timeout. Pending WebRTC offer and
+signaling work is cancelled where supported and awaited until it actually
+retires; an uncooperative native/HTTP operation continues to hold the old slot.
+Owned microphone acquisition and audio-context shutdown are also part of cleanup,
+including after a connection has become ready. Caller-supplied media streams
+remain caller-owned. Cancellation settles SDK readiness waits even when signalling
+has already finished, so a missing `canplay` cannot strand a retiring session.
+A retired voice connection
+only clears its own video stream and cannot cover or detach replacement media.
+
 ```typescript
 import { createDH2DSession } from 'mtai';
 

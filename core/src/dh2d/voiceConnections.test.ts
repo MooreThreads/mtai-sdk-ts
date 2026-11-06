@@ -3,15 +3,19 @@ import { abortable, withChild } from '../abortable'
 import { setConfig } from '../config'
 import { createLogger } from '../log'
 import { hooks } from '../hooks'
+import { createDH2DSession } from './sessions'
+import { globalDH2DSessions } from './hooks'
+import { connect as connectLegacy } from './connections'
 import {
   connectVoiceClient,
   disconnectVoiceClient,
   sendVoiceClientMessage,
   voiceClientWebSocketUrl,
+  VoiceProtocolError,
 } from './voiceConnections'
 import { createVoiceMessageAdapter } from '../voice/adapter'
+import * as voiceMicrophone from '../voice/microphone'
 import { crc16 } from './turnStripe'
-import { createDH2DSession } from './sessions'
 
 class FakeEventTarget {
   private readonly listeners = new Map<string, Set<(_: any) => void>>()
@@ -81,6 +85,7 @@ class FakeRTCPeerConnection extends FakeEventTarget {
   addTransceiver(kind: string, init?: RTCRtpTransceiverInit) {
     this.transceivers.push({ kind, direction: init?.direction ?? 'sendrecv' })
   }
+  addTrack() {}
   async createOffer() { return this.localDescription }
   async setLocalDescription() { }
   async setRemoteDescription(description: any) { this.remoteDescription = description }
@@ -140,6 +145,13 @@ function fakeVideo() {
   video.srcObject = null
   video.play = jest.fn()
   return video as HTMLVideoElement & FakeEventTarget
+}
+
+function receiveAvatarTracks() {
+  const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
+  const stream = { id: 'native-media' }
+  pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
+  pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
 }
 
 function fakeCover() {
@@ -308,6 +320,47 @@ async function connectReady(config: any, video: any, canonicalSessionId = 'canon
   return { connection, ws, pc, scope }
 }
 
+function setupLegacyGc() {
+  const createObjectURL = window.URL.createObjectURL
+  const revokeObjectURL = window.URL.revokeObjectURL
+  window.URL.createObjectURL = () => 'blob:gc'
+  window.URL.revokeObjectURL = () => {}
+  const createElement = document.createElement.bind(document)
+  const spy = jest.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+    if (tag !== 'img') return createElement(tag)
+    const image: any = {}
+    Object.defineProperty(image, 'src', { get: () => 'blob:gc', set() { queueMicrotask(() => image.onerror?.()) } })
+    return image
+  }) as any)
+  return () => { spy.mockRestore(); window.URL.createObjectURL = createObjectURL; window.URL.revokeObjectURL = revokeObjectURL }
+}
+
+function setupRealSession(voice: boolean, video: any, audioInput: any = false) {
+  const original = { ...hooks.dh2d }
+  hooks.dh2d.defaultConfig = () => ({ ...createConfig({ connectTimeout: 60000 }), audioInput,
+    voiceClient: voice ? createConfig().voiceClient : undefined })
+  hooks.dh2d.getOrCreatePlayer = () => ({ video } as any)
+  hooks.dh2d.untilFailed = async (_l, _c, _p, _config, scope) => new Promise<void>(resolve => scope.onabort(resolve))
+  globalThis.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ logged_in: true, type: 'answer', sdp: 'answer' }) })) as any
+  globalDH2DSessions.value = []
+  return () => { Object.assign(hooks.dh2d, original); globalDH2DSessions.value = [] }
+}
+
+async function readyRealSession(video: any) {
+  await jest.advanceTimersByTimeAsync(0)
+  const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+  ws.open()
+  ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'real' }))
+  ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+  await jest.advanceTimersByTimeAsync(0)
+  const pc = FakeRTCPeerConnection.instances.find(peer => peer.transceivers.some(track => track.kind === 'video'))!
+  const stream = { id: 'real' }
+  pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
+  pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+  video.dispatch('canplay')
+  await jest.advanceTimersByTimeAsync(0)
+  return { ws, pc }
+}
 describe('version-only handshake', () => {
   test('native/media readiness still waits for a matching client acknowledgement on every connection', async () => {
     const globals = setupGlobals()
@@ -324,6 +377,7 @@ describe('version-only handshake', () => {
           ws.open()
           await flushMicrotasks()
           ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: `native-${attempt}` }))
+          receiveAvatarTracks()
           video.dispatch('canplay')
           await flushMicrotasks()
           await flushMicrotasks()
@@ -483,6 +537,69 @@ describe('version-only handshake', () => {
 })
 
 describe('protocol failure presentation', () => {
+  test.each(['offer', 'input-stop'])('protocol rejection stays terminal when %s retirement crosses the attempt timeout', async phase => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const pending = deferred<any>()
+    const entered = deferred<void>()
+    const showError = jest.fn()
+    const shutdownError = new Error('input shutdown failed')
+    const logError = jest.fn()
+    const testLogger = createLogger({ debug: logger.debug, log: logger.log, warn: logger.warn, error: logError })
+    const stop = jest.fn(() => pending.promise)
+    const microphoneFactory = phase === 'input-stop'
+      ? jest.spyOn(voiceMicrophone, 'createVoiceMicrophone').mockReturnValue({
+          ready: Promise.resolve(), stop, setOnPcm: jest.fn(),
+        })
+      : undefined
+    if (phase === 'offer') {
+      globalThis.fetch = jest.fn(async () => { entered.resolve(); return pending.promise }) as any
+    }
+    let settled = false
+    let failure: unknown
+    const result = connectVoiceClient(testLogger, { video: fakeVideo(), showError } as any,
+      createConfig({ connectTimeout: 60000, audioInput: phase === 'input-stop' }), scope)
+      .then(() => { settled = true }, error => { settled = true; failure = error })
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native' }))
+      await jest.advanceTimersByTimeAsync(0)
+      if (phase === 'offer') {
+        await entered.promise
+      } else {
+        ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+        ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 }))
+        await jest.advanceTimersByTimeAsync(0)
+        expect(microphoneFactory).toHaveBeenCalledTimes(1)
+      }
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 1 }))
+      await jest.advanceTimersByTimeAsync(60000)
+      expect(settled).toBe(false)
+      expect(ws.closed).toBe(true)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(showError).toHaveBeenLastCalledWith(expect.stringContaining('protocol version 2'))
+      if (phase === 'offer') pending.resolve({ json: async () => ({ type: 'answer', sdp: 'answer' }) })
+      else pending.reject(shutdownError)
+      await jest.advanceTimersByTimeAsync(2000)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(settled).toBe(true)
+      expect(failure).toBeInstanceOf(VoiceProtocolError)
+      if (phase === 'input-stop') {
+        expect(stop).toHaveBeenCalledTimes(1)
+        expect(logError.mock.calls.flat()).toContain(shutdownError)
+      }
+    } finally {
+      scope.abort()
+      pending.resolve({ json: async () => ({ type: 'answer', sdp: 'answer' }) })
+      await result
+      microphoneFactory?.mockRestore()
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
   test('rejects recovery mismatch while media readiness is still pending after a valid acknowledgement', async () => {
     const globals = setupGlobals()
     const scope = abortable()
@@ -540,6 +657,7 @@ describe('protocol failure presentation', () => {
       ws.send = data => { if (ws.readyState === FakeWebSocket.CLOSING) return; send(data) }
       if (phase === 'recovery') {
         ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+        receiveAvatarTracks()
         video.dispatchEvent(new Event('canplay'))
         await flushMicrotasks()
         await flushMicrotasks()
@@ -595,6 +713,7 @@ describe('protocol failure presentation', () => {
       await flushMicrotasks()
       first.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native-first' }))
       first.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      receiveAvatarTracks()
       video.dispatchEvent(new Event('canplay'))
       await flushMicrotasks(); await flushMicrotasks()
       expect(session.status).toBe('connected')
@@ -609,6 +728,7 @@ describe('protocol failure presentation', () => {
       await flushMicrotasks()
       next.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native-next' }))
       next.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      receiveAvatarTracks()
       video.dispatchEvent(new Event('canplay'))
       await flushMicrotasks(); await flushMicrotasks()
       expect(session.status).toBe('connected')
@@ -628,6 +748,527 @@ describe('protocol failure presentation', () => {
 })
 
 describe('connectVoiceClient', () => {
+  test.each(['close', 'timeout'])('legacy media readiness abort-settles after signalling success (%s)', async reason => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const restoreGc = setupLegacyGc()
+    const video = fakeVideo()
+    const listener = jest.spyOn(video, 'addEventListener')
+    const restoreSession = setupRealSession(false, video)
+    const old = createDH2DSession({} as HTMLElement)
+    let replacement: ReturnType<typeof createDH2DSession> | undefined
+    try {
+      await jest.advanceTimersByTimeAsync(0)
+      FakeWebSocket.instances[0].receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      await jest.advanceTimersByTimeAsync(0)
+      expect(FakeRTCPeerConnection.instances[0].remoteDescription).toBeDefined()
+      if (reason === 'close') {
+        const closing = old.close()
+        replacement = createDH2DSession({} as HTMLElement)
+        await jest.advanceTimersByTimeAsync(3000)
+        await closing
+        await jest.advanceTimersByTimeAsync(1000)
+        expect(globalDH2DSessions.value).toEqual([replacement])
+      } else {
+        await jest.advanceTimersByTimeAsync(60000)
+        expect(FakeRTCPeerConnection.instances[0].closed).toBe(true)
+        await jest.advanceTimersByTimeAsync(2000)
+        expect(FakeWebSocket.instances).toHaveLength(2)
+      }
+    } finally {
+      const closing = old.close()
+      // Release the original implementation's stranded video fixture on RED.
+      for (const call of listener.mock.calls as any[]) if (call[0] === 'canplay') call[1]()
+      await jest.advanceTimersByTimeAsync(3000)
+      await closing
+      const replacing = replacement?.close()
+      await jest.advanceTimersByTimeAsync(3000)
+      await replacing
+      restoreSession(); restoreGc(); globals.restore(); jest.useRealTimers()
+    }
+  })
+
+  test.each(['acquire', 'context'])('voice input retirement holds real shared slot while %s is pending', async phase => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const video = fakeVideo()
+    const restoreSession = setupRealSession(true, video, true)
+    const acquire = deferred<any>()
+    const closeContext = deferred<void>()
+    const stream = new FakeMicrophoneStream()
+    globals.setGetUserMedia(jest.fn(() => phase === 'acquire' ? acquire.promise : Promise.resolve(stream)))
+    const old = createDH2DSession({} as HTMLElement)
+    let replacement: ReturnType<typeof createDH2DSession> | undefined
+    try {
+      const { ws } = await readyRealSession(video)
+      expect(old.status).toBe('connected')
+      ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 }))
+      await jest.advanceTimersByTimeAsync(0)
+      if (phase === 'context') FakeMicrophoneAudioContext.instances[0].close = () => closeContext.promise
+      const closing = old.close()
+      replacement = createDH2DSession({} as HTMLElement)
+      await jest.advanceTimersByTimeAsync(3000)
+      await closing
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(globalDH2DSessions.value).toEqual([old])
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      acquire.resolve(stream)
+      closeContext.resolve()
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(stream.audioTracks[0].stop).toHaveBeenCalledTimes(1)
+      expect(globalDH2DSessions.value).toEqual([replacement])
+      expect(FakeWebSocket.instances).toHaveLength(2)
+    } finally {
+      acquire.resolve(stream); closeContext.resolve()
+      await jest.advanceTimersByTimeAsync(0)
+      await old.close()
+      await replacement?.close()
+      restoreSession(); globals.restore(); jest.useRealTimers()
+    }
+  })
+
+  test.each(['acquire', 'context'])('failed voice attempt joins input %s retirement without retrying', async phase => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const acquire = deferred<any>()
+    const closeContext = deferred<void>()
+    const stream = new FakeMicrophoneStream()
+    globals.setGetUserMedia(jest.fn(() => phase === 'acquire' ? acquire.promise : Promise.resolve(stream)))
+    const scope = abortable()
+    let settled = false
+    const result = connectVoiceClient(logger, { video: fakeVideo() } as any, createConfig({ audioInput: true }), scope)
+      .catch(error => error).then(value => { settled = true; return value })
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'failed' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      await jest.advanceTimersByTimeAsync(0)
+      ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 }))
+      await jest.advanceTimersByTimeAsync(0)
+      if (phase === 'context') FakeMicrophoneAudioContext.instances[0].close = () => closeContext.promise
+      scope.abort()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(settled).toBe(false)
+      expect(ws.closed).toBe(true)
+      acquire.resolve(stream); closeContext.resolve()
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(stream.audioTracks[0].stop).toHaveBeenCalledTimes(1)
+      await jest.advanceTimersByTimeAsync(2000)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    } finally {
+      scope.abort(); acquire.resolve(stream); closeContext.resolve()
+      await result
+      globals.restore(); jest.useRealTimers()
+    }
+  })
+
+  test('direct voice disposal fences synchronously and returns one input retirement promise', async () => {
+    const globals = setupGlobals()
+    const acquire = deferred<any>()
+    const stream = new FakeMicrophoneStream()
+    globals.setGetUserMedia(jest.fn(() => acquire.promise))
+    const video = fakeVideo()
+    const { connection, ws } = await connectReady(createConfig({ audioInput: true }), video)
+    let retirement: void | Promise<void>
+    try {
+      ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 }))
+      retirement = connection.dispose()
+      expect(retirement).toBeInstanceOf(Promise)
+      expect(connection.dispose()).toBe(retirement)
+      expect(ws.onmessage).toBeNull()
+      expect(video.srcObject).toBeNull()
+      const replacement = { id: 'replacement' }
+      video.srcObject = replacement as any
+      acquire.resolve(stream)
+      await retirement
+      expect(connection.dispose()).toBe(retirement)
+      expect(video.srcObject).toBe(replacement)
+      expect(stream.audioTracks[0].stop).toHaveBeenCalledTimes(1)
+    } finally {
+      acquire.resolve(stream)
+      await connection.dispose()
+      globals.restore()
+    }
+  })
+
+  test.each([false, true])('successful legacy close retires owned resources, preserving caller streams (external=%s)', async external => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const restoreGc = setupLegacyGc()
+    const stream = new FakeMicrophoneStream()
+    globals.setGetUserMedia(jest.fn(async () => stream))
+    const video = fakeVideo()
+    const restoreSession = setupRealSession(false, video, external ? stream : true)
+    const disconnect = hooks.dh2d.disconnect
+    let retired: any
+    hooks.dh2d.disconnect = async (...args) => { retired = args[1]; await disconnect(...args) }
+    const session = createDH2DSession({} as HTMLElement)
+    try {
+      const { ws, pc } = await readyRealSession(video)
+      expect(session.status).toBe('connected')
+      const closing = session.close()
+      await jest.advanceTimersByTimeAsync(0)
+      await closing
+      expect(stream.audioTracks[0].stop).toHaveBeenCalledTimes(external ? 0 : 1)
+      expect(ws.onmessage).toBeNull()
+      expect(video.srcObject).toBeNull()
+      expect(globalDH2DSessions.value).toEqual([])
+      expect(pc.closed).toBe(true)
+      const retirement = retired.dispose()
+      expect(retired.dispose()).toBe(retirement)
+      await retirement
+      const replacement = { id: 'replacement' }
+      video.srcObject = replacement as any
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [{ id: 'stale' }] })
+      video.dispatch('canplay')
+      expect(video.srcObject).toBe(replacement)
+      await session.close()
+      expect(stream.audioTracks[0].stop).toHaveBeenCalledTimes(external ? 0 : 1)
+    } finally {
+      const closing = session.close()
+      await jest.advanceTimersByTimeAsync(3000)
+      await closing
+      restoreSession(); restoreGc(); globals.restore(); jest.useRealTimers()
+    }
+  })
+
+  test.each(['voice', 'legacy', 'legacy-audio'])('real offer retirement holds the shared session slot (%s)', async mode => {
+    const voice = mode === 'voice'
+    const audio = mode === 'legacy-audio'
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const originalHooks = { ...hooks.dh2d }
+    const response = deferred<any>()
+    const entered = deferred<void>()
+    let offerSignal: AbortSignal | undefined
+    let offerCount = 0
+    globalThis.fetch = jest.fn(async (url: any, init?: any) => {
+      if (String(url).includes('/offer')) {
+        offerSignal = init?.signal
+        offerCount++
+        if (offerCount === (audio ? 2 : 1)) entered.resolve()
+        return response.promise
+      }
+      return { ok: true, json: async () => ({ logged_in: true }) }
+    }) as any
+    hooks.dh2d.defaultConfig = () => ({ ...createConfig(), audioInput: audio, voiceClient: voice ? createConfig().voiceClient : undefined })
+    hooks.dh2d.getOrCreatePlayer = () => ({ video: fakeVideo() } as any)
+    globalDH2DSessions.value = []
+    const old = createDH2DSession({} as HTMLElement)
+    let replacement: ReturnType<typeof createDH2DSession> | undefined
+    try {
+      await jest.advanceTimersByTimeAsync(0)
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      await entered.promise
+      const pc = FakeRTCPeerConnection.instances[0]
+      const closing = old.close()
+      replacement = createDH2DSession({} as HTMLElement)
+      await jest.advanceTimersByTimeAsync(3000)
+      await closing
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(globalDH2DSessions.value).toEqual([old])
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(offerSignal?.aborted).toBe(true)
+      if (audio) expect(FakeMicrophoneStream.instances[0].audioTracks[0].stop).toHaveBeenCalledTimes(1)
+      response.resolve({ json: async () => ({ type: 'answer', sdp: 'stale' }) })
+      await jest.advanceTimersByTimeAsync(1000)
+      expect(pc.remoteDescription).toBeUndefined()
+      expect(FakeRTCPeerConnection.instances.every(peer => peer.remoteDescription === undefined)).toBe(true)
+      expect(globalDH2DSessions.value).toEqual([replacement])
+      expect(FakeWebSocket.instances).toHaveLength(2)
+    } finally {
+      response.resolve({ json: async () => ({ type: 'answer', sdp: 'stale' }) })
+      await jest.advanceTimersByTimeAsync(0)
+      await old.close()
+      await replacement?.close()
+      Object.assign(hooks.dh2d, originalHooks)
+      globalDH2DSessions.value = []
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
+  test('legacy cancellation joins pending audio setup and retires its newly acquired microphone', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const microphone = deferred<any>()
+    const entered = deferred<void>()
+    globals.setGetUserMedia(jest.fn(() => { entered.resolve(); return microphone.promise }))
+    const scope = abortable()
+    let settled = false
+    const result = connectLegacy(logger, { video: fakeVideo() } as any, createConfig({ audioInput: true }), scope)
+      .catch(error => error).then(value => { settled = true; return value })
+    const stream = new FakeMicrophoneStream()
+    try {
+      FakeWebSocket.instances[0].receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      await entered.promise
+      scope.abort()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(settled).toBe(false)
+      microphone.resolve(stream)
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(stream.audioTracks[0].stop).toHaveBeenCalledTimes(1)
+      expect(FakeRTCPeerConnection.instances[1].remoteDescription).toBeUndefined()
+      expect(fetchCalls.some(call => call.url.endsWith('/offer/audio'))).toBe(false)
+    } finally {
+      scope.abort()
+      microphone.resolve(stream)
+      await result
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
+  test('the existing connect timeout cancels but joins non-cooperative offer work before retry', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const response = deferred<any>()
+    const entered = deferred<void>()
+    globalThis.fetch = jest.fn(async () => { entered.resolve(); return response.promise }) as any
+    const scope = abortable()
+    let settled = false
+    const result = connectVoiceClient(logger, { video: fakeVideo() } as any, createConfig({ connectTimeout: 60000 }), scope)
+      .catch(error => error).then(value => { settled = true; return value })
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      await entered.promise
+      await jest.advanceTimersByTimeAsync(60000)
+      expect(FakeRTCPeerConnection.instances[0].closed).toBe(true)
+      scope.abort()
+      await jest.advanceTimersByTimeAsync(2000)
+      expect(settled).toBe(false)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      response.resolve({ json: async () => ({ type: 'answer' }) })
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(FakeRTCPeerConnection.instances[0].remoteDescription).toBeUndefined()
+    } finally {
+      scope.abort()
+      response.resolve({ json: async () => ({}) })
+      await result
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
+  test('readiness still requires ownership after a deferred offer completes', async () => {
+    const globals = setupGlobals()
+    const response = deferred<any>()
+    const entered = deferred<void>()
+    globalThis.fetch = jest.fn(async () => { entered.resolve(); return response.promise }) as any
+    const scope = abortable()
+    const video = fakeVideo()
+    const result = connectVoiceClient(logger, { video } as any, createConfig(), scope).catch(error => error)
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      await entered.promise
+      const pc = FakeRTCPeerConnection.instances[0]
+      const stream = { id: 'old' }
+      pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+      video.dispatch('canplay')
+      const replacement = { id: 'replacement' }
+      video.srcObject = replacement as any
+      response.resolve({ json: async () => ({ type: 'answer', sdp: 'answer' }) })
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(video.srcObject).toBe(replacement)
+      expect(pc.closed).toBe(true)
+    } finally {
+      scope.abort()
+      response.resolve({ json: async () => ({}) })
+      await result
+      globals.restore()
+    }
+  })
+
+  test('pre-aborted entry allocates no transports', async () => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    scope.abort()
+    try {
+      await expect(connectVoiceClient(logger, { video: fakeVideo() } as any, createConfig(), scope))
+        .rejects.toThrow('connection aborted')
+      expect(FakeWebSocket.instances).toHaveLength(0)
+      expect(FakeRTCPeerConnection.instances).toHaveLength(0)
+    } finally { globals.restore() }
+  })
+
+  test('an attempt without tracks leaves the existing stream and cover untouched', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const stream = { id: 'existing' }
+    video.srcObject = stream as any
+    const cover = fakeCover()
+    cover.style.opacity = '1'
+    const result = connectVoiceClient(logger, { video, cover } as any, createConfig(), scope).catch(error => error)
+    try {
+      FakeWebSocket.instances[0].onclose?.()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(video.srcObject).toBe(stream)
+      scope.abort()
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(video.srcObject).toBe(stream)
+      expect(cover.style.opacity).toBe('1')
+      expect(cover.drawImage).not.toHaveBeenCalled()
+    } finally { scope.abort(); await result; globals.restore(); jest.useRealTimers() }
+  })
+
+  test('aborting a pending owner preserves the replacement stream and cover', async () => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const cover = fakeCover()
+    const result = connectVoiceClient(logger, { video, cover } as any, createConfig(), scope).catch(error => error)
+    try {
+      const pc = FakeRTCPeerConnection.instances[0]
+      const stream = { id: 'old' }
+      pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+      video.dispatch('canplay')
+      const replacement = { id: 'new' }
+      video.srcObject = replacement as any
+      scope.abort()
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(video.srcObject).toBe(replacement)
+      expect(cover.drawImage).not.toHaveBeenCalled()
+      expect(pc.closed).toBe(true)
+      expect(FakeWebSocket.instances[0].closed).toBe(true)
+    } finally { scope.abort(); await result; globals.restore() }
+  })
+
+  test.each(['abort', 'dispose', 'disconnect'])('stale %s cannot detach or cover replacement media', async action => {
+    const globals = setupGlobals()
+    const video = fakeVideo()
+    const cover = fakeCover()
+    try {
+      const old = await connectReady(createConfig(), video, 'old', cover)
+      const replacement = await connectReady(createConfig(), video, 'new', cover)
+      const stream = video.srcObject
+      cover.drawImage.mockClear()
+      if (action === 'abort') old.scope.abort()
+      if (action === 'dispose') old.connection.dispose()
+      if (action === 'disconnect') await disconnectVoiceClient(logger, old.connection, { video, cover } as any, abortable())
+      old.pc.dispatch('track', { track: { kind: 'audio' }, streams: [{ id: 'stale' }] })
+      expect(video.srcObject).toBe(stream)
+      expect(cover.drawImage).not.toHaveBeenCalled()
+      expect(cover.style.opacity).toBe('0')
+      replacement.connection.dispose()
+    } finally { globals.restore() }
+  })
+
+  test('foreign canplay cannot complete an attempt before its own tracks', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    let ready = false
+    const result = connectVoiceClient(logger, { video } as any, createConfig(), scope)
+      .then(() => { ready = true }, () => {})
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      video.srcObject = { id: 'foreign' } as any
+      video.dispatch('canplay')
+      await jest.advanceTimersByTimeAsync(0)
+      expect(ready).toBe(false)
+    } finally { scope.abort(); await result; globals.restore(); jest.useRealTimers() }
+  })
+
+  test('a delayed cover callback cannot reveal replacement media or announce old readiness', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const cover = fakeCover()
+    cover.style.opacity = '1'
+    let ready = false
+    const result = connectVoiceClient(logger, { video, cover } as any, createConfig(), scope)
+      .then(() => { ready = true }, () => {})
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      const pc = FakeRTCPeerConnection.instances[0]
+      const stream = { id: 'old' }
+      pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+      video.dispatch('canplay')
+      const replacement = { id: 'replacement' }
+      video.srcObject = replacement as any
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+      await jest.advanceTimersByTimeAsync(500)
+      expect(video.srcObject).toBe(replacement)
+      expect(cover.style.opacity).toBe('1')
+      expect(ready).toBe(false)
+    } finally { scope.abort(); await result; globals.restore(); jest.useRealTimers() }
+  })
+
+  test('asset replacement during retry backoff creates only the ready replacement transport', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const old = connectVoiceClient(logger, { video } as any, createConfig({ videoId: 'old' }), scope).catch(error => error)
+    let replacement: Awaited<ReturnType<typeof connectReady>> | undefined
+    try {
+      FakeWebSocket.instances[0].onclose?.()
+      await jest.advanceTimersByTimeAsync(0)
+      scope.abort()
+      expect(await old).toEqual(new Error('connection aborted'))
+      replacement = await connectReady(createConfig({ videoId: 'replacement' }), video)
+      const stream = video.srcObject
+      await jest.advanceTimersByTimeAsync(2000)
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      expect(FakeRTCPeerConnection.instances).toHaveLength(2)
+      expect(replacement.ws.url).toContain('video_id=replacement')
+      expect(video.srcObject).toBe(stream)
+      expect(replacement.ws.closed).toBe(false)
+    } finally {
+      scope.abort()
+      replacement?.connection.dispose()
+      await old
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
+  test.each([false, true])('cancels retry backoff terminally (failure race=%s)', async race => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    let failure: unknown
+    const result = connectVoiceClient(logger, { video: fakeVideo() } as any, createConfig(), scope)
+      .catch(error => { failure = error })
+    try {
+      FakeWebSocket.instances[0].onclose?.()
+      if (!race) await jest.advanceTimersByTimeAsync(0)
+      scope.abort()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(failure).toEqual(new Error('connection aborted'))
+      await jest.advanceTimersByTimeAsync(2000)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(FakeRTCPeerConnection.instances).toHaveLength(1)
+    } finally {
+      scope.abort()
+      await jest.advanceTimersByTimeAsync(2000)
+      await result
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
   test.each(['.', '..'])('rejects dot-only session identity %s in URL construction', sessionId => {
     expect(() => voiceClientWebSocketUrl('ws://client/ws', 'actor', sessionId))
       .toThrow('voice client sessionId must not be "." or ".."')
@@ -765,9 +1406,8 @@ describe('connectVoiceClient', () => {
       first.open()
       await flushMicrotasks()
       first.receive('{not-json')
-      await flushMicrotasks()
-      jest.advanceTimersByTime(2000)
-      await flushMicrotasks()
+      await jest.advanceTimersByTimeAsync(0)
+      await jest.advanceTimersByTimeAsync(2000)
       expect(FakeWebSocket.instances.length).toBe(2)
       scope.abort()
       await expect(connecting).rejects.toThrow('connection aborted')
@@ -790,9 +1430,8 @@ describe('connectVoiceClient', () => {
       first.open()
       await flushMicrotasks()
       first.receive(JSON.stringify({ type: 'dh_2d_session_ready' }))
-      await flushMicrotasks()
-      jest.advanceTimersByTime(2000)
-      await flushMicrotasks()
+      await jest.advanceTimersByTimeAsync(0)
+      await jest.advanceTimersByTimeAsync(2000)
       expect(FakeRTCPeerConnection.instances[0].transceivers).toEqual([])
       expect(FakeWebSocket.instances.length).toBe(2)
       scope.abort()
@@ -816,9 +1455,8 @@ describe('connectVoiceClient', () => {
       first.open()
       await flushMicrotasks()
       first.receive(JSON.stringify({ type: 'text.output.delta', text: 'too early' }))
-      await flushMicrotasks()
-      jest.advanceTimersByTime(2000)
-      await flushMicrotasks()
+      await jest.advanceTimersByTimeAsync(0)
+      await jest.advanceTimersByTimeAsync(2000)
       expect(FakeWebSocket.instances.length).toBe(2)
       scope.abort()
       await expect(connecting).rejects.toThrow('connection aborted')
@@ -841,9 +1479,8 @@ describe('connectVoiceClient', () => {
       first.open()
       await flushMicrotasks()
       first.receive(new ArrayBuffer(4))
-      await flushMicrotasks()
-      jest.advanceTimersByTime(2000)
-      await flushMicrotasks()
+      await jest.advanceTimersByTimeAsync(0)
+      await jest.advanceTimersByTimeAsync(2000)
       expect(FakeWebSocket.instances.length).toBe(2)
       scope.abort()
       await expect(connecting).rejects.toThrow('connection aborted')

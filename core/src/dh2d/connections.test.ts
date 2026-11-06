@@ -1,7 +1,59 @@
 import { abortable } from '../abortable'
 import { events } from '../events'
 import { createLogger } from '../log'
-import { untilFailed } from './connections'
+import { connect, untilFailed } from './connections'
+
+it('retires legacy attempt abort subscriptions across failed attempts and backoff', async () => {
+  jest.useFakeTimers()
+  const original = { WebSocket: globalThis.WebSocket, RTCPeerConnection: globalThis.RTCPeerConnection,
+    document: (globalThis as any).document, window: (globalThis as any).window }
+  const sockets: any[] = []
+  ;(globalThis as any).WebSocket = class {
+    onclose?: () => void
+    close() {}
+    constructor() { sockets.push(this) }
+  }
+  ;(globalThis as any).RTCPeerConnection = class {
+    close() {}
+    addEventListener() {}
+    removeEventListener() {}
+  }
+  ;(globalThis as any).document = { createElement: () => {
+    const image: any = {}
+    Object.defineProperty(image, 'src', { set() { queueMicrotask(() => image.onerror?.()) }, get() { return 'blob:gc' } })
+    return image
+  } }
+  ;(globalThis as any).window = { URL: { createObjectURL: () => 'blob:gc', revokeObjectURL: () => {} } }
+  const root = abortable()
+  const retained = new Set<() => void>()
+  const scope = { abort: root.abort, onabort: (handler: () => void) => {
+    retained.add(handler)
+    const remove = root.onabort(handler)
+    return () => { retained.delete(handler); remove() }
+  } }
+  const result = connect(logger, { video: { addEventListener() {}, removeEventListener() {} } } as any,
+    createConfig(), scope).catch(error => error)
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      expect(sockets).toHaveLength(attempt + 1)
+      sockets[attempt].onclose()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(retained.size).toBe(0)
+      if (attempt < 2) await jest.advanceTimersByTimeAsync(2000)
+    }
+    root.abort()
+    await jest.advanceTimersByTimeAsync(2000)
+    expect(await result).toEqual(new Error('connection aborted'))
+    expect(sockets).toHaveLength(3)
+    expect(retained.size).toBe(0)
+  } finally {
+    root.abort()
+    await jest.advanceTimersByTimeAsync(2000)
+    await result
+    Object.assign(globalThis, original)
+    jest.useRealTimers()
+  }
+})
 
 class FakeMediaStream {
   getAudioTracks() {
