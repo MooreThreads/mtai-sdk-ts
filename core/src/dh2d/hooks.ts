@@ -77,19 +77,35 @@ function getOrCreatePlayer(parent: HTMLElement): DH2DPlayerElements {
 export const globalDH2DSessions: Box<DH2DSession[]> = box([])
 
 export const untilSessionCountLessThanOrEqualTo = (count: number) => async (session: DH2DSession, abortable: Abortable) => {
-    const running = globalDH2DSessions.value.length <= count || await new Promise<boolean>(resolve => {
-        abortable.onabort(() => resolve(false))
-        abortable.onabort(globalDH2DSessions.on("value", sessions => {
-            setTimeout(() => {
-                if (sessions.length <= count) {
-                    resolve(true)
-                }
+    await new Promise<void>(resolve => {
+        let finished = false
+        const timers = new Set<ReturnType<typeof setTimeout>>()
+        let unsubscribe = () => {}
+        let unregister = () => {}
+        const finish = () => {
+            finished = true
+            unsubscribe()
+            unregister()
+            timers.forEach(clearTimeout)
+            timers.clear()
+            resolve()
+        }
+        const claim = () => {
+            if (finished || globalDH2DSessions.value.length > count) return
+            finish()
+            globalDH2DSessions.value = [...globalDH2DSessions.value, session]
+        }
+        unregister = abortable.onabort(finish)
+        if (finished) return
+        unsubscribe = globalDH2DSessions.on('value', () => {
+            const timer = setTimeout(() => {
+                timers.delete(timer)
+                claim()
             }, 1000)
-        }))
+            timers.add(timer)
+        })
+        claim()
     })
-    if (running) {
-        globalDH2DSessions.value = [...globalDH2DSessions.value, session]
-    }
 }
 
 async function afterClosingSession(session: DH2DSession) {

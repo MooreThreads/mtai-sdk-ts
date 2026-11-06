@@ -245,6 +245,15 @@ are dropped, and the video element's stream is cleared.
 
 ## Integrate Digital Human
 
+Legacy and voice-client sessions use the same global admission slot. On asset
+replacement, close the old session before creating its replacement. Closing
+cancels obsolete connection/retry work; the slot remains registered until that
+work and its owned disconnect cleanup actually finish. `session.close()` retains
+its existing 3-second caller wait: if that wait expires first, the caller may
+continue, but the replacement still waits for the old slot to be released.
+There is no forced release or new cleanup timeout. A retired voice connection
+only clears its own video stream and cannot cover or detach replacement media.
+
 ```typescript
 import { createDH2DSession } from 'mtai';
 

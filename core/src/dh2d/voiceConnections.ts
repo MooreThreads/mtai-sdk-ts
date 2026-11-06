@@ -223,18 +223,9 @@ async function connectOnce(
   innerAbortable.onabort(() => {
     running = false
   })
-  // Freeze the last rendered avatar frame over the video element when this
-  // attempt tears down, so the reconnect wait never exposes the black video
-  // node. The handler is registered before every teardown handler that clears
-  // the frame (`video.srcObject = null`), and abort handlers run in
-  // registration order, so the cover is drawn while the frame still exists.
-  // The next `canplay` hides it again.
+  let ownedStream: MediaStream | undefined
+  const ownsVideo = () => ownedStream !== undefined && elements.video.srcObject === ownedStream
   let videoVisible = false
-  innerAbortable.onabort(() => {
-    if (videoVisible) {
-      drawCover(attemptLogger, elements)
-    }
-  })
   const sessionId = voiceConfig.sessionId!
   const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId, sessionId))
   innerAbortable.onabort(() => {
@@ -400,7 +391,7 @@ async function connectOnce(
     let videoTrack = false
     let audioTrack = false
     const onTrack = (event: RTCTrackEvent) => {
-      if (!running) return
+      if (!running || (ownedStream !== undefined && !ownsVideo())) return
       if (event.track.kind === 'video') {
         sessionLogger.log('video track added')
         videoTrack = true
@@ -409,24 +400,27 @@ async function connectOnce(
         audioTrack = true
       }
       if (videoTrack && audioTrack) {
-        video.srcObject = event.streams[0]
-        innerAbortable.onabort(() => video.srcObject = null)
+        ownedStream = event.streams[0]
+        video.srcObject = ownedStream
         sessionLogger.log('video source ready')
       }
     }
     pc.addEventListener('track', onTrack)
     innerAbortable.onabort(() => pc.removeEventListener('track', onTrack))
     const onCanPlay = () => {
+      if (!running || !ownsVideo()) return
       video.removeEventListener('canplay', onCanPlay)
       videoVisible = true
       const cover = elements.cover
       sessionLogger.log('video canplay')
       video.play()
       if (cover != null && cover.style.opacity != '0') {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          if (!running || !ownsVideo()) return
           cover.style.opacity = '0'
           resolve()
         }, 500)
+        innerAbortable.onabort(() => clearTimeout(timer))
       } else {
         resolve()
       }
@@ -546,6 +540,7 @@ async function connectOnce(
       return
     }
     disposed = true
+    if (ownsVideo() && videoVisible) drawCover(attemptLogger, elements)
     running = false
     configuredBinding?.workflow.dispose()
     bindingUI?.dispose()
@@ -555,7 +550,8 @@ async function connectOnce(
     ws.onopen = null
     ws.onclose = null
     ws.onmessage = null
-    elements.video.srcObject = null
+    if (ownsVideo()) elements.video.srcObject = null
+    innerAbortable.abort()
   }
   innerAbortable.onabort(dispose)
 
@@ -673,7 +669,13 @@ export async function connectVoiceClient(
       if (e.message === 'connection aborted') {
         throw e
       }
-      await new Promise(resolve => setTimeout(resolve, 2000))
+      await withChild(abortable, scope => new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 2000)
+        scope.onabort(() => {
+          clearTimeout(timer)
+          reject(new Error('connection aborted'))
+        })
+      }))
     }
   }
 }
@@ -705,10 +707,7 @@ export async function disconnectVoiceClient(
   logger.log('enter')
   void abortable
   try {
-    // Freeze the last rendered frame over the video node before `dispose()`
-    // clears the source: the reconnect wait must show the last frame, not the
-    // black video element. The next `canplay` hides the cover again.
-    drawCover(logger, elements)
+    // Only the owning connection may freeze or detach its media in dispose().
     // Fence the retired connection first: no stale websocket callback,
     // microphone batch, or queued event may reach the app afterwards.
     connection.dispose?.()
@@ -716,7 +715,6 @@ export async function disconnectVoiceClient(
     connection.voice?.reset()
     connection.ws.close()
     connection.pc.close()
-    elements.video.srcObject = null
     for (const event of DHConnectionEventTypes) {
       connection.off(event)
     }

@@ -304,6 +304,185 @@ async function connectReady(config: any, video: any, canonicalSessionId = 'canon
 }
 
 describe('connectVoiceClient', () => {
+  test('pre-aborted entry allocates no transports', async () => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    scope.abort()
+    try {
+      await expect(connectVoiceClient(logger, { video: fakeVideo() } as any, createConfig(), scope))
+        .rejects.toThrow('connection aborted')
+      expect(FakeWebSocket.instances).toHaveLength(0)
+      expect(FakeRTCPeerConnection.instances).toHaveLength(0)
+    } finally { globals.restore() }
+  })
+
+  test('an attempt without tracks leaves the existing stream and cover untouched', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const stream = { id: 'existing' }
+    video.srcObject = stream as any
+    const cover = fakeCover()
+    cover.style.opacity = '1'
+    const result = connectVoiceClient(logger, { video, cover } as any, createConfig(), scope).catch(error => error)
+    try {
+      FakeWebSocket.instances[0].onclose?.()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(video.srcObject).toBe(stream)
+      scope.abort()
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(video.srcObject).toBe(stream)
+      expect(cover.style.opacity).toBe('1')
+      expect(cover.drawImage).not.toHaveBeenCalled()
+    } finally { scope.abort(); await result; globals.restore(); jest.useRealTimers() }
+  })
+
+  test('aborting a pending owner preserves the replacement stream and cover', async () => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const cover = fakeCover()
+    const result = connectVoiceClient(logger, { video, cover } as any, createConfig(), scope).catch(error => error)
+    try {
+      const pc = FakeRTCPeerConnection.instances[0]
+      const stream = { id: 'old' }
+      pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+      video.dispatch('canplay')
+      const replacement = { id: 'new' }
+      video.srcObject = replacement as any
+      scope.abort()
+      expect(await result).toEqual(new Error('connection aborted'))
+      expect(video.srcObject).toBe(replacement)
+      expect(cover.drawImage).not.toHaveBeenCalled()
+      expect(pc.closed).toBe(true)
+      expect(FakeWebSocket.instances[0].closed).toBe(true)
+    } finally { scope.abort(); await result; globals.restore() }
+  })
+
+  test.each(['abort', 'dispose', 'disconnect'])('stale %s cannot detach or cover replacement media', async action => {
+    const globals = setupGlobals()
+    const video = fakeVideo()
+    const cover = fakeCover()
+    try {
+      const old = await connectReady(createConfig(), video, 'old', cover)
+      const replacement = await connectReady(createConfig(), video, 'new', cover)
+      const stream = video.srcObject
+      cover.drawImage.mockClear()
+      if (action === 'abort') old.scope.abort()
+      if (action === 'dispose') old.connection.dispose()
+      if (action === 'disconnect') await disconnectVoiceClient(logger, old.connection, { video, cover } as any, abortable())
+      old.pc.dispatch('track', { track: { kind: 'audio' }, streams: [{ id: 'stale' }] })
+      expect(video.srcObject).toBe(stream)
+      expect(cover.drawImage).not.toHaveBeenCalled()
+      expect(cover.style.opacity).toBe('0')
+      replacement.connection.dispose()
+    } finally { globals.restore() }
+  })
+
+  test('foreign canplay cannot complete an attempt before its own tracks', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    let ready = false
+    const result = connectVoiceClient(logger, { video } as any, createConfig(), scope)
+      .then(() => { ready = true }, () => {})
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      video.srcObject = { id: 'foreign' } as any
+      video.dispatch('canplay')
+      await jest.advanceTimersByTimeAsync(0)
+      expect(ready).toBe(false)
+    } finally { scope.abort(); await result; globals.restore(); jest.useRealTimers() }
+  })
+
+  test('a delayed cover callback cannot reveal replacement media or announce old readiness', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const cover = fakeCover()
+    cover.style.opacity = '1'
+    let ready = false
+    const result = connectVoiceClient(logger, { video, cover } as any, createConfig(), scope)
+      .then(() => { ready = true }, () => {})
+    try {
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
+      const pc = FakeRTCPeerConnection.instances[0]
+      const stream = { id: 'old' }
+      pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+      video.dispatch('canplay')
+      const replacement = { id: 'replacement' }
+      video.srcObject = replacement as any
+      pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
+      await jest.advanceTimersByTimeAsync(500)
+      expect(video.srcObject).toBe(replacement)
+      expect(cover.style.opacity).toBe('1')
+      expect(ready).toBe(false)
+    } finally { scope.abort(); await result; globals.restore(); jest.useRealTimers() }
+  })
+
+  test('asset replacement during retry backoff creates only the ready replacement transport', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const old = connectVoiceClient(logger, { video } as any, createConfig({ videoId: 'old' }), scope).catch(error => error)
+    let replacement: Awaited<ReturnType<typeof connectReady>> | undefined
+    try {
+      FakeWebSocket.instances[0].onclose?.()
+      await jest.advanceTimersByTimeAsync(0)
+      scope.abort()
+      expect(await old).toEqual(new Error('connection aborted'))
+      replacement = await connectReady(createConfig({ videoId: 'replacement' }), video)
+      const stream = video.srcObject
+      await jest.advanceTimersByTimeAsync(2000)
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      expect(FakeRTCPeerConnection.instances).toHaveLength(2)
+      expect(replacement.ws.url).toContain('video_id=replacement')
+      expect(video.srcObject).toBe(stream)
+      expect(replacement.ws.closed).toBe(false)
+    } finally {
+      scope.abort()
+      replacement?.connection.dispose()
+      await old
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
+  test.each([false, true])('cancels retry backoff terminally (failure race=%s)', async race => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    let failure: unknown
+    const result = connectVoiceClient(logger, { video: fakeVideo() } as any, createConfig(), scope)
+      .catch(error => { failure = error })
+    try {
+      FakeWebSocket.instances[0].onclose?.()
+      if (!race) await jest.advanceTimersByTimeAsync(0)
+      scope.abort()
+      await jest.advanceTimersByTimeAsync(0)
+      expect(failure).toEqual(new Error('connection aborted'))
+      await jest.advanceTimersByTimeAsync(2000)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(FakeRTCPeerConnection.instances).toHaveLength(1)
+    } finally {
+      scope.abort()
+      await jest.advanceTimersByTimeAsync(2000)
+      await result
+      globals.restore()
+      jest.useRealTimers()
+    }
+  })
+
   test.each(['.', '..'])('rejects dot-only session identity %s in URL construction', sessionId => {
     expect(() => voiceClientWebSocketUrl('ws://client/ws', 'actor', sessionId))
       .toThrow('voice client sessionId must not be "." or ".."')

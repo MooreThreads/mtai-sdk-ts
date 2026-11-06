@@ -24,13 +24,17 @@ import { Abortable } from "./types"
 
 export function abortable(): Abortable {
     const handlers: Set<() => void> = new Set()
+    let aborted = false
     const abort = () => {
+        if (aborted) return
+        aborted = true
         const invoking = [...handlers]
         handlers.clear()
         invoking.forEach(_ => _())
     }
     const onabort = (handler: () => void) => {
-        handlers.add(handler)
+        if (aborted) handler()
+        else handlers.add(handler)
         return () => {
             handlers.delete(handler)
         }
@@ -48,12 +52,16 @@ export function child(parent: Abortable): [Abortable, () => void] {
 
 export async function withChild<T>(parent: Abortable, f: (child: Abortable) => Promise<T>): Promise<T> {
     const [childAbortable, unregister] = child(parent)
+    let aborted = false
+    const unsubscribe = childAbortable.onabort(() => { aborted = true })
     try {
-        const r = await f(childAbortable)
-        unregister()
-        return r
+        if (aborted) throw new Error('connection aborted')
+        return await f(childAbortable)
     } catch (e) {
         childAbortable.abort()
         throw e
+    } finally {
+        unsubscribe()
+        unregister()
     }
 }

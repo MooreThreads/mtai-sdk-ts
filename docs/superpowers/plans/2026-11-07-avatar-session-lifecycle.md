@@ -34,7 +34,7 @@
 
 ### A. Cancellation cannot revive a retired operation
 
-- [ ] Add a focused cancellation regression before implementation. A minimal real-API assertion is:
+- [x] Add a focused cancellation regression before implementation. A minimal real-API assertion is:
 
 ```ts
 import { abortable, withChild } from './abortable'
@@ -57,14 +57,14 @@ test('late abort subscribers observe terminal cancellation once', () => {
 })
 ```
 
-- [ ] Add an actual `connectVoiceClient` regression to the existing transport fixture: cause a socket failure; let the existing 2000ms retry wait begin with fake timers; abort its owning scope; assert terminal rejection and no second WebSocket/PC even after advancing that same existing retry interval. Also cover a failed attempt followed by cancellation before the catch continuation starts. Attach promise rejection observers immediately to avoid false unhandled-rejection failures.
-- [ ] Run `cd core && npm test -- --runInBand src/abortable.test.ts src/dh2d/voiceConnections.test.ts` and retain expected assertion failures under the evidence directory.
-- [ ] Implement terminal abort state and child cleanup. Preserve successful-child ownership semantics; unregister parent callbacks on success and failure. Prevent invoking child work after an already-aborted parent. Use the existing retry duration, with cancellation able to retire its wait and no new retry attempt after cancellation. Do not change connectTimeout, cover or reconnect timers.
-- [ ] Repeat the focused tests and save GREEN evidence.
+- [x] Add an actual `connectVoiceClient` regression to the existing transport fixture: cause a socket failure; let the existing 2000ms retry wait begin with fake timers; abort its owning scope; assert terminal rejection and no second WebSocket/PC even after advancing that same existing retry interval. Also cover a failed attempt followed by cancellation before the catch continuation starts. Attach promise rejection observers immediately to avoid false unhandled-rejection failures.
+- [x] Run `cd core && npm test -- --runInBand src/abortable.test.ts src/dh2d/voiceConnections.test.ts` and retain expected assertion failures under the evidence directory.
+- [x] Implement terminal abort state and child cleanup. Preserve successful-child ownership semantics; unregister parent callbacks on success and failure. Prevent invoking child work after an already-aborted parent. Use the existing retry duration, with cancellation able to retire its wait and no new retry attempt after cancellation. Do not change connectTimeout, cover or reconnect timers.
+- [x] Repeat the focused tests and save GREEN evidence.
 
 ### B. Real cleanup owns the existing shared slot
 
-- [ ] Use the real admission hooks and registry in tests. Control transport and disconnect completion with causal deferred promises, not a mocked global gate. The local helper is:
+- [x] Use the real admission hooks and registry in tests. Control transport and disconnect completion with causal deferred promises, not a mocked global gate. The local helper is:
 
 ```ts
 function deferred<T>() {
@@ -75,29 +75,29 @@ function deferred<T>() {
 }
 ```
 
-- [ ] For voice and legacy modes, admit an old session, close it, and hold its disconnect hook pending. Create a replacement and advance the existing 3000ms close wait and 1000ms gate notification delay using fake timers. Assert that the close caller can finish on its original schedule but the old registration remains and replacement connect has not run. Release cleanup; assert only then that registration transfers and replacement can connect.
-- [ ] Cover failure/cancellation before initial connect completes, queued-session cancellation, release exactly once, and two queued replacements waking together without exceeding the existing capacity. Avoid leaving intentionally blocked fixture operations unresolved after a test.
-- [ ] Run focused `sessions.test.ts`/`hooks.test.ts` and capture assertion failures before changing production lifecycle code.
-- [ ] Preserve this close caller expression and its location:
+- [x] For voice and legacy modes, admit an old session, close it, and hold its disconnect hook pending. Create a replacement and advance the existing 3000ms close wait and 1000ms gate notification delay using fake timers. Assert that the close caller can finish on its original schedule but the old registration remains and replacement connect has not run. Release cleanup; assert only then that registration transfers and replacement can connect.
+- [x] Cover failure/cancellation before initial connect completes, queued-session cancellation, release exactly once, and two queued replacements waking together without exceeding the existing capacity. Avoid leaving intentionally blocked fixture operations unresolved after a test.
+- [x] Run focused `sessions.test.ts`/`hooks.test.ts` and capture assertion failures before changing production lifecycle code.
+- [x] Preserve this close caller expression and its location:
 
 ```ts
 await Promise.race([completed, new Promise(r => setTimeout(r, 3000))])
 ```
 
   Move registration release out of the close caller's `finally` and attach it to real operation completion. Make `completed` include awaited disconnect cleanup; remove double-disconnect paths and the unusable unassigned connection reference as appropriate. Observe background rejection without hiding errors from a caller awaiting close. Keep the global hook shared by both transport choices.
-- [ ] In the existing gate, recheck the live registry and claim synchronously when an admission notification runs; do not admit from a stale captured array. Preserve the 1000ms notification delay and existing `count` parameter/capacity. Remove cancelled waiters/subscriptions and their pending callbacks without adding another queue or limit.
-- [ ] Repeat focused tests and save GREEN evidence.
+- [x] In the existing gate, recheck the live registry and claim synchronously when an admission notification runs; do not admit from a stale captured array. Preserve the 1000ms notification delay and existing `count` parameter/capacity. Remove cancelled waiters/subscriptions and their pending callbacks without adding another queue or limit.
+- [x] Repeat focused tests and save GREEN evidence.
 
 ### C. A stale attempt cannot mutate replacement media
 
-- [ ] Add tests with the existing fake video/cover and real voice connection implementation for:
+- [x] Add tests with the existing fake video/cover and real voice connection implementation for:
   1. Failed attempt before track arrival leaves an existing stream and cover unchanged.
   2. Attempt A owns stream A; after another owner attaches stream B, A's abort/dispose/explicit disconnect leaves B and its cover untouched.
   3. A foreign `canplay` event does not resolve A's readiness; stale track and delayed 500ms cover callbacks cannot mutate a replacement.
   4. Current owner's normal disconnect still closes its sockets, stops observation and clears its stream, preserving existing reconnect-cover behavior.
   5. Asset replacement during old retry backoff produces only the replacement's subsequent attempt and can reach its normal readiness path.
-- [ ] Run and retain RED evidence before production media changes.
-- [ ] Track the stream owned by each attempt, and check ownership before cleanup. The core predicate must distinguish “never attached” from an owned stream:
+- [x] Run and retain RED evidence before production media changes.
+- [x] Track the stream owned by each attempt, and check ownership before cleanup. The core predicate must distinguish “never attached” from an owned stream:
 
 ```ts
 let ownedStream: MediaStream | undefined
@@ -108,12 +108,12 @@ const clearOwnedVideo = () => {
 ```
 
   Use this invariant consistently for track attachment ownership, disposal, explicit disconnect, cover snapshots and delayed readiness/presentation callbacks. A connection that never attached media must not clear arbitrary media. Do not leave a second unconditional `srcObject = null` in explicit disconnect that bypasses the ownership-aware disposal.
-- [ ] Repeat focused tests and preserve GREEN evidence. Keep existing successful media/protocol tests intact; do not weaken assertions to accommodate regressions.
+- [x] Repeat focused tests and preserve GREEN evidence. Keep existing successful media/protocol tests intact; do not weaken assertions to accommodate regressions.
 
 ### D. Documentation, reviews and verification
 
-- [ ] Document that legacy and voice use one shared slot, that close still has its existing caller wait, and that a still-retiring operation holds the slot until it terminates. No forced release/new cleanup timeout is introduced.
-- [ ] Run from `core`:
+- [x] Document that legacy and voice use one shared slot, that close still has its existing caller wait, and that a still-retiring operation holds the slot until it terminates. No forced release/new cleanup timeout is introduced.
+- [x] Run from `core`:
 
 ```bash
 npm test -- --runInBand
@@ -121,6 +121,23 @@ npm run build
 ```
 
   Run `git diff --check` from the worktree. Save complete logs in the evidence directory. Compare counts and diagnostics against the baseline.
-- [ ] Self-review for every unguarded media mutation, retry entry after abort, premature permit release, ignored cleanup promise, dangling waiter, and changed timeout/limit. Commit only this task's files in this isolated branch.
+- [x] Self-review for every unguarded media mutation, retry entry after abort, premature permit release, ignored cleanup promise, dangling waiter, and changed timeout/limit. Commit only this task's files in this isolated branch.
 - [ ] Independent spec review first, then quality review. Fix findings with new regression tests where applicable and rerun affected/full verification.
 - [ ] Record final commit, file scope, test counts, remaining warnings and the fact this was not deployed. Verify the original dirty workspace was not edited by this task; report concurrent changes rather than overwriting them.
+
+### Implementation evidence
+
+- RED logs: `abortable-red.log` (3 failed assertions), `retry-red.log` (2),
+  `gate-red.log` (1), `session-red.log` (2), `media-red.log` (4),
+  `readiness-red.log` (2), all under the evidence directory above.
+- GREEN logs: `abortable-green.log`, `retry-green.log`, `session-green.log`,
+  `media-green.log`, `focused-green.log`; the latter covers all four focused suites.
+  Supplemental lifecycle/asset-replacement tests were added after these primary
+  RED/GREEN cycles to exercise the integrated behavior.
+- Final full verification: `full-green.log` — 21 suites / 385 tests PASS
+  (baseline: 20 / 363); `build-green.log` — TypeScript build PASS.
+- Existing ts-jest TS151002 diagnostics remain. Focused hook/session runs
+  reported Jest's open-handle notice; the final full run exited without that notice.
+- No timeout/capacity values changed, no extra manager, no legacy GC/audio redesign,
+  no dependency/lockfile changes, and no live-system actions. Only this isolated
+  worktree was edited. Independent spec and quality review remain for the parent.
