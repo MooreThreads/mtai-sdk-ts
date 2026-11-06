@@ -183,3 +183,46 @@ Follow-up evidence in the same directory:
   did not report open handles.
 - No new timeout, bounded wait, queue, capacity change, dependency change, GC
   redesign, deployment, push, publication, or original-worktree edits.
+
+### Second specification-review follow-up: complete retirement contract
+
+- [x] Independently abort-settle legacy media readiness after signalling has
+  fulfilled. Verify close/replacement and the existing 60000ms timeout followed
+  by the unchanged 2000ms retry cadence in that exact state.
+- [x] Keep successful legacy attempt cleanup on its returned connection and await
+  it from normal disconnect, including SDK-acquired microphone tracks and
+  transport/media listeners. Preserve caller-supplied streams and existing GC.
+- [x] Return one stable input-controller disposal promise. Join acquisition,
+  prior releases and asynchronous stop even when one rejects, before reporting
+  the retirement error.
+- [x] Preserve immediate voice fencing while propagating one idempotent
+  retirement completion through failed-attempt cleanup and normal disconnect.
+  Voice setup waiters now also settle independently on cancellation and are
+  joined alongside signalling and input retirement.
+- [x] Verify real connected voice sessions retain the real shared slot beyond
+  the unchanged 3-second caller wait for deferred getUserMedia and deferred
+  AudioContext.close; only actual retirement permits replacement admission.
+- [x] Verify pending (failed-attempt) input cleanup, direct disposal idempotence,
+  successful legacy disposal idempotence and caller-stream preservation.
+- [x] Full lifecycle self-review: pending signalling/media/input -> connected
+  resource ownership -> synchronous fencing -> awaited retirement -> slot release.
+  Abort callbacks remain synchronous notifications, not the completion contract;
+  owners explicitly join the returned retirement promises.
+- [ ] Parent reruns independent specification review, then quality review.
+
+Evidence in the same directory:
+- `pass3-input-red.log`: 2 failures (dispose discarded retirement).
+- `pass3-input-join-red.log`: after exposing disposal, 1 remaining failure proved
+  rejected stop could settle before acquisition; all-settled joining fixes it.
+- `pass3-lifecycle-red.log`: 6 failures covering legacy post-offer readiness,
+  connected voice acquisition/context retirement, and successful legacy cleanup.
+- `pass3-failed-input-red.log`: 2 regression failures with failed-attempt disposal
+  joining removed, verifying that connected-only cleanup is insufficient.
+- `pass3-lifecycle-green.log`: 11 selected tests passed.
+- `pass3-focused-green.log`: 4 suites / 140 tests PASS.
+- `pass3-full-green.log`: 22 suites / 411 tests PASS; `pass3-build-green.log`:
+  TypeScript build PASS. Existing TS151002 diagnostics remain; an earlier focused
+  run emitted Jest's delayed-exit notice, but the final focused and full runs did not.
+- `microphone.ts`, capture/sampling/routing policy, all timeout/cadence/capacity
+  values, dependency files and other worktrees are unchanged. No deployment,
+  publication, push or live-system commands were performed.

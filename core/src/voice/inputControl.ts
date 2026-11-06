@@ -15,6 +15,7 @@ export function createVoiceInputControl(options: {
   let captureGeneration = 0
   const retiredTurns = new Set<string>()
   let pendingRelease: Promise<void> | undefined
+  let retirement: Promise<void> | undefined
   function retireCapture() {
     captureGeneration++
     if (turn) retiredTurns.add(turn)
@@ -29,7 +30,10 @@ export function createVoiceInputControl(options: {
     microphone = undefined
     if (old) {
       const stopped = old.stop()
-      const operation = Promise.all([pendingRelease, old.ready.catch(() => undefined), stopped]).then(() => undefined)
+      const operation = Promise.allSettled([pendingRelease, old.ready.catch(() => undefined), stopped]).then(results => {
+        const failed = results.find(result => result.status === 'rejected')
+        if (failed?.status === 'rejected') throw failed.reason
+      })
       pendingRelease = operation
       void operation.then(() => { if (pendingRelease === operation) pendingRelease = undefined }, () => undefined)
     }
@@ -96,6 +100,12 @@ export function createVoiceInputControl(options: {
   }
   return { ingest,
     synchronize() { release(); current = undefined; retiredTurns.clear() },
-    dispose() { disposed = true; release() },
+    dispose() {
+      if (!retirement) {
+        disposed = true
+        retirement = Promise.resolve(release())
+      }
+      return retirement
+    },
   }
 }

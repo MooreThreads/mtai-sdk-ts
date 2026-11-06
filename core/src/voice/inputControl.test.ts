@@ -1,5 +1,45 @@
 import { createVoiceInputControl } from './inputControl'
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+test.each([false, true])('dispose returns one retirement joining acquisition and stop (stop rejects=%s)', async fails => {
+  jest.useFakeTimers()
+  const ready = deferred<void>()
+  const stopped = deferred<void>()
+  const error = new Error('stop failed')
+  const stop = jest.fn(() => stopped.promise)
+  const sent = jest.fn()
+  const control = createVoiceInputControl({ sessionId: 's', send: sent,
+    create: () => ({ ready: ready.promise, stop, setOnPcm() {} }) })
+  control.ingest({ type: 'audio.input.prepare', session_id: 's', state_epoch: 'e', source_revision: 1 })
+  const retirement = control.dispose()
+  let settled = false
+  const result = Promise.resolve(retirement).catch(failure => failure).then(value => { settled = true; return value })
+  try {
+    expect(retirement).toBeInstanceOf(Promise)
+    expect(control.dispose()).toBe(retirement)
+    if (fails) stopped.reject(error)
+    else stopped.resolve()
+    await jest.advanceTimersByTimeAsync(0)
+    expect(settled).toBe(false)
+    ready.resolve()
+    expect(await result).toBe(fails ? error : undefined)
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(sent).not.toHaveBeenCalled()
+    expect(control.dispose()).toBe(retirement)
+  } finally {
+    ready.resolve()
+    stopped.resolve()
+    await result
+    jest.useRealTimers()
+  }
+})
+
 test('prepare owns resources before capture; ack precedes PCM; stop gates without reopening', async () => {
   const sent: any[] = []
   let pcm!: (data: Uint8Array) => void

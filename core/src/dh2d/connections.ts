@@ -31,6 +31,17 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
         const offerController = new AbortController()
         innerAbortable.onabort(() => offerController.abort())
         const offers: Promise<void>[] = []
+        // Successful withChild calls detach from their parent. Keep the owned
+        // cleanup on the returned connection so normal disconnect retires the
+        // same scope as failed-attempt cleanup.
+        let retirement: Promise<void> | undefined
+        const dispose = () => {
+            if (!retirement) {
+                innerAbortable.abort()
+                retirement = Promise.allSettled(offers).then(() => undefined)
+            }
+            return retirement
+        }
         let running = true
         innerAbortable.onabort(() => {
             running = false
@@ -67,7 +78,8 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                 reject(new Error('connection aborted'))
             })
             const evt = events<DHConnectionEvents>()
-            const connection: Diff<DH2DConnection, typeof evt> = {
+            const connection: Diff<DH2DConnection, typeof evt> & { dispose: () => Promise<void> } = {
+                dispose,
                 get ws() { return ws },
                 get pc() { return pc },
                 get audioPc() { return audioPc },
@@ -127,7 +139,15 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                 }
             }
         })
-        const videoReady = new Promise<void>((resolve,) => {
+        innerAbortable.onabort(() => {
+            ws.onopen = null
+            ws.onclose = null
+            ws.onmessage = null
+        })
+        const videoReady = new Promise<void>((resolve, reject) => {
+            // Signalling may already have fulfilled; media readiness owns its
+            // own cancellation settlement rather than relying on pcConnected.
+            innerAbortable.onabort(() => reject(new Error('connection aborted')))
             const video = elements.video
             let videoTrack = false
             let audioTrack = false
@@ -141,24 +161,30 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                     audioTrack = true
                 }
                 if (videoTrack && audioTrack) {
-                    video.srcObject = event.streams[0]
-                    innerAbortable.onabort(() => video.srcObject = null)
+                    const stream = event.streams[0]
+                    video.srcObject = stream
+                    innerAbortable.onabort(() => {
+                        if (video.srcObject === stream) video.srcObject = null
+                    })
                     sessionLogger.log('video source ready')
                 }
             }
             pc.addEventListener("track", onTrack)
             innerAbortable.onabort(() => pc.removeEventListener("track", onTrack))
             const onCanPlay = () => {
+                if (!running) return
                 videoVisible = true
                 video.removeEventListener('canplay', onCanPlay)
                 const cover = elements.cover
                 sessionLogger.log('video canplay')
                 video.play()
                 if (cover != null && cover.style.opacity != "0") {
-                    setTimeout(() => {
+                    const timer = setTimeout(() => {
+                        if (!running) return
                         cover.style.opacity = "0"
                         resolve()
                     }, 500)
+                    innerAbortable.onabort(() => clearTimeout(timer))
                 } else {
                     resolve()
                 }
@@ -166,9 +192,11 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
             video.addEventListener("canplay", onCanPlay)
             innerAbortable.onabort(() => video.removeEventListener("canplay", onCanPlay))
         })
-        return await Promise.all([pcConnected, videoReady]).then(([connection, _]) => connection).catch(async e => {
-            innerAbortable.abort()
-            await Promise.allSettled(offers)
+        return await Promise.all([pcConnected, videoReady]).then(([connection, _]) => {
+            if (!running) throw new Error('connection aborted')
+            return connection
+        }).catch(async e => {
+            await dispose()
             sessionLogger.error(e)
             throw e
         }).finally(() => {
@@ -228,12 +256,14 @@ export async function disconnect(logger: Logger, connection: DH2DConnection, ele
     logger.log('enter')
     try {
         drawCover(logger, elements)
+        const retirement = (connection as DH2DConnection & { dispose?: () => Promise<void> }).dispose?.()
         connection.ws.close()
         connection.pc.close()
         connection.audioPc?.close()
         for (const events of DHConnectionEventTypes) {
             connection.off(events)
         }
+        await retirement
         await gc()
     } catch (e) {
         logger.error(e)

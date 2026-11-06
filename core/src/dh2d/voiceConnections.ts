@@ -33,9 +33,10 @@ export type VoiceClientConnection = DH2DConnection & {
   /**
    * Fences this connection generation: detaches the client websocket
    * callbacks, stops the microphone pipeline, and clears the video source,
-   * so traffic from a retired connection can never reach the app.
+   * so traffic from a retired connection can never reach the app. Fencing is
+   * synchronous; the returned completion joins owned asynchronous retirement.
    */
-  readonly dispose: () => void,
+  readonly dispose: () => void | Promise<void>,
 }
 
 const MAIN_VOICE_SESSION_ID = 'avatar-channel-session'
@@ -389,7 +390,8 @@ async function connectOnce(
     innerAbortable.onabort(() => reject(new Error('connection aborted')))
   })
 
-  const videoReady = new Promise<void>(resolve => {
+  const videoReady = new Promise<void>((resolve, reject) => {
+    innerAbortable.onabort(() => reject(new Error('connection aborted')))
     const video = elements.video
     let videoTrack = false
     let audioTrack = false
@@ -433,6 +435,7 @@ async function connectOnce(
   })
 
   const avatarReady = new Promise<void>((resolve, reject) => {
+    innerAbortable.onabort(() => reject(new Error('connection aborted')))
     ws.onmessage = (event: MessageEvent) => {
       if (!running || disposed) return
       if (typeof event.data !== 'string') {
@@ -539,23 +542,31 @@ async function connectOnce(
   // stopping the microphone prevents stale callbacks and queued events from a
   // retired connection from reaching the app; the video source is cleared so
   // no retired stream keeps rendering.
+  let retirement: Promise<void> | undefined
   const dispose = () => {
-    if (disposed) {
-      return
-    }
+    if (retirement) return retirement
     disposed = true
+    // Fence input immediately, but retain its asynchronous acquisition/stop
+    // retirement alongside signalling work. Abort callbacks cannot await it;
+    // attempt failure and normal disconnect both join this same result.
+    const inputRetirement = inputControl.dispose()
+    retirement = Promise.allSettled([avatarReady, videoReady, handshakeReady, ...offers, inputRetirement]).then(results => {
+      const inputResult = results[results.length - 1]
+      if (inputResult.status === 'rejected') throw inputResult.reason
+    })
+    void retirement.catch(() => {})
     if (ownsVideo() && videoVisible) drawCover(attemptLogger, elements)
     running = false
     configuredBinding?.workflow.dispose()
     bindingUI?.dispose()
     receiverStats.stop()
     avatarPlayback?.stop()
-    inputControl.dispose()
     ws.onopen = null
     ws.onclose = null
     ws.onmessage = null
     if (ownsVideo()) elements.video.srcObject = null
     innerAbortable.abort()
+    return retirement
   }
   innerAbortable.onabort(dispose)
 
@@ -571,7 +582,7 @@ async function connectOnce(
     innerAbortable.abort()
     // Cancellation fences continuations, but native/non-cooperative work still
     // owns the attempt until it actually settles.
-    await Promise.allSettled(offers)
+    await dispose()
     throw error
   }
   receiverStats.request({ performanceOriginMs: typeof performance !== 'undefined' ? performance.timeOrigin : null })
@@ -620,7 +631,7 @@ function connectionBase(
   canonicalSessionId: string | undefined,
   adapter: VoiceMessageAdapter,
   stopPlayback: () => void,
-  dispose: () => void,
+  dispose: () => void | Promise<void>,
 ): Diff<VoiceClientConnection, { on: unknown, off: unknown }> {
   return {
     get ws() { return ws },
@@ -727,7 +738,7 @@ export async function disconnectVoiceClient(
     // Only the owning connection may freeze or detach its media in dispose().
     // Fence the retired connection first: no stale websocket callback,
     // microphone batch, or queued event may reach the app afterwards.
-    connection.dispose?.()
+    const retirement = connection.dispose?.()
     connection.stopPlayback?.()
     connection.voice?.reset()
     connection.ws.close()
@@ -735,6 +746,7 @@ export async function disconnectVoiceClient(
     for (const event of DHConnectionEventTypes) {
       connection.off(event)
     }
+    await retirement
   } catch (e) {
     logger.error(e)
     throw e
