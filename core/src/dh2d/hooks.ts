@@ -64,12 +64,12 @@ function getOrCreatePlayer(parent: HTMLElement): DH2DPlayerElements {
         cover.style.width = "100%";
         cover.style.height = "100%";
     }
-    const dispose = createPlayerPresentation(container, video, cover, rootConfig().show_turn_id === true)
+    const presentation = createPlayerPresentation(container, video, cover, rootConfig().show_turn_id === true)
     return {
         video,
         cover,
         container,
-        dispose,
+        ...presentation,
     }
 }
 

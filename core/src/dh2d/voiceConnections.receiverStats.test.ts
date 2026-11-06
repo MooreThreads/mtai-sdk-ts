@@ -84,6 +84,7 @@ function validStripe(token: string): ImageData {
     const connecting = withChild(scope, child => connectVoiceClient(createLogger({ log: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }), { video } as any, config(), child))
     await Promise.resolve(); const ws = Ws.instances[0]; ws.open(); await Promise.resolve()
     ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical' }))
+    ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
     await Promise.resolve(); const pc = Pc.instances[0]
     pc.dispatch('track', { track: { kind: 'video' }, streams: [{}] }); pc.dispatch('track', { track: { kind: 'audio' }, streams: [{}] })
     video.dispatch('canplay')

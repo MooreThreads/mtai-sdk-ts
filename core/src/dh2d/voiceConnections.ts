@@ -4,7 +4,7 @@ import { events } from "../events"
 import { hooks } from "../hooks"
 import { connectPc } from "../pc"
 import { Abortable, DHConnectionEventTypes, DHConnectionEvents, DHInputMessage, Diff, Logger } from "../types"
-import { createVoiceMessageAdapter, VoiceClientFrame, VoiceMessageAdapter } from "../voice/adapter"
+import { createVoiceMessageAdapter, PROTOCOL_VERSION, VoiceClientFrame, VoiceMessageAdapter } from "../voice/adapter"
 import {
   createChannelBindingToolHandler,
   type VoiceClientToolCall,
@@ -28,6 +28,8 @@ import { createChannelBindingUI } from '../voice/channelBindingUI'
 export type VoiceClientConnection = DH2DConnection & {
   /** The voice protocol adapter owning this connection's session identity. */
   readonly voice: VoiceMessageAdapter,
+  /** Connection failure, observed during setup and by the active session. */
+  readonly failure: Promise<never>,
   /** Stops avatar playback observation. */
   readonly stopPlayback: () => void,
   /**
@@ -39,6 +41,8 @@ export type VoiceClientConnection = DH2DConnection & {
 }
 
 const MAIN_VOICE_SESSION_ID = 'avatar-channel-session'
+
+export class VoiceProtocolError extends Error {}
 
 function isFrontendToolCall(value: unknown): value is VoiceClientToolCall {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -259,16 +263,16 @@ async function connectOnce(
   const reportedOutputTurns = new Set<string>()
   const receiverStats = createReceiverStats({ pc, logger: attemptLogger })
   let disposed = false
+  let protocolConfirmed = false
 
-  // The native websocket throws on send() while still CONNECTING, so every
-  // client-protocol frame is sent through this gate: frames produced before
-  // OPEN queue in order behind the session handshake.
+  // Session traffic waits behind both socket OPEN and the client's exact
+  // version acknowledgement. Only session.start bypasses this gate.
   const outbound: (string | Uint8Array)[] = []
   const sendFrame = (data: string | Uint8Array) => {
     if (!running || disposed) {
       return
     }
-    if (ws.readyState !== WebSocket.OPEN) {
+    if (ws.readyState !== WebSocket.OPEN || !protocolConfirmed) {
       outbound.push(data)
       return
     }
@@ -277,7 +281,6 @@ async function connectOnce(
 
   const adapter = createVoiceMessageAdapter({
     sessionId,
-    controlledInput: true,
     onClientSend: frame => sendFrame(JSON.stringify(frame)),
   })
 
@@ -382,11 +385,10 @@ async function connectOnce(
       return
     }
     ws.send(JSON.stringify(adapter.startFrame()))
-    for (const data of outbound.splice(0)) {
-      ws.send(data)
-    }
   })
+  let rejectConnection!: (error: Error) => void
   const failure = new Promise<never>((_, reject) => {
+    rejectConnection = reject
     wsCloseHandlers.push(() => {
       if (running && !disposed) {
         reject(new Error('connection closed'))
@@ -394,6 +396,24 @@ async function connectOnce(
     })
     innerAbortable.onabort(() => reject(new Error('connection aborted')))
   })
+
+  let acknowledgeProtocol!: () => void
+  const protocolReady = new Promise<void>(resolve => {
+    acknowledgeProtocol = resolve
+  })
+  function failProtocol(detail: string) {
+    const protocolError = new VoiceProtocolError(`voice protocol handshake failed: ${detail}`)
+    // Readiness may already be fulfilled while media setup is still pending.
+    // Fatal errors belong to the attempt's failure path, not its ready signal.
+    rejectConnection(protocolError)
+    try {
+      elements.showError?.(`${protocolError.message}\nUpdate the client and SDK together, then reload.`)
+    } finally {
+      dispose()
+      ws.close()
+      pc.close()
+    }
+  }
 
   const videoReady = new Promise<void>(resolve => {
     const video = elements.video
@@ -443,6 +463,10 @@ async function connectOnce(
           reject(new Error('binary voice client frame arrived before session-ready'))
           return
         }
+        if (!protocolConfirmed) {
+          failProtocol('binary input before version acknowledgement')
+          return
+        }
         // Output PCM follows its audio.output.delta control frame; avatar playback
         // audio arrives through the WebRTC media path instead.
         evt.emit('audio', event.data)
@@ -460,6 +484,10 @@ async function connectOnce(
         message = parsed
       } catch {
         if (canonicalSessionId === undefined) reject(new Error('invalid voice client frame'))
+        return
+      }
+      if (message.type === 'error' && message.code === 'handshake_rejected') {
+        failProtocol(typeof message.message === 'string' ? message.message : 'client rejected session.start')
         return
       }
       if (canonicalSessionId === undefined && message.type !== 'dh_2d_session_ready') {
@@ -495,6 +523,23 @@ async function connectOnce(
           .catch(reject)
         return
       }
+      if (message.type === 'session.state') {
+        if (message.session_id !== sessionId || message.state !== 'connected'
+            || message.protocol_version !== PROTOCOL_VERSION) {
+          failProtocol(`expected connected session ${sessionId} with protocol version ${PROTOCOL_VERSION}; received ${String(message.protocol_version)}`)
+          return
+        }
+        protocolConfirmed = true
+        inputControl.synchronize()
+        adapter.ingest(message)
+        for (const data of outbound.splice(0)) ws.send(data)
+        acknowledgeProtocol()
+        return
+      }
+      if (!protocolConfirmed) {
+        failProtocol('expected versioned session.state acknowledgement')
+        return
+      }
       if (message.type === 'audio.output.start' && message.session_id === adapter.sessionId
           && typeof message.turn_id === 'string' && message.turn_id && !reportedOutputTurns.has(message.turn_id)) {
         acceptedOutputTurns.add(message.turn_id)
@@ -526,7 +571,6 @@ async function connectOnce(
         // adapter output and never a legacy start/finish presentation event.
         return
       }
-      if (message.type === 'session.state' && message.session_id === adapter.sessionId && message.state === 'connected') inputControl.synchronize()
       inputControl.ingest(message)
       for (const adapted of adapter.ingest(message)) {
         evt.emit('message', adapted)
@@ -560,7 +604,7 @@ async function connectOnce(
   innerAbortable.onabort(dispose)
 
   await Promise.race([
-    Promise.all([avatarReady, videoReady, handshakeReady]),
+    Promise.all([avatarReady, videoReady, handshakeReady, protocolReady]),
     failure,
   ])
 
@@ -596,13 +640,13 @@ async function connectOnce(
       playback.stop()
     }
     return {
-      ...connectionBase(ws, pc, canonicalSessionId, adapter, stopPlayback, dispose),
+      ...connectionBase(ws, pc, canonicalSessionId, adapter, stopPlayback, dispose, failure),
       ...(({ on, off }) => ({ on, off }))(evt),
     }
   }
   sessionLogger.warn('requestVideoFrameCallback unavailable; avatar turn decoding disabled')
   return {
-    ...connectionBase(ws, pc, canonicalSessionId, adapter, () => receiverStats.stop(), dispose),
+    ...connectionBase(ws, pc, canonicalSessionId, adapter, () => receiverStats.stop(), dispose, failure),
     ...(({ on, off }) => ({ on, off }))(evt),
   }
 }
@@ -614,12 +658,14 @@ function connectionBase(
   adapter: VoiceMessageAdapter,
   stopPlayback: () => void,
   dispose: () => void,
+  failure: Promise<never>,
 ): Diff<VoiceClientConnection, { on: unknown, off: unknown }> {
   return {
     get ws() { return ws },
     get pc() { return pc },
     get sessionId() { return canonicalSessionId ?? '' },
     voice: adapter,
+    failure,
     stopPlayback,
     dispose,
   }
@@ -653,6 +699,7 @@ export async function connectVoiceClient(
     },
   }
   validateVoiceSessionId(sessionConfig.voiceClient.sessionId)
+  elements.showError?.()
   const rootLogger = logger.push((_, ...args) => _('[voice-connect]', ...args))
   for (let i = 0; ; i++) {
     try {
@@ -670,7 +717,7 @@ export async function connectVoiceClient(
       })
     } catch (e: any) {
       rootLogger.error(e)
-      if (e.message === 'connection aborted') {
+      if (e instanceof VoiceProtocolError || e.message === 'connection aborted') {
         throw e
       }
       await new Promise(resolve => setTimeout(resolve, 2000))

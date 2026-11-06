@@ -56,9 +56,9 @@ ASR progress uses `asr_process`; a nonblank final also emits a confirmed user
 `message_record`, once per identified turn. It never emits `asr_session`:
 legacy consumers resubmit completed `asr_session` text, whereas voice ASR is
 already submitted by the service. A matching current `text.accepted` confirms
-the original typed text as a user record before its explicit talking status.
-Sleep remains an explicit `status_change` from `conversation.state:ended`;
-no model identifier or compensating status is invented. Commands retain their
+the original typed text as a user record, without inferring talking status.
+Listening, talking and sleeping come exclusively from validated `session.snapshot`;
+capture/conversation commands and typed acknowledgements never synthesize status. Commands retain their
 opaque fields for the existing application's command handler.
 Avatar playback boundaries are decoded from the DH2D video turn stripe and
 reported to the client as `playback.ended`.
@@ -68,6 +68,38 @@ and used unchanged in its session handshake; when omitted, it defaults to
 `avatar-channel-session`. Exactly `.` and `..` are rejected before connecting
 or retrying because browser URL normalization treats them as navigation.
 Other session IDs are unaffected, including IDs containing dots.
+
+### Exact wire-version handshake
+
+The SDK sends exactly `{"type":"session.start","session_id":"…","protocol_version":2}`.
+The client validates it and replies with its own
+`{"type":"session.state","session_id":"…","state":"connected","protocol_version":2}`.
+Only an exact version/session match completes the handshake; native avatar/media
+readiness alone is insufficient. Capture, frontend tool execution and queued
+session sends wait for this acknowledgement. Missing or unequal versions and
+client `handshake_rejected` errors fail explicitly, without protocol negotiation,
+downgrade or compatibility retries. Network retry timing is unchanged.
+
+There is no `capabilities` array or `controlledInput` compatibility mode. Upgrade
+the client and SDK together; wire version `2` is independent of SDK/package
+versions, and the existing client→server version is unchanged. Reconnect repeats
+the handshake; same-socket recovery validates the version before resetting the
+snapshot incarnation. Input preparation/capture acknowledgements, source fences,
+exclusive host-input ownership and `audioInput` settings are unchanged.
+
+A protocol mismatch displays an error panel in the center of the SDK video
+region, with mismatch details and guidance to update the client and SDK together
+and reload. This is terminal, including a mismatch during same-socket recovery:
+the SDK session becomes `failed` and rejects further input without waiting for
+the peer's close acknowledgement, even while the socket remains `CLOSING`.
+It closes its transports without automatically reconnecting. The panel stays
+visible and responsive to host resizing after transport cleanup clears the video
+source; an explicit new connection or player disposal clears it. Readiness and fatal-error
+signals are separate, so rejection also works after an initial acknowledgement
+while media setup is still pending. Ordinary network retries are unchanged.
+Custom `getOrCreatePlayer` implementations can supply the optional
+`DH2DPlayerElements.showError(message?)` callback; the default SDK player owns the
+centered accessible panel and renders its contents as plain text.
 
 ### Avatar frame timing diagnostics
 

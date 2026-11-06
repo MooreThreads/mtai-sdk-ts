@@ -6,7 +6,7 @@ import { hooks } from "../hooks"
 import { Abortable, Box, DHInputMessage, DHOutputMessage } from "../types"
 import { DH2DConnection, DH2DSession, DH2DSessionEvents, DH2DSessionEventTypes, DH2DSessionStatus } from "./types"
 import { DH2DSessionConfig, DH2DPlayerElements } from "./types"
-import { sendVoiceClientMessage, VoiceClientConnection } from "./voiceConnections"
+import { sendVoiceClientMessage, VoiceClientConnection, VoiceProtocolError } from "./voiceConnections"
 
 
 /**
@@ -176,8 +176,10 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             voiceClientMode
                 ? (logger, connection, elements, abortable) => hooks.dh2d.disconnectVoiceClient(logger, connection, elements, abortable)
                 : hooks.dh2d.disconnect
-        let connection: DH2DConnection = await withChild(rootAbortable, (_) => connectHook(rootLogger, player, realConfig, _))
+        let connection!: DH2DConnection
+        let terminalStatus: 'closed' | 'failed' = 'closed'
         try {
+            connection = await withChild(rootAbortable, (_) => connectHook(rootLogger, player, realConfig, _))
             if (aborted) {
                 emitStatus("closed")
                 send = notConnected
@@ -200,13 +202,16 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             }
             emitStatus("connected")
             while (!aborted) {
-                await withChild(rootAbortable, _ => hooks.dh2d.untilFailed(
-                    sessionLogger,
-                    connection,
-                    player,
-                    realConfig,
-                    _,
-                ))
+                await withChild(rootAbortable, child => {
+                    const transport = hooks.dh2d.untilFailed(sessionLogger, connection, player, realConfig, child)
+                    const failure = (connection as Partial<VoiceClientConnection>).failure
+                    // A protocol rejection must not wait for a peer's close reply.
+                    // Throwing here also aborts the losing transport observer.
+                    return failure ? Promise.race([transport, failure.catch(error => {
+                        if (error instanceof VoiceProtocolError) throw error
+                        // Ordinary connection failure retains the reconnect path.
+                    })]) : transport
+                })
                 emitStatus("reconnecting")
                 send = enqueueMessage
                 await withChild(rootAbortable, _ => disconnectHook(sessionLogger, connection, player, _))
@@ -233,10 +238,13 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 }
                 drainMessage(connection)
             }
+        } catch (error) {
+            if (!(error instanceof VoiceProtocolError)) throw error
+            terminalStatus = 'failed'
         } finally {
-            emitStatus("closed")
             send = notConnected
-            disconnectHook(sessionLogger, connection, player, abortable())
+            emitStatus(terminalStatus)
+            if (connection) disconnectHook(sessionLogger, connection, player, abortable())
         }
     })()
 

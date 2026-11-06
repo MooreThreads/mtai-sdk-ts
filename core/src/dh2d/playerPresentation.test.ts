@@ -26,6 +26,37 @@ function player(width = 640, height = 360) {
   return { ...elements, container }
 }
 
+test('player error is a literal accessible message that can be cleared and disposed', () => {
+  const p = player()
+  expect(p.container.querySelector('[role="alert"]')).toBeNull()
+  const message = 'Protocol mismatch <img src=x onerror=alert(1)>\nUpdate the client and SDK, then reload.'
+  p.showError?.(message)
+  const alert = p.container.querySelector('[role="alert"]')
+  expect(alert?.textContent).toBe(message)
+  expect(alert?.querySelector('img')).toBeNull()
+  p.showError?.('Replacement error')
+  expect(p.container.querySelectorAll('[role="alert"]')).toHaveLength(1)
+  expect(p.container.querySelector('[role="alert"]')?.textContent).toBe('Replacement error')
+  p.showError?.()
+  expect(p.container.querySelector('[role="alert"]')).toBeNull()
+  p.showError?.('Final error')
+  p.dispose!()
+  expect(p.container.querySelector('[role="alert"]')).toBeNull()
+  p.showError?.('Late error')
+  expect(p.container.querySelector('[role="alert"]')).toBeNull()
+})
+
+test('an obsolete player cannot replace the current player error', () => {
+  const old = player()
+  const next = dh2dHooks.getOrCreatePlayer(old.container.parentElement!)
+  next.showError?.('Current protocol error')
+  old.showError?.('Obsolete error')
+  old.dispose!()
+  expect(old.container.querySelectorAll('[role="alert"]')).toHaveLength(1)
+  expect(old.container.querySelector('[role="alert"]')?.textContent).toBe('Current protocol error')
+  next.dispose!()
+})
+
 test('default hides precisely the stripe with uniform bottom-centered scaling of video and cover', () => {
   const p = player()
   const layer = p.video.parentElement!

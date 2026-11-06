@@ -46,12 +46,11 @@ describe('legacy message contract', () => {
       .toEqual([{ type: 'audio_text', text: '乙' }])
   })
 
-  test('typed acknowledgement confirms original user text before explicit talking status, once', () => {
+  test('typed acknowledgement confirms original user text once without inferring status', () => {
     const adapter = create()
     adapter.textInput('typed')
     expect(adapter.ingest(frame('text.accepted', { request_id: 'request' }))).toEqual([
       { type: 'message_record', message: { role: 'user', content: 'typed' } },
-      { type: 'status_change', status: 'talking' },
     ])
     expect(adapter.ingest(frame('text.accepted', { request_id: 'request' }))).toEqual([])
   })

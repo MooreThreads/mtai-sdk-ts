@@ -11,6 +11,7 @@ import {
 } from './voiceConnections'
 import { createVoiceMessageAdapter } from '../voice/adapter'
 import { crc16 } from './turnStripe'
+import { createDH2DSession } from './sessions'
 
 class FakeEventTarget {
   private readonly listeners = new Map<string, Set<(_: any) => void>>()
@@ -26,10 +27,11 @@ class FakeEventTarget {
   }
 }
 
-class FakeWebSocket {
+class FakeWebSocket extends FakeEventTarget {
   static instances: FakeWebSocket[] = []
   static readonly CONNECTING = 0
   static readonly OPEN = 1
+  static readonly CLOSING = 2
   static readonly CLOSED = 3
   readonly url: string
   readonly sent: any[] = []
@@ -40,6 +42,7 @@ class FakeWebSocket {
   onclose: (() => void) | null = null
   closed = false
   constructor(url: string) {
+    super()
     this.url = url
     FakeWebSocket.instances.push(this)
   }
@@ -294,6 +297,8 @@ async function connectReady(config: any, video: any, canonicalSessionId = 'canon
   ws.open()
   await flushMicrotasks()
   ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: canonicalSessionId }))
+  ws.receive(JSON.stringify({ type: 'session.state', session_id: config.voiceClient.sessionId || 'avatar-channel-session',
+    state: 'connected', protocol_version: 2 }))
   await flushMicrotasks()
   const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
   pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
@@ -302,6 +307,325 @@ async function connectReady(config: any, video: any, canonicalSessionId = 'canon
   const connection = await connecting
   return { connection, ws, pc, scope }
 }
+
+describe('version-only handshake', () => {
+  test('native/media readiness still waits for a matching client acknowledgement on every connection', async () => {
+    const globals = setupGlobals()
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const scope = abortable()
+        const video = fakeVideo()
+        let ready = false
+        const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+        const settled = connecting.then(() => { ready = true }, () => undefined)
+        try {
+          await flushMicrotasks()
+          const ws = FakeWebSocket.instances[attempt]
+          ws.open()
+          await flushMicrotasks()
+          ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: `native-${attempt}` }))
+          video.dispatch('canplay')
+          await flushMicrotasks()
+          await flushMicrotasks()
+          expect(ready).toBe(false)
+          expect(ws.sent.map(value => JSON.parse(value))).toEqual([
+            { type: 'session.start', session_id: 'voice-1', protocol_version: 2 },
+          ])
+          ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+          const connection = await connecting
+          expect(connection.sessionId).toBe(`native-${attempt}`)
+          await disconnectVoiceClient(logger, connection, { video }, abortable())
+        } finally {
+          scope.abort()
+          await settled
+        }
+      }
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test.each([
+    {}, { protocol_version: 1 }, { protocol_version: '2' }, { protocol_version: true },
+    { protocol_version: 2, session_id: 'foreign' },
+  ])('fails explicitly without retrying an invalid acknowledgement %j', async fields => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    let failure: Error | undefined
+    const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+    const settled = connecting.catch(error => { failure = error })
+    try {
+      await flushMicrotasks()
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      await flushMicrotasks()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', ...fields }))
+      video.dispatch('canplay')
+      await flushMicrotasks()
+      await flushMicrotasks()
+      expect(failure?.message).toMatch(/voice protocol handshake/)
+      expect(ws.closed).toBe(true)
+      expect(FakeRTCPeerConnection.instances[0].closed).toBe(true)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(FakeMicrophoneStream.instances).toHaveLength(0)
+    } finally {
+      scope.abort()
+      await settled
+      globals.restore()
+    }
+  })
+
+  test('surfaces client handshake rejection before native setup without a compatibility retry', async () => {
+    jest.useFakeTimers()
+    const globals = setupGlobals()
+    const scope = abortable()
+    let failure: Error | undefined
+    const connecting = withChild(scope, child => connectVoiceClient(logger, { video: fakeVideo() }, createConfig(), child))
+    const settled = connecting.catch(error => { failure = error })
+    try {
+      await flushMicrotasks()
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      await flushMicrotasks()
+      ws.receive(JSON.stringify({ type: 'error', code: 'handshake_rejected', message: 'protocol version 3 is required' }))
+      await flushMicrotasks()
+      await flushMicrotasks()
+      expect(failure?.message).toBe('voice protocol handshake failed: protocol version 3 is required')
+      expect(ws.closed).toBe(true)
+      expect(fetchCalls).toEqual([])
+    } finally {
+      // Drain only the existing retry timer if the implementation regresses.
+      jest.advanceTimersByTime(2000)
+      await flushMicrotasks()
+      scope.abort()
+      await settled
+      jest.useRealTimers()
+      globals.restore()
+    }
+  })
+
+  test.each([
+    { type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 },
+    { type: 'tool.call', session_id: 'voice-1', turn_id: 't', call_id: 'c', name: 'bind_channel', arguments: {} },
+  ])('does not execute %s before the version acknowledgement', async frame => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    const frontendToolHandler = jest.fn(async () => ({ ok: true, result: {} }))
+    let failure: Error | undefined
+    const connecting = withChild(scope, child => connectVoiceClient(logger, { video },
+      createConfig({ audioInput: true, voiceClient: { frontendToolHandler } }), child))
+    const settled = connecting.catch(error => { failure = error })
+    try {
+      await flushMicrotasks()
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      await flushMicrotasks()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native' }))
+      ws.receive(JSON.stringify(frame))
+      video.dispatch('canplay')
+      await flushMicrotasks()
+      await flushMicrotasks()
+      expect(failure?.message).toMatch(/voice protocol handshake/)
+      expect(FakeMicrophoneStream.instances).toHaveLength(0)
+      expect(frontendToolHandler).not.toHaveBeenCalled()
+      expect(ws.sent.map(value => JSON.parse(value)).map(value => value.type)).toEqual(['session.start'])
+    } finally {
+      scope.abort()
+      await settled
+      globals.restore()
+    }
+  })
+  test('same-socket recovery validates the version before accepting a replacement snapshot epoch', async () => {
+    const globals = setupGlobals()
+    const video = fakeVideo()
+    const { connection, ws, scope } = await connectReady(createConfig(), video)
+    try {
+      const messages: any[] = []
+      connection.on('message', message => messages.push(message))
+      const state = { conversation: { state: 'ended', phase: 'idle' },
+        audio_input: { source: 'xunfei', status: 'ready', source_revision: 1, capture_turn_id: null } }
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'old', revision: 9, state }))
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'new', revision: 0, state }))
+      expect(messages).toHaveLength(1)
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'new', revision: 0, state }))
+      expect(messages).toEqual([
+        { type: 'status_change', status: 'sleeping' }, { type: 'status_change', status: 'sleeping' },
+      ])
+      expect(FakeMicrophoneStream.instances).toHaveLength(0)
+      expect(ws.sent).toHaveLength(1)
+    } finally {
+      await disconnectVoiceClient(logger, connection, { video }, abortable())
+      scope.abort()
+      globals.restore()
+    }
+  })
+
+  test('a mismatched recovery acknowledgement closes the already-connected transport', async () => {
+    const globals = setupGlobals()
+    const video = fakeVideo()
+    const { connection, ws, pc, scope } = await connectReady(createConfig({ audioInput: true }), video)
+    try {
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 1 }))
+      ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'new', source_revision: 1 }))
+      expect(ws.closed).toBe(true)
+      expect(pc.closed).toBe(true)
+      expect(FakeMicrophoneStream.instances).toHaveLength(0)
+    } finally {
+      await disconnectVoiceClient(logger, connection, { video }, abortable())
+      scope.abort()
+      globals.restore()
+    }
+  })
+})
+
+describe('protocol failure presentation', () => {
+  test('rejects recovery mismatch while media readiness is still pending after a valid acknowledgement', async () => {
+    const globals = setupGlobals()
+    const scope = abortable()
+    const video = fakeVideo()
+    let failure: Error | undefined
+    const connecting = withChild(scope, child => connectVoiceClient(logger, { video }, createConfig(), child))
+    const settled = connecting.catch(error => { failure = error })
+    try {
+      await flushMicrotasks()
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      await flushMicrotasks()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      await flushMicrotasks()
+      // A prior version acknowledgement cannot consume the fatal-error path.
+      // No canplay event has arrived, so connection setup is still pending.
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 1 }))
+      await flushMicrotasks()
+      await flushMicrotasks()
+      expect(failure?.message ?? 'connection still pending').toMatch(/voice protocol handshake failed/)
+      expect(ws.closed).toBe(true)
+      expect(FakeRTCPeerConnection.instances[0].closed).toBe(true)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    } finally {
+      scope.abort()
+      await settled
+      globals.restore()
+    }
+  })
+
+  test.each(['initial', 'recovery'])('%s mismatch leaves a visible error and a failed SDK session without reconnecting', async phase => {
+    const globals = setupGlobals()
+    const originalHooks = { ...hooks.dh2d }
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    hooks.dh2d.defaultConfig = () => createConfig()
+    hooks.dh2d.beforeConnectingSession = async () => undefined
+    hooks.dh2d.afterClosingSession = async () => undefined
+    const session = createDH2DSession(parent, createConfig())
+    const video = parent.querySelector('video')!
+    video.play = jest.fn()
+    const statuses: string[] = []
+    session.on('statuschange', status => statuses.push(status))
+    try {
+      await flushMicrotasks()
+      const ws = FakeWebSocket.instances[0]
+      ws.open()
+      await flushMicrotasks()
+      ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native' }))
+      // A browser may stay CLOSING while the peer delays its close reply.
+      // Its send() then silently discards data instead of throwing.
+      const send = ws.send.bind(ws)
+      ws.close = () => { ws.closed = true; ws.readyState = FakeWebSocket.CLOSING }
+      ws.send = data => { if (ws.readyState === FakeWebSocket.CLOSING) return; send(data) }
+      if (phase === 'recovery') {
+        ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+        video.dispatchEvent(new Event('canplay'))
+        await flushMicrotasks()
+        await flushMicrotasks()
+        expect(session.status).toBe('connected')
+      }
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 1 }))
+      // Failure must reach the session without a transport-close notification.
+      await flushMicrotasks()
+      await flushMicrotasks()
+      const alert = parent.querySelector('[role="alert"]')
+      expect(alert?.textContent).toContain('protocol version 2')
+      expect(alert?.textContent).toContain('received 1')
+      expect(alert?.textContent).toMatch(/update.*client.*SDK/i)
+      expect(session.status).toBe('failed')
+      expect(statuses).toContain('failed')
+      expect(statuses).not.toContain('reconnecting')
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(ws.closed).toBe(true)
+      expect(FakeRTCPeerConnection.instances[0].closed).toBe(true)
+      expect(FakeMicrophoneStream.instances).toHaveLength(0)
+      await expect(Promise.resolve().then(() => session.send({ type: 'input', text: 'not admitted' }))).rejects.toThrow()
+      ws.dispatch('close')
+      await flushMicrotasks()
+      expect(session.status).toBe('failed')
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      await session.close()
+      expect(parent.querySelector('[role="alert"]')).toBeNull()
+    } finally {
+      await session.close().catch(() => undefined)
+      Object.assign(hooks.dh2d, originalHooks)
+      parent.remove()
+      globals.restore()
+    }
+  })
+
+  test('ordinary socket closure still reconnects and delivers input on the replacement connection', async () => {
+    const globals = setupGlobals()
+    const originalHooks = { ...hooks.dh2d }
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    hooks.dh2d.defaultConfig = () => createConfig()
+    hooks.dh2d.beforeConnectingSession = async () => undefined
+    hooks.dh2d.afterClosingSession = async () => undefined
+    const session = createDH2DSession(parent, createConfig())
+    const video = parent.querySelector('video')!
+    video.play = jest.fn()
+    const statuses: string[] = []
+    session.on('statuschange', status => statuses.push(status))
+    try {
+      await flushMicrotasks()
+      const first = FakeWebSocket.instances[0]
+      first.open()
+      await flushMicrotasks()
+      first.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native-first' }))
+      first.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      video.dispatchEvent(new Event('canplay'))
+      await flushMicrotasks(); await flushMicrotasks()
+      expect(session.status).toBe('connected')
+      first.close()
+      first.onclose?.()
+      first.dispatch('close')
+      await flushMicrotasks(); await flushMicrotasks()
+      expect(statuses).toContain('reconnecting')
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      const next = FakeWebSocket.instances[1]
+      next.open()
+      await flushMicrotasks()
+      next.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native-next' }))
+      next.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      video.dispatchEvent(new Event('canplay'))
+      await flushMicrotasks(); await flushMicrotasks()
+      expect(session.status).toBe('connected')
+      expect(statuses).not.toContain('failed')
+      expect(parent.querySelector('[role="alert"]')).toBeNull()
+      await session.send({ type: 'input', text: 'replacement input' })
+      expect(next.sent.map(value => JSON.parse(value))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'text.input', text: 'replacement input' }),
+      ]))
+    } finally {
+      await session.close().catch(() => undefined)
+      Object.assign(hooks.dh2d, originalHooks)
+      parent.remove()
+      globals.restore()
+    }
+  })
+})
 
 describe('connectVoiceClient', () => {
   test.each(['.', '..'])('rejects dot-only session identity %s in URL construction', sessionId => {
@@ -389,9 +713,10 @@ describe('connectVoiceClient', () => {
       await flushMicrotasks()
       expect(ws.prematureSends).toEqual([])
       expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
-        { type: 'session.start', session_id: 'voice-1', protocol_version: 2, capabilities: ['session-snapshot-v1', 'audio-input-control-v1'] },
+        { type: 'session.start', session_id: 'voice-1', protocol_version: 2 },
       ])
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
       await flushMicrotasks()
       const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
       pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
@@ -548,7 +873,7 @@ describe('connectVoiceClient', () => {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig(), video)
       expect(JSON.parse(ws.sent[0])).toEqual({
-        type: 'session.start', session_id: 'voice-1', protocol_version: 2, capabilities: ['session-snapshot-v1', 'audio-input-control-v1'],
+        type: 'session.start', session_id: 'voice-1', protocol_version: 2,
       })
       expect(FakeWebSocket.instances.map(_ => _.url)).toEqual([
         'ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai',
@@ -1231,6 +1556,7 @@ describe('connectVoiceClient', () => {
       ws.open()
       await flushMicrotasks()
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
       await flushMicrotasks()
       ws.receive(JSON.stringify({ type: 'audio.output.start', session_id: 'voice-1', turn_id: 'B2' }))
       ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))

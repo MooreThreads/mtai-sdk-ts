@@ -1,4 +1,4 @@
-import { DHOutputMessage, DHStatus } from "../types"
+import { DHOutputMessage } from "../types"
 import { createSessionSnapshotProjection } from './sessionSnapshot'
 
 /**
@@ -15,7 +15,7 @@ export type VoiceSubtitleSegment = {
 
 /** Control frames the SDK sends to the voice client. */
 export type VoiceClientFrame =
-  | { type: 'session.start', session_id: string, protocol_version: number, capabilities?: string[] }
+  | { type: 'session.start', session_id: string, protocol_version: number }
   | { type: 'conversation.start', session_id: string }
   | { type: 'conversation.stop', session_id: string }
   | { type: 'text.input', session_id: string, request_id: string, text: string }
@@ -29,7 +29,7 @@ export type VoiceClientEvent = {
   session_id?: string,
   turn_id?: string,
   text?: string,
-  state?: string,
+  state?: string | Record<string, unknown>,
   subtitles?: VoiceSubtitleSegment[],
   [key: string]: any,
 }
@@ -47,10 +47,9 @@ export type VoiceMessageAdapterOptions = {
   onClientSend?: (_: VoiceClientFrame) => void,
   /** Generates typed-input correlation handles. */
   requestIdFactory?: () => string,
-  controlledInput?: boolean,
 }
 
-const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 2
 
 function defaultRequestIdFactory() {
   const cryptoApi = (globalThis as any).crypto
@@ -69,10 +68,10 @@ function defaultRequestIdFactory() {
  * fragments keyed by `session_id + turn_id` (emitted as replacement text),
  * incremental audio subtitles, confirmed user records, the current conversation state,
  * the accepted capture turn, and any pending sleep-with-text sequence.
- * Managed connections derive all statuses from general session.snapshot,
- * independently of the selected capture source. Capture commands execute
- * actions elsewhere, and snapshots never execute actions. Transport-only
- * embedders retain their legacy command-derived projection explicitly.
+ * All statuses come from authoritative session.snapshot, independently of
+ * the selected capture source. Capture commands execute actions elsewhere;
+ * neither commands nor acknowledgements infer app status, and snapshots
+ * never execute actions.
  * Turns are fenced at `turn.end`: duplicate terminal events never produce
  * duplicate records, and late `text.output.delta` fragments, `audio.output.delta`
  * subtitles, ASR events, or `capture.start`/`capture.stop` controls from a
@@ -94,7 +93,6 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   const newRequestId = options.requestIdFactory ?? defaultRequestIdFactory()
   let snapshots = createSessionSnapshotProjection(sessionId)
 
-  let conversationEnded = true
   let captureTurnId: string | undefined = undefined
   /**
    * Monotonic generation of the session-scoped pending-message sequence.
@@ -126,9 +124,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
    * Request id of the current generation's typed input, if any. A
    * `text.accepted` acknowledgement for exactly this request — while its
    * generation is still current, its turn id is present, and the turn is
-   * not retired — reports the accepted typed turn as `talking`, once per
-   * request. Acknowledgements for other sessions, unknown or retired
-   * requests, or retired turns never report a status.
+   * not retired — confirms the original typed user record once per request.
+   * Other sessions, unknown/retired requests and retired turns cannot confirm
+   * that record. Status always comes separately from session.snapshot.
    */
   let typedRequestId: string | undefined = undefined
 
@@ -140,10 +138,6 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     && !!event.turn_id
     && finalizedTurns.has(turnKey(event.turn_id))
   )
-
-  function statusMessage(status: (typeof DHStatus)[number]): DHOutputMessage {
-    return { type: 'status_change', status }
-  }
 
   /** Normalized user text: a non-blank string, or undefined. */
   function messageText(text: unknown): string | undefined {
@@ -261,22 +255,14 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         if (typeof event.turn_id === 'string' && event.turn_id) {
           captureTurnId = event.turn_id
         }
-        return options.controlledInput ? [] : [statusMessage('listening')]
+        return []
       }
       case 'capture.stop': {
         if (event.session_id !== sessionId) return []
         if (captureTurnId === event.turn_id) {
           captureTurnId = undefined
         }
-        if (isRetiredTurn(event)) {
-          // The turn is retired; release the matching capture turn above but
-          // never emit a talking status for it.
-          return []
-        }
-        if (conversationEnded) {
-          return []
-        }
-        return options.controlledInput ? [] : [statusMessage('talking')]
+        return []
       }
       case 'text.accepted': {
         if (event.session_id !== sessionId) return []
@@ -296,11 +282,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         ) {
           pendingSleepStop.acceptedTurnId = event.turn_id
         }
-        // The acknowledgement of the current typed input reports the
-        // accepted typed turn as a user record followed by `talking` — once
-        // per request. Wrong
-        // sessions, unknown or retired requests, missing turn ids, retired
-        // turns, and duplicates never report a status.
+        // Confirm the current typed input as a user record once per request.
+        // Wrong sessions, unknown/retired requests, missing turn ids, retired
+        // turns and duplicates never confirm a record or infer status.
         if (
           typedRequestId !== undefined
           && event.request_id === typedRequestId
@@ -313,18 +297,14 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
           typedText = undefined
           const messages: DHOutputMessage[] = []
           if (text?.trim()) messages.push({ type: 'message_record', message: { role: 'user', content: text } })
-          if (!options.controlledInput) messages.push(statusMessage('talking'))
           return messages
         }
         return []
       }
       case 'conversation.state': {
         if (event.session_id !== sessionId) return []
-        const ended = event.state === 'ended'
-        conversationEnded = ended
-        if (ended) {
+        if (event.state === 'ended') {
           captureTurnId = undefined
-          return options.controlledInput ? [] : [statusMessage('sleeping')]
         }
         return []
       }
@@ -336,8 +316,7 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   }
 
   function startFrame(): VoiceClientFrame {
-    return { type: 'session.start', session_id: sessionId, protocol_version: PROTOCOL_VERSION,
-      ...(options.controlledInput ? { capabilities: ['session-snapshot-v1', 'audio-input-control-v1'] } : {}) }
+    return { type: 'session.start', session_id: sessionId, protocol_version: PROTOCOL_VERSION }
   }
 
   function wakeup(text?: string): VoiceClientFrame[] {
@@ -459,7 +438,6 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
   function reset() {
     snapshots = createSessionSnapshotProjection(sessionId)
     invalidatePendingSequence()
-    conversationEnded = true
     captureTurnId = undefined
     fragments.clear()
     confirmedAsrTurns.clear()

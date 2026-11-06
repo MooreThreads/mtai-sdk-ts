@@ -28,8 +28,10 @@ export type DH2DConnection = EventSource<DHConnectionEvents> & {
 export type DH2DPlayerElements = {
   /** Untransformed host for SDK-owned UI. */
   container?: HTMLElement
-  /** Releases player presentation listeners. */
+  /** Releases player presentation listeners and error UI. */
   dispose?: () => void
+  /** Shows a terminal error over the video; omit the message to clear it. */
+  showError?: (message?: string) => void
   /**
    * The video element used to display the video stream.
    */

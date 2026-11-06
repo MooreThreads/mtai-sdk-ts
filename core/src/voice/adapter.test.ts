@@ -16,6 +16,14 @@ function event(partial: { type: string } & Record<string, any>): VoiceClientEven
   return partial as VoiceClientEvent
 }
 
+function snapshot(revision: number, conversation: string, phase: string, inputStatus = 'ready') {
+  return { type: 'session.snapshot', session_id: sessionId, state_epoch: 'epoch', revision,
+    state: { conversation: { state: conversation, phase }, audio_input: {
+      source: 'xunfei', source_revision: 1, status: inputStatus,
+      capture_turn_id: inputStatus === 'capturing' ? 't1' : null,
+    } } }
+}
+
 describe('ordered clear command', () => {
   test('clear preserves acknowledgment of the preceding typed input', () => {
     const adapter = createAdapter()
@@ -24,7 +32,6 @@ describe('ordered clear command', () => {
     expect(adapter.ingest({ type: 'text.accepted', session_id: sessionId,
       request_id: before.request_id, turn_id: 'A1' })).toEqual([
       { type: 'message_record', message: { role: 'user', content: 'before' } },
-      { type: 'status_change', status: 'talking' },
     ])
     expect(adapter.ingest({ type: 'text.accepted', session_id: sessionId,
       request_id: before.request_id, turn_id: 'A1' })).toEqual([])
@@ -359,22 +366,27 @@ describe('turn.end derives message_record from accumulated bot_output', () => {
   })
 })
 
-describe('status events become status_change', () => {
-  test('capture.start becomes listening', () => {
+describe('only authoritative snapshots produce status_change', () => {
+  test('capture.start preserves PCM ownership but is not proof of listening', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
       type: 'capture.start', session_id: sessionId, turn_id: 't1',
-    }))).toEqual([
+    }))).toEqual([])
+    expect(adapter.audioInput(new Uint8Array([1, 2]))?.control.turn_id).toBe('t1')
+    expect(adapter.ingest(snapshot(1, 'voice', 'capturing', 'capturing'))).toEqual([
       { type: 'status_change', status: 'listening' },
     ])
   })
 
-  test('capture.stop becomes talking while the conversation is active', () => {
+  test('capture.stop releases PCM ownership but does not infer talking', () => {
     const adapter = createAdapter()
     adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't1' }))
     expect(adapter.ingest(event({
       type: 'capture.stop', session_id: sessionId, turn_id: 't1',
-    }))).toEqual([
+    }))).toEqual([])
+    expect(adapter.audioInput(new Uint8Array([1, 2]))).toBeNull()
+    expect(adapter.ingest(snapshot(1, 'voice', 'responding'))).toEqual([
       { type: 'status_change', status: 'talking' },
     ])
   })
@@ -388,11 +400,12 @@ describe('status events become status_change', () => {
     }))).toEqual([])
   })
 
-  test('conversation.state ended becomes sleeping', () => {
+  test('conversation.state ended waits for the authoritative sleeping snapshot', () => {
     const adapter = createAdapter()
     expect(adapter.ingest(event({
       type: 'conversation.state', session_id: sessionId, state: 'ended',
-    }))).toEqual([
+    }))).toEqual([])
+    expect(adapter.ingest(snapshot(1, 'ended', 'idle'))).toEqual([
       { type: 'status_change', status: 'sleeping' },
     ])
   })
@@ -405,37 +418,34 @@ describe('status events become status_change', () => {
   })
 })
 
-describe('typed input acknowledgements become talking', () => {
-  test('text.accepted for a current typed input becomes talking', () => {
+describe('typed input acknowledgements confirm user records without inferring status', () => {
+  test('text.accepted for a current typed input confirms its original text', () => {
     const adapter = createAdapter()
     const frame = adapter.textInput('你好') as any
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
     }))).toEqual([
       { type: 'message_record', message: { role: 'user', content: '你好' } },
-      { type: 'status_change', status: 'talking' },
     ])
   })
 
-  test('text.accepted for a wakeup typed input becomes talking', () => {
+  test('text.accepted for a wakeup typed input confirms its original text', () => {
     const adapter = createAdapter()
     const frames = adapter.wakeup('你好') as any[]
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frames[1].request_id, turn_id: 't1',
     }))).toEqual([
       { type: 'message_record', message: { role: 'user', content: '你好' } },
-      { type: 'status_change', status: 'talking' },
     ])
   })
 
-  test('a duplicate text.accepted reports talking only once', () => {
+  test('a duplicate text.accepted confirms the user record only once', () => {
     const adapter = createAdapter()
     const frame = adapter.textInput('你好') as any
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
     }))).toEqual([
       { type: 'message_record', message: { role: 'user', content: '你好' } },
-      { type: 'status_change', status: 'talking' },
     ])
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
@@ -494,7 +504,7 @@ describe('typed input acknowledgements become talking', () => {
     }))).toEqual([])
   })
 
-  test('asr_session start keeps the current typed request acknowledged as talking', () => {
+  test('asr_session start keeps the current typed request eligible for confirmation', () => {
     const adapter = createAdapter()
     const frame = adapter.textInput('你好') as any
     adapter.asrSession('start')
@@ -502,7 +512,6 @@ describe('typed input acknowledgements become talking', () => {
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 't1',
     }))).toEqual([
       { type: 'message_record', message: { role: 'user', content: '你好' } },
-      { type: 'status_change', status: 'talking' },
     ])
   })
 })
@@ -539,19 +548,19 @@ describe('status derivation boundaries', () => {
     ])
   })
 
-  test('reset returns the status lifecycle to sleeping', () => {
+  test('reset clears replayed status until the new authoritative snapshot', () => {
     const adapter = createAdapter()
-    adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'voice' }))
+    adapter.ingest(snapshot(9, 'voice', 'capturing', 'capturing'))
     adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't1' }))
     adapter.reset()
-    // The adapter is sleeping again: a late capture.stop from the retired
-    // connection generation never reports talking.
+    expect(adapter.replaySnapshot()).toEqual([])
     expect(adapter.ingest(event({
       type: 'capture.stop', session_id: sessionId, turn_id: 't1',
     }))).toEqual([])
     expect(adapter.ingest(event({
       type: 'conversation.state', session_id: sessionId, state: 'ended',
-    }))).toEqual([
+    }))).toEqual([])
+    expect(adapter.ingest(snapshot(1, 'ended', 'idle'))).toEqual([
       { type: 'status_change', status: 'sleeping' },
     ])
   })
@@ -568,8 +577,10 @@ describe('status derivation boundaries', () => {
     }
     collect(adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'text' })))
     collect(adapter.ingest(event({ type: 'capture.start', session_id: sessionId, turn_id: 't1' })))
+    collect(adapter.ingest(snapshot(1, 'voice', 'capturing', 'capturing')))
     collect(adapter.ingest(event({ type: 'asr.final', session_id: sessionId, turn_id: 't1', text: '问' })))
     collect(adapter.ingest(event({ type: 'capture.stop', session_id: sessionId, turn_id: 't1' })))
+    collect(adapter.ingest(snapshot(2, 'voice', 'responding')))
     const typed = adapter.textInput('再问一句') as any
     collect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: typed.request_id, turn_id: 't2',
@@ -578,7 +589,8 @@ describe('status derivation boundaries', () => {
     collect(adapter.ingest(event({ type: 'audio.output.delta', session_id: sessionId, turn_id: 't2', subtitles: [{ source: 'main', text: '答' }] })))
     collect(adapter.ingest(event({ type: 'turn.end', session_id: sessionId, turn_id: 't2' })))
     collect(adapter.ingest(event({ type: 'conversation.state', session_id: sessionId, state: 'ended' })))
-    expect(statuses).toEqual(['listening', 'talking', 'talking', 'sleeping'])
+    collect(adapter.ingest(snapshot(3, 'ended', 'idle')))
+    expect(statuses).toEqual(['listening', 'talking', 'sleeping'])
     expect(statuses).not.toContain('sleep_talking')
   })
 })
@@ -858,14 +870,13 @@ describe('sleep with text', () => {
     expect(sent).toEqual([])
   })
 
-  test('text.accepted for the sleep text becomes talking', () => {
+  test('text.accepted confirms the sleep text without inferring talking', () => {
     const adapter = createAdapter()
     const frame = (adapter.sleep('再见') as any[])[0]
     expect(adapter.ingest(event({
       type: 'text.accepted', session_id: sessionId, request_id: frame.request_id, turn_id: 'A1',
     }))).toEqual([
       { type: 'message_record', message: { role: 'user', content: '再见' } },
-      { type: 'status_change', status: 'talking' },
     ])
   })
 
