@@ -122,8 +122,8 @@ npm run build
 
   Run `git diff --check` from the worktree. Save complete logs in the evidence directory. Compare counts and diagnostics against the baseline.
 - [x] Self-review for every unguarded media mutation, retry entry after abort, premature permit release, ignored cleanup promise, dangling waiter, and changed timeout/limit. Commit only this task's files in this isolated branch.
-- [ ] Independent spec review first, then quality review. Fix findings with new regression tests where applicable and rerun affected/full verification.
-- [ ] Record final commit, file scope, test counts, remaining warnings and the fact this was not deployed. Verify the original dirty workspace was not edited by this task; report concurrent changes rather than overwriting them.
+- [x] Independent spec review first, then quality review. Fix findings with new regression tests where applicable and rerun affected/full verification.
+- [x] Record final commit, file scope, test counts, remaining warnings and the fact this was not deployed. Verify the original dirty workspace was not edited by this task; report concurrent changes rather than overwriting them.
 
 ### Implementation evidence
 
@@ -160,7 +160,7 @@ npm run build
 - [x] Join late legacy microphone acquisition and stop only the retired attempt's
   acquired tracks; caller-supplied streams and normal audio protocol are unchanged.
 - [x] Verify full tests/build and review timer/limit/resource ownership diffs.
-- [ ] Rerun independent specification review, then quality review (parent).
+- [x] Rerun independent specification review, then quality review (parent).
 
 Follow-up evidence in the same directory:
 - `review-pc-red.log`: 6 failing native/ICE cancellation assertions;
@@ -208,7 +208,27 @@ Follow-up evidence in the same directory:
   resource ownership -> synchronous fencing -> awaited retirement -> slot release.
   Abort callbacks remain synchronous notifications, not the completion contract;
   owners explicitly join the returned retirement promises.
-- [ ] Parent reruns independent specification review, then quality review.
+- [x] Parent reruns independent specification review, then quality review.
+
+### Final independent review and parent verification
+
+- Specification review PASS at `b2cf4d36bb393fb9b7ddb8e6ef7d29657932d274`:
+  independent full 411 tests / 22 suites and `tsc --noEmit` passed; actual
+  transport/gate reproductions confirmed all outstanding retirement cases fixed.
+- Quality review approved with no critical or important issues. Its independent
+  focused run passed 159 tests across 7 suites. The sole minor issue was an
+  outdated connectTimeout comment; the comment now distinguishes cancellation
+  trigger from unbounded retirement of non-cooperating owned work.
+- Parent independently ran full 411 tests / 22 suites and TypeScript build
+  successfully (`parent-full-verification.log`, `parent-build-verification.log`).
+  Final post-comment verification is recorded in the accompanying report.
+- Original dirty checkout was not edited by this task. Its tracked diff changed
+  concurrently in README, playerPresentation, sessions and voiceConnections
+  source/tests; before/after snapshots remain in the private evidence directory.
+  No unrelated changes were copied, reverted, staged or committed here.
+- Code commits: `a4f0d27`, `3111f7c`, `b2cf4d36`; documentation baseline `c62e75c`.
+  All implementation remains isolated on `fix/voice-avatar-session-lifecycle`.
+  No merge, push, package publication, deployment, restart or live audio test.
 
 Evidence in the same directory:
 - `pass3-input-red.log`: 2 failures (dispose discarded retirement).

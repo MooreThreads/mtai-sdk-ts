@@ -651,8 +651,9 @@ function connectionBase(
  * by `dh_2d_session_ready` is used for the direct WebRTC offer exchange
  * through the configured `voiceClient.dh2d_endpoint`; no DH2D command websocket
  * is opened and no second avatar session is created.
- * The configured `connectTimeout` bounds each attempt so a stalled attempt
- * can never hang the connection loop.
+ * The configured `connectTimeout` triggers cancellation of a stalled attempt.
+ * Owned work must still retire before retrying; non-cooperative work can keep
+ * retirement pending without a forced cleanup deadline.
  */
 export async function connectVoiceClient(
   logger: Logger,
