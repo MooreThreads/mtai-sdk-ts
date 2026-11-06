@@ -141,3 +141,45 @@ npm run build
 - No timeout/capacity values changed, no extra manager, no legacy GC/audio redesign,
   no dependency/lockfile changes, and no live-system actions. Only this isolated
   worktree was edited. Independent spec and quality review remain for the parent.
+
+### Specification-review follow-up
+
+- [x] Fence `connectPc` after each awaited native/signaling step; use the owning
+  AbortSignal for HTTP and ICE observation without racing away native work.
+- [x] Join voice and legacy offer tasks (including optional legacy audio setup)
+  on failure/cancellation and after the existing connect-timeout trigger.
+- [x] Exercise the real shared session gate with deferred HTTP in voice, legacy,
+  and legacy-with-audio modes: the old slot survives the caller's 3-second wait
+  and transfers only after the deliberately non-cooperative fetch retires.
+- [x] Recheck voice media ownership after readiness awaits, before returning the
+  connection or starting playback observation.
+- [x] Observe automatic `session_ended` close rejection while preserving explicit
+  close errors and the existing logging/wait behavior.
+- [x] Move the legacy rejection callback into its attempt scope; exercise three
+  real failed attempts/backoffs without retaining parent callbacks.
+- [x] Join late legacy microphone acquisition and stop only the retired attempt's
+  acquired tracks; caller-supplied streams and normal audio protocol are unchanged.
+- [x] Verify full tests/build and review timer/limit/resource ownership diffs.
+- [ ] Rerun independent specification review, then quality review (parent).
+
+Follow-up evidence in the same directory:
+- `review-pc-red.log`: 6 failing native/ICE cancellation assertions;
+  `review-pc-green.log`: 6 passed.
+- `review-transport-red.log`: voice retirement and final-ownership failures;
+  its initial legacy fixture also lacked HTTP `ok` and was corrected.
+  `review-legacy-retirement-red.log` separately proves the corrected real legacy
+  slot-retirement failure with the join removed.
+- `review-legacy-red.log`: retained parent callback failure;
+  `review-close-red.log`: automatic close unhandled rejection failure (explicit
+  error assertion already passed); `review-timeout-red.log`: removal of the
+  timeout-path join reproduced premature retirement.
+- `review-audio-red.log` and `review-audio-offer-red.log`: late/acquired legacy
+  microphone tracks were not stopped on cancellation (one failing test each).
+- `review-focused-green.log`: 4 suites / 132 tests PASS.
+- `review-full-green.log`: 22 suites / 400 tests PASS; `review-build-green.log`:
+  TypeScript build PASS. Existing TS151002 warnings and Jest's delayed-exit notice
+  appeared; no timer values were changed to suppress them. A full follow-up
+  `--detectOpenHandles` run (`review-handles.log`) also passed all 400 tests and
+  did not report open handles.
+- No new timeout, bounded wait, queue, capacity change, dependency change, GC
+  redesign, deployment, push, publication, or original-worktree edits.

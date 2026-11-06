@@ -251,7 +251,10 @@ cancels obsolete connection/retry work; the slot remains registered until that
 work and its owned disconnect cleanup actually finish. `session.close()` retains
 its existing 3-second caller wait: if that wait expires first, the caller may
 continue, but the replacement still waits for the old slot to be released.
-There is no forced release or new cleanup timeout. A retired voice connection
+There is no forced release or new cleanup timeout. Pending WebRTC offer and
+signaling work is cancelled where supported and awaited until it actually
+retires; an uncooperative native/HTTP operation continues to hold the old slot.
+A retired voice connection
 only clears its own video stream and cannot cover or detach replacement media.
 
 ```typescript

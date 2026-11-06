@@ -28,6 +28,9 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
     const rootLogger = logger.push((_, ...args) => _('[connect]', ...args))
     let videoVisible = false
     async function connectOnce(time: number, innerAbortable: Abortable) {
+        const offerController = new AbortController()
+        innerAbortable.onabort(() => offerController.abort())
+        const offers: Promise<void>[] = []
         let running = true
         innerAbortable.onabort(() => {
             running = false
@@ -60,7 +63,7 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
         let sessionId = config.sessionId
         let sessionLogger = logger
         const pcConnected = new Promise<DH2DConnection>((resolve, reject) => {
-            abortable.onabort(() => {
+            innerAbortable.onabort(() => {
                 reject(new Error('connection aborted'))
             })
             const evt = events<DHConnectionEvents>()
@@ -87,7 +90,7 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                         pcUrl.protocol = pcUrl.protocol === 'https:' || pcUrl.protocol === 'wss:' ? 'https:' : 'http:'
                         sessionLogger.log('pc url', pcUrl.toString())
                         const tasks = [
-                            connectPc(pc, pcUrl.toString()).then(() => sessionLogger.log('pc connected')),
+                            connectPc(pc, pcUrl.toString(), offerController.signal).then(() => sessionLogger.log('pc connected')),
                         ]
                         if (audioPc) {
                             const audioPcUrl = new URL(`${endpoint}/api/v1/session/${sessionId}/offer/audio`)
@@ -97,12 +100,20 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                                 audioPc.addTransceiver('audio', { direction: 'sendonly' });
                                 const audioStream = typeof config.audioInput === 'boolean' ?
                                     await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true }, video: false, }) : config.audioInput
+                                // Only stop microphone tracks acquired by this
+                                // attempt; externally supplied streams stay owned
+                                // by their caller. Late registration also handles
+                                // cancellation while getUserMedia was pending.
+                                if (typeof config.audioInput === 'boolean') {
+                                    innerAbortable.onabort(() => audioStream.getAudioTracks().forEach(track => track.stop()))
+                                }
                                 if (!running) return
                                 audioStream.getAudioTracks().forEach(_ => audioPc.addTrack(_));
-                                await connectPc(audioPc, audioPcUrl.toString())
+                                await connectPc(audioPc, audioPcUrl.toString(), offerController.signal)
                                 sessionLogger.log('audio pc connected')
                             })())
                         }
+                        offers.push(...tasks)
                         Promise.all(tasks).then(() => resolve({
                             ...connection,
                             ...(({ on, off }) => ({ on, off }))(evt),
@@ -155,7 +166,9 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
             video.addEventListener("canplay", onCanPlay)
             innerAbortable.onabort(() => video.removeEventListener("canplay", onCanPlay))
         })
-        return await Promise.all([pcConnected, videoReady]).then(([connection, _]) => connection).catch(e => {
+        return await Promise.all([pcConnected, videoReady]).then(([connection, _]) => connection).catch(async e => {
+            innerAbortable.abort()
+            await Promise.allSettled(offers)
             sessionLogger.error(e)
             throw e
         }).finally(() => {
@@ -173,7 +186,13 @@ export async function connect(logger: Logger, elements: DH2DPlayerElements, conf
                         setTimeout(() => reject(new Error(`connect timeout after ${connectTimeout}ms`)), connectTimeout)
                     }))
                 }
-                return await Promise.race(tasks)
+                try {
+                    return await Promise.race(tasks)
+                } catch (error) {
+                    innerAbortable.abort()
+                    await Promise.allSettled([tasks[0]])
+                    throw error
+                }
             })
         } catch (e: any) {
             if (videoVisible) {

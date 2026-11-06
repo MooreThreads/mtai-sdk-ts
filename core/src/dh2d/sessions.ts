@@ -134,7 +134,9 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
 
     function onMessage(message: DHOutputMessage) {
         if (message.type === "session_ended") {
-            session.close()
+            // close already logs failures; only explicit callers receive its
+            // rejection. Server events have no caller to observe that promise.
+            void session.close().catch(() => {})
         } else {
             if (realConfig.voiceClient != null && message.type === 'status_change') latestVoiceStatus = { ...message }
             evt.emit("message", message)

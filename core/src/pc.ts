@@ -4,6 +4,8 @@
  * 
  * @param pc - The RTCPeerConnection instance to establish
  * @param url - The signaling server URL to exchange SDP information
+ * @param signal - Optional owning lifecycle cancellation. Native async work is
+ * awaited to retirement; cancellation prevents its subsequent signaling steps.
  * @returns A promise that resolves when the connection is established
  * 
  * @example
@@ -21,20 +23,40 @@
  * // The connection is now established
  * ```
  */
-export async function connectPc(pc: RTCPeerConnection, url: string) {
+export async function connectPc(pc: RTCPeerConnection, url: string, signal?: AbortSignal) {
+    const checkCancelled = () => {
+        if (signal?.aborted) throw new Error('connection aborted')
+    }
+    checkCancelled()
     let offer = await pc.createOffer()
+    checkCancelled()
     await pc.setLocalDescription(offer)
+    checkCancelled()
     if (pc.iceGatheringState !== 'complete') {
-        await new Promise<void>((resolve) =>
-            pc.addEventListener('icegatheringstatechange', function checkState() {
+        await new Promise<void>((resolve, reject) => {
+            const cleanup = () => {
+                pc.removeEventListener('icegatheringstatechange', checkState)
+                signal?.removeEventListener('abort', onAbort)
+            }
+            const onAbort = () => {
+                cleanup()
+                reject(new Error('connection aborted'))
+            }
+            const checkState = () => {
                 if (pc.iceGatheringState === 'complete') {
-                    pc.removeEventListener('icegatheringstatechange', checkState)
+                    cleanup()
                     resolve()
                 }
-            })
-        )
+            }
+            pc.addEventListener('icegatheringstatechange', checkState)
+            signal?.addEventListener('abort', onAbort)
+            if (signal?.aborted) onAbort()
+            else checkState()
+        })
     }
+    checkCancelled()
     let resp = await fetch(url, {
+        signal,
         body: JSON.stringify(
             (({ type, sdp }) => ({ type, sdp }))(pc.localDescription!!)
         ),
@@ -43,6 +65,9 @@ export async function connectPc(pc: RTCPeerConnection, url: string) {
         },
         method: 'POST'
     })
+    checkCancelled()
     let body = await resp.json()
+    checkCancelled()
     await pc.setRemoteDescription(body)
+    checkCancelled()
 }

@@ -217,6 +217,9 @@ async function connectOnce(
   innerAbortable: Abortable,
 ): Promise<VoiceClientConnection> {
   const voiceConfig = config.voiceClient!
+  const offerController = new AbortController()
+  innerAbortable.onabort(() => offerController.abort())
+  const offers: Promise<void>[] = []
   const attemptLogger = logger.push((_, ...args) => _(`[attempt:${time}]`, ...args))
   attemptLogger.log('enter')
   let running = true
@@ -481,11 +484,12 @@ async function connectOnce(
         const encodedSessionId = encodeURIComponent(canonicalSessionId)
         const pcUrl = new URL(`${offerEndpoint.replace(/\/+$/, '')}/api/v1/session/${encodedSessionId}/offer`)
         pcUrl.protocol = pcUrl.protocol === 'https:' || pcUrl.protocol === 'wss:' ? 'https:' : 'http:'
-        connectPc(pc, pcUrl.toString())
-          .then(() => {
-            sessionLogger.log('pc connected')
-            resolve()
-          })
+        const offer = connectPc(pc, pcUrl.toString(), offerController.signal)
+        offers.push(offer)
+        offer.then(() => {
+          sessionLogger.log('pc connected')
+          resolve()
+        })
           .catch(reject)
         return
       }
@@ -555,13 +559,20 @@ async function connectOnce(
   }
   innerAbortable.onabort(dispose)
 
-  await Promise.race([
-    Promise.all([avatarReady, videoReady, handshakeReady]),
-    failure,
-  ])
-
-  if (!running || disposed) {
-    throw new Error('connection aborted')
+  try {
+    await Promise.race([
+      Promise.all([avatarReady, videoReady, handshakeReady]),
+      failure,
+    ])
+    if (!running || disposed || !ownsVideo()) {
+      throw new Error('connection aborted')
+    }
+  } catch (error) {
+    innerAbortable.abort()
+    // Cancellation fences continuations, but native/non-cooperative work still
+    // owns the attempt until it actually settles.
+    await Promise.allSettled(offers)
+    throw error
   }
   receiverStats.request({ performanceOriginMs: typeof performance !== 'undefined' ? performance.timeOrigin : null })
   const frameRequester = hooks.dh2d.createAvatarFrameRequester(elements.video)
@@ -662,7 +673,13 @@ export async function connectVoiceClient(
             setTimeout(() => reject(new Error(`connect timeout after ${connectTimeout}ms`)), connectTimeout)
           }))
         }
-        return await Promise.race(tasks)
+        try {
+          return await Promise.race(tasks)
+        } catch (error) {
+          innerAbortable.abort()
+          await Promise.allSettled([tasks[0]])
+          throw error
+        }
       })
     } catch (e: any) {
       rootLogger.error(e)

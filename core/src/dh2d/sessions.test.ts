@@ -460,6 +460,36 @@ describe('createDH2DSession audio monitoring removal', () => {
   })
 })
 
+it.each([false, true])('observes automatic close failure without hiding explicit errors (automatic=%s)', async automatic => {
+  jest.useFakeTimers()
+  const { restore } = patchHooks()
+  const fixture = voiceConnectionFixture()
+  const failure = new Error('disconnect failed')
+  hooks.dh2d.getOrCreatePlayer = () => ({ video: {} } as any)
+  hooks.dh2d.connectVoiceClient = (async () => fixture.connection) as any
+  hooks.dh2d.disconnectVoiceClient = async () => { throw failure }
+  hooks.dh2d.untilFailed = async (_l, _c, _p, _config, scope) => new Promise<void>(resolve => scope.onabort(resolve))
+  globalDH2DSessions.value = []
+  const session = createDH2DSession({} as HTMLElement, { voiceClient: { interaction_endpoint: 'ws://client' } } as any)
+  const unhandled = jest.fn()
+  process.on('unhandledRejection', unhandled)
+  try {
+    await jest.advanceTimersByTimeAsync(0)
+    expect(session.status).toBe('connected')
+    if (automatic) fixture.emit('message', { type: 'session_ended' })
+    else await expect(session.close()).rejects.toBe(failure)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(unhandled).not.toHaveBeenCalled()
+    expect(globalDH2DSessions.value).toEqual([])
+  } finally {
+    await session.close()
+    process.off('unhandledRejection', unhandled)
+    restore()
+    globalDH2DSessions.value = []
+    jest.useRealTimers()
+  }
+})
+
 function deferredCleanup() {
   let resolve!: () => void
   const promise = new Promise<void>(r => { resolve = r })
