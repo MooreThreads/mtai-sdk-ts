@@ -112,18 +112,48 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
   let generation = 0
   let observerStartedEpochMs: number | null = null
   const startedTurns = new Set<string>()
+  let frameCount = 0, nullSamples = 0, sampledFrames = 0, validFrames = 0, invalidFrames = 0, observationFailures = 0
+  let lastFrameCategory: string | undefined
+  // Diagnostics share the existing frame loop; no additional frame requests.
+  function diagnostic(line: () => string) {
+    try {
+      logger?.log(line())
+    } catch { /* diagnostic sinks/getters never affect playback */ }
+  }
+  function frameState(category: string, detail = '') {
+    if (category === lastFrameCategory) return
+    lastFrameCategory = category
+    return `avatar_frame_state generation=${generation} category=${category} frame_count=${frameCount}${detail}`
+  }
+  diagnostic(() => 'avatar_observer phase=created')
 
   function observe(now?: number, metadata?: Partial<VideoFrameCallbackMetadata>) {
     if (stopped) {
       return
     }
     const callbackEntryMs = timingNowOrNull()
+    frameCount++
+    let firstCallbackRecord = ''
+    let frameStateRecord: string | undefined
+    if (frameCount === 1) {
+      let frameTiming = ''
+      try {
+        frameTiming = ` frame_timing=${frameTimingSnapshot(now, metadata)}`
+      } catch { /* native timing getters may be unavailable */ }
+      firstCallbackRecord = `avatar_observer phase=first_callback generation=${generation} frame_count=1`
+        + ` width=${safeMetadataNumber(metadata, 'width')} height=${safeMetadataNumber(metadata, 'height')}`
+        + ` media_time=${safeMetadataNumber(metadata, 'mediaTime')}${frameTiming}`
+    }
     try {
       const image = options.sampleFrame()
       const samplingEndMs = timingNowOrNull()
       if (image != null) {
-        const { tokens, packet } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
+        sampledFrames++
+        const { tokens, packet, failures } = decodeTurnStripe(stripeLumaFromImageData(image), image.width)
         const decodingEndMs = timingNowOrNull()
+        if (packet) validFrames++
+        else invalidFrames++
+        frameStateRecord = frameState(packet ? 'decode_valid' : 'decode_invalid', ` sample=nonnull width=${finiteNumber(image.width)} height=${finiteNumber(image.height)} invalid_repetitions=${failures}`)
         const { endedTurnId, observedTurnId } = tracker.observe(tokens)
         // The tracker repeats the current turn on every frame, so a timing
         // record is emitted only for an actual token change. The arrival is
@@ -189,8 +219,13 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
             }
           }).catch(() => undefined)
         }
+      } else {
+        nullSamples++
+        frameStateRecord = frameState('sample_missing')
       }
     } catch (error) {
+      observationFailures++
+      frameStateRecord = frameState('observation_failed')
       // A failing sample (for example a mid-resize frame) must never break
       // the observation loop.
       try { logger?.error('avatar frame observation failed', 'observation_failed') } catch { /* diagnostic logging is isolated */ }
@@ -198,6 +233,9 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
     if (!stopped) {
       cancelFrame = options.requestFrame(observe)
     }
+    // Keep new diagnostic sinks after listeners/receipts and frame scheduling.
+    if (firstCallbackRecord) diagnostic(() => firstCallbackRecord)
+    if (frameStateRecord) diagnostic(() => frameStateRecord)
   }
 
   return {
@@ -215,9 +253,13 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       tracker.reset()
       startedTurns.clear()
       lastObservedTurnId = undefined
+      frameCount = nullSamples = sampledFrames = validFrames = invalidFrames = observationFailures = 0
+      lastFrameCategory = undefined
       cancelFrame = options.requestFrame(observe)
+      diagnostic(() => `avatar_observer phase=started generation=${generation}`)
     },
     stop() {
+      const wasRunning = !stopped, stoppedGeneration = generation
       stopped = true
       generation++
       tracker.reset()
@@ -225,6 +267,11 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
       lastObservedTurnId = undefined
       cancelFrame?.()
       cancelFrame = undefined
+      if (wasRunning) {
+        diagnostic(() => `avatar_observer phase=stopped generation=${stoppedGeneration} frame_count=${frameCount}`
+          + ` null_samples=${nullSamples} sampled_frames=${sampledFrames} valid_frames=${validFrames}`
+          + ` invalid_frames=${invalidFrames} observation_failures=${observationFailures}`)
+      }
     },
     /**
      * Reports the current turn's playback end on an explicit lifecycle or

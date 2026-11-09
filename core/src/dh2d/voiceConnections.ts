@@ -259,19 +259,33 @@ async function connectOnce(
   const receiverStats = createReceiverStats({ pc, logger: attemptLogger })
   let disposed = false
   let protocolConfirmed = false
+  function diagnostic(line: () => string) {
+    try {
+      sessionLogger.log(line())
+    } catch { /* metadata/getters and sinks are diagnostic only */ }
+  }
+  function mediaState() {
+    const video = elements.video
+    const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : null
+    const boolean = (value: unknown) => typeof value === 'boolean' ? value : null
+    return `ready_state=${number(video.readyState)} current_time=${number(video.currentTime)}`
+      + ` paused=${boolean(video.paused)} ended=${boolean(video.ended)}`
+      + ` width=${number(video.videoWidth)} height=${number(video.videoHeight)}`
+  }
 
   // Session traffic waits behind both socket OPEN and the client's exact
   // version acknowledgement. Only session.start bypasses this gate.
   const outbound: (string | Uint8Array)[] = []
-  const sendFrame = (data: string | Uint8Array) => {
+  const sendFrame = (data: string | Uint8Array): 'suppressed' | 'queued' | 'sent' => {
     if (!running || disposed) {
-      return
+      return 'suppressed'
     }
     if (ws.readyState !== WebSocket.OPEN || !protocolConfirmed) {
       outbound.push(data)
-      return
+      return 'queued'
     }
     ws.send(data)
+    return 'sent'
   }
 
   const adapter = createVoiceMessageAdapter({
@@ -303,7 +317,15 @@ async function connectOnce(
         + ` next=${nextTurnId ?? '-'} source=${source ?? 'stripe'}`
         + ` now=${avatarTimingNow().toFixed(3)} epoch_ms=${Date.now()}`)
     } catch { /* diagnostics must not suppress the receipt */ }
-    sendFrame(JSON.stringify(adapter.playbackEnded(turnId)))
+    const frame = JSON.stringify(adapter.playbackEnded(turnId))
+    let disposition: 'suppressed' | 'queued' | 'sent'
+    try {
+      disposition = sendFrame(frame)
+    } catch (error) {
+      diagnostic(() => `avatar_playback_ended_transport turn=${/^[0-9A-Za-z]{2}$/.test(turnId) ? turnId : '-'} disposition=failed`)
+      throw error // Preserve the existing transport failure path.
+    }
+    diagnostic(() => `avatar_playback_ended_transport turn=${/^[0-9A-Za-z]{2}$/.test(turnId) ? turnId : '-'} disposition=${disposition}`)
   }
 
   let bindingUI: ReturnType<typeof createChannelBindingUI> | undefined
@@ -439,7 +461,22 @@ async function connectOnce(
       videoVisible = true
       const cover = elements.cover
       sessionLogger.log('video canplay')
-      video.play()
+      const play = video.play()
+      // Observe the native promise without awaiting it or gating readiness.
+      void play?.then(() => {
+        if (!running || disposed || !ownsVideo()) return
+        diagnostic(() => `avatar_media_play_result outcome=fulfilled ${mediaState()}`)
+      }, (error: any) => {
+        if (!running || disposed || !ownsVideo()) return
+        let reason = 'failed'
+        try {
+          const name = error?.name
+          if (name === 'NotAllowedError') reason = 'not_allowed'
+          else if (name === 'AbortError') reason = 'aborted'
+          else if (name === 'NotSupportedError') reason = 'unsupported'
+        } catch { /* never inspect or serialize the exception body */ }
+        diagnostic(() => `avatar_media_play_result outcome=rejected reason=${reason} ${mediaState()}`)
+      })
       if (cover != null && cover.style.opacity != '0') {
         const timer = setTimeout(() => {
           if (!running || !ownsVideo()) return
@@ -453,6 +490,17 @@ async function connectOnce(
     }
     video.addEventListener('canplay', onCanPlay)
     innerAbortable.onabort(() => video.removeEventListener('canplay', onCanPlay))
+    let lastMediaEvent: string | undefined
+    for (const name of ['playing', 'pause', 'waiting', 'ended']) {
+      const onMediaEvent = () => {
+        if (!running || disposed || !ownsVideo() || lastMediaEvent === name) return
+        lastMediaEvent = name
+        diagnostic(() => `avatar_media_event event=${name} ${mediaState()}`)
+      }
+      // Passive diagnostics only: these events never authorize a playback receipt.
+      video.addEventListener(name, onMediaEvent, { passive: true })
+      innerAbortable.onabort(() => video.removeEventListener(name, onMediaEvent))
+    }
   })
 
   const avatarReady = new Promise<void>((resolve, reject) => {

@@ -612,10 +612,17 @@ describe('createAvatarFrameSampler', () => {
 })
 
 describe('createAvatarPlayback timing records', () => {
+  // Observer lifecycle/frame-state diagnostics are asserted by a dedicated
+  // test; the timing-record tests capture only turn/observation records.
+  const isObserverDiagnostic = (line: string) =>
+    line.startsWith('avatar_observer') || line.startsWith('avatar_frame_state')
   function recordingLogger() {
     const lines: string[] = []
     const logger: any = {
-      log: (message: string) => lines.push(String(message)),
+      log: (message: string) => {
+        const line = String(message)
+        if (!isObserverDiagnostic(line)) lines.push(line)
+      },
       warn: () => undefined,
       error: () => undefined,
     }
@@ -912,7 +919,7 @@ describe('createAvatarPlayback timing records', () => {
   test('appends observation timing without changing the ten frame timing fields', () => {
     const frames = createManualFrameSource()
     const lines: string[] = []
-    const logger: any = { log: (line: string) => lines.push(line), warn: () => undefined, error: () => undefined, push: () => logger }
+    const logger: any = { log: (line: string) => { if (!isObserverDiagnostic(line)) lines.push(line) }, warn: () => undefined, error: () => undefined, push: () => logger }
     const times = [0, 10, 20, 35, 40] // observer-start clock, then frame callback clocks
     const now = jest.spyOn(performance, 'now').mockImplementation(() => times.shift() ?? 40)
     try {
@@ -970,12 +977,40 @@ describe('createAvatarPlayback timing records', () => {
     expect(JSON.stringify(errors)).not.toContain('secret failure')
   })
 
+  test('records the observer lifecycle and frame-state diagnostics', () => {
+    const frames = createManualFrameSource()
+    const lines: string[] = []
+    const logger: any = { log: (line: string) => lines.push(line), warn: () => undefined, error: () => undefined, push: () => logger }
+    let image: ImageData | null = stripeImageData('A0')
+    let samples = 0
+    const playback = createAvatarPlayback({
+      logger, requestFrame: frames.requestFrame,
+      sampleFrame: () => { samples++; if (samples === 3) throw new Error('secret failure'); return image },
+      onPlaybackEnded: () => undefined,
+    })
+    expect(lines).toEqual(['avatar_observer phase=created'])
+    playback.start()
+    expect(lines[1]).toMatch(/^avatar_observer phase=started generation=1$/)
+    frames.emitFrame(5, { width: 64, height: 480, mediaTime: 1 })
+    expect(lines[2]).toMatch(/^avatar_turn_observed turn=A0 /)
+    expect(lines[3]).toMatch(/^avatar_observer phase=first_callback generation=1 frame_count=1 width=64 height=480 media_time=1/)
+    expect(lines[4]).toMatch(/^avatar_frame_state generation=1 category=decode_valid frame_count=1 sample=nonnull width=\d+ height=\d+ invalid_repetitions=0$/)
+    image = null
+    frames.emitFrame()
+    expect(lines[5]).toMatch(/^avatar_frame_state generation=1 category=sample_missing frame_count=2$/)
+    frames.emitFrame()
+    expect(lines[6]).toMatch(/^avatar_frame_state generation=1 category=observation_failed frame_count=3$/)
+    expect(JSON.stringify(lines)).not.toContain('secret failure')
+    playback.stop()
+    expect(lines[7]).toMatch(/^avatar_observer phase=stopped generation=1 frame_count=3 null_samples=1 sampled_frames=1 valid_frames=1 invalid_frames=0 observation_failures=1$/)
+  })
+
   test('uses null observation clocks and fences a stop-start generation', async () => {
     const originalPerformance = (globalThis as any).performance
     const lines: string[] = []
     const frames = createManualFrameSource()
     const changed = jest.fn()
-    const logger: any = { log: (line: string) => lines.push(line), warn: () => undefined, error: () => undefined, push: () => logger }
+    const logger: any = { log: (line: string) => { if (!isObserverDiagnostic(line)) lines.push(line) }, warn: () => undefined, error: () => undefined, push: () => logger }
     try {
       delete (globalThis as any).performance
       let playback: ReturnType<typeof createAvatarPlayback>
