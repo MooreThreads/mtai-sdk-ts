@@ -14,7 +14,7 @@ import {
 import { createVoiceMicrophone } from "../voice/microphone"
 import { createVoiceInputControl } from '../voice/inputControl'
 import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from "./types"
-import { avatarTimingNow, createAvatarPlayback } from "./avatarMedia"
+import { avatarTimingNow, createAvatarPlayback, AvatarFrameContext } from "./avatarMedia"
 import { createReceiverStats } from "./receiverStats"
 import { createChannelBindingUI } from '../voice/channelBindingUI'
 
@@ -691,6 +691,7 @@ async function connectOnce(
       logger: sessionLogger,
       requestFrame: frameRequester,
       sampleFrame: hooks.dh2d.createAvatarFrameSampler(elements.video),
+      createReadback: () => hooks.dh2d.createAvatarStripeReadback<AvatarFrameContext>(elements.video),
       onPlaybackEnded: acknowledgePlaybackEnd,
       onTurnObserved: turnId => {
         adapter.observeAvatarTurn(turnId)

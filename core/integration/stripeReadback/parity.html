@@ -1,0 +1,60 @@
+<!doctype html><meta charset="utf-8"><title>Isolated stripe parity</title><video muted playsinline style="width:320px;height:180px"></video><script>
+const {ipcRenderer}=require('electron'),path=require('node:path'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'../../dist/dh2d');
+const {createAvatarStripeReadback}=require(path.join(root,'avatarStripeReadback.js'));
+const {createAvatarFrameSampler}=require(path.join(root,'avatarMedia.js'));
+const {crc16,decodeTurnStripe,stripeLumaFromImageData}=require(path.join(root,'turnStripe.js'));
+const cases=[];const video=document.querySelector('video');let stream,reader;
+const canvas=document.createElement('canvas');canvas.width=192;canvas.height=120;
+const context=canvas.getContext('2d');
+function draw(width,packets){
+ canvas.width=width;canvas.height=120;context.fillStyle='#406080';context.fillRect(0,0,width,120);
+ for(let repetition=0;repetition<Math.floor(width/64);repetition++){
+  const p=packets[repetition%packets.length];const bytes=[2,p.active?1:0,p.token.charCodeAt(0),p.token.charCodeAt(1)];const crc=crc16(Uint8Array.from(bytes));bytes.push(crc>>8,crc&255);if(p.corrupt)bytes[5]^=1;
+  for(let bit=0;bit<48;bit++){context.fillStyle=bytes[bit>>3]&(1<<(7-bit%8))?'#ebebeb':'#101010';context.fillRect(repetition*64+(bit%16)*4,Math.floor(bit/16)*4,4,4);}
+ }
+}
+function next(width,packets){return new Promise(resolve=>{video.requestVideoFrameCallback(resolve);draw(width,packets);stream.getVideoTracks()[0].requestFrame();});}
+function decode(image){return decodeTurnStripe(stripeLumaFromImageData(image),image.width);}
+function drain(){return new Promise((resolve,reject)=>{function tick(){try{const found=reader.retireReady();if(found.length){resolve(found);return;}requestAnimationFrame(tick);}catch(e){reject(e);}}requestAnimationFrame(tick);});}
+(async()=>{
+ try{
+  draw(192,[{token:'A0',active:false}]);stream=canvas.captureStream(0);video.srcObject=stream;
+  const play=video.play();stream.getVideoTracks()[0].requestFrame();await play;
+  reader=createAvatarStripeReadback(video);assert.ok(reader,'WebGL2 unavailable');const sample=createAvatarFrameSampler(video);
+  const fixtures=[
+   ['valid',192,[{token:'A0',active:false}], 'A0'],
+   ['recover-damaged-first-copy',192,[{token:'B1',active:true,corrupt:true},{token:'B1',active:true},{token:'B1',active:true}], 'B1'],
+   ['conflicting-tokens',128,[{token:'A0',active:true},{token:'B1',active:true}], null],
+   ['invalid-crc',64,[{token:'C2',active:true,corrupt:true}], null],
+   ['activity-conflict',128,[{token:'C2',active:true},{token:'C2',active:false}], null],
+   ['full-width-with-tail',258,[{token:'Z9',active:true}], 'Z9'],
+  ];
+  for(const [name,width,packets,token] of fixtures){
+   await next(width,packets);const expected=decode(sample());assert.equal(expected.packet?.turnId??null,token);
+   assert.ok(reader.prepare());reader.submit({name});const result=await drain();assert.equal(result.length,1);assert.deepEqual(decode(result[0].image),expected);assert.equal(result[0].context.name,name);cases.push(name);
+  }
+  // Fixed-capacity saturation with resize: prepared C pixels must survive
+  // draining A, and B must keep its original byte geometry.
+  await next(64,[{token:'A0',active:true}]);reader.prepare();reader.submit({name:'A'});
+  await next(128,[{token:'B1',active:true}]);reader.prepare();reader.submit({name:'B'});
+  await next(192,[{token:'C2',active:true}]);reader.prepare();
+  assert.throws(()=>reader.submit({name:'not-admitted'}),/saturated/);
+  const a=reader.retireOldestBlocking();assert.equal(a.context.name,'A');assert.equal(decode(a.image).packet.turnId,'A0');
+  reader.submit({name:'C'});const remaining=[];
+  while(reader.pending)remaining.push(...await drain());
+  assert.deepEqual(remaining.map(r=>[r.context.name,r.image.width,decode(r.image).packet.turnId]),[['B',128,'B1'],['C',192,'C2']]);
+  cases.push('two-slot-synchronous-drain-and-resize');
+  reader.dispose();reader.dispose();assert.throws(()=>reader.prepare(),/unavailable/);cases.push('dispose-fences-new-work');
+  // Capture the context through the platform API, not a production inspection hook.
+  const original=HTMLCanvasElement.prototype.getContext;let own;
+  HTMLCanvasElement.prototype.getContext=function(kind,...args){const result=original.call(this,kind,...args);if(kind==='webgl2')own=result;return result;};
+  try{reader=createAvatarStripeReadback(video);}finally{HTMLCanvasElement.prototype.getContext=original;}
+  assert.ok(reader&&own);reader.prepare();reader.submit({name:'lost'});
+  const lost=new Promise(resolve=>own.canvas.addEventListener('webglcontextlost',resolve,{once:true}));own.getExtension('WEBGL_lose_context').loseContext();await lost;
+  assert.throws(()=>reader.retireReady(),/unavailable/);reader.dispose();cases.push('real-context-loss-rejects-pending');
+  ipcRenderer.send('stripe-result',{ok:true,cases});
+ }catch(error){ipcRenderer.send('stripe-result',{ok:false,cases,error:String(error),stack:error.stack});}
+ finally{reader?.dispose();video.pause();stream?.getTracks().forEach(t=>t.stop());video.srcObject=null;}
+})();
+</script>

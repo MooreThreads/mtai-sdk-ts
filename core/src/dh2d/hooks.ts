@@ -2,6 +2,7 @@ import { connect, disconnect, untilFailed } from "./connections";
 import { connectPc } from "../pc";
 import { connectVoiceClient, disconnectVoiceClient } from "./voiceConnections";
 import { createAvatarFrameRequester, createAvatarFrameSampler } from "./avatarMedia";
+import { createAvatarStripeReadback } from './avatarStripeReadback';
 import { DH2DSessionConfig, DH2DPlayerElements, DH2DSession, ResolvedDH2DSessionConfig } from "./types";
 import { Abortable, Box } from "../types";
 import { box } from "../box";
@@ -123,6 +124,7 @@ export const dh2dHooks = {
     disconnectVoiceClient,
     createAvatarFrameRequester,
     createAvatarFrameSampler,
+    createAvatarStripeReadback,
     beforeConnectingSession: untilSessionCountLessThanOrEqualTo(0),
     afterClosingSession,
 }

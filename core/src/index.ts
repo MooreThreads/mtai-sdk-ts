@@ -19,4 +19,5 @@ export type { VoiceClientToolCall, VoiceClientToolHandler, VoiceClientToolResult
 export * from './voice/microphone'
 export * from './dh2d/turnStripe'
 export * from './dh2d/avatarMedia'
+export * from './dh2d/avatarStripeReadback'
 export * from './dh2d/voiceConnections'

@@ -101,6 +101,52 @@ Custom `getOrCreatePlayer` implementations can supply the optional
 `DH2DPlayerElements.showError(message?)` callback; the default SDK player owns the
 centered accessible panel and renders its contents as plain text.
 
+### Asynchronous avatar stripe readback
+
+Avatar connections use a dedicated WebGL2 reader when available: import the video
+with `texImage2D(video)`, render its full-width top 12 rows, enqueue RGBA readback
+into one of **two** pixel-pack buffers, then insert a fence and flush. CPU V2
+stripe conversion/CRC/transition decoding is unchanged. Every complete repeated
+packet is retained; the reader does not intentionally skip samples or grow a
+pending queue. At 2560 pixels wide, the stripe is 120 KiB, not the full frame.
+
+While reads are pending, animation callbacks query the oldest fence with a
+zero-timeout check. Ready samples are copied/decoded in submission order. If
+both slots remain busy at a new video callback, the explicitly approved
+saturation path synchronously retrieves/decodes the oldest result before reusing
+its slot. It can block the renderer; `avatar_readback_saturation` records the
+occurrence and drain duration. No third buffer, frame-dropping policy, polling
+timer, deadline or automatic capacity adjustment is introduced.
+
+The current installed Electron app has `backgroundThrottling:false`; animation
+and video callbacks were independently verified to continue while minimized.
+Other hosts must provide equivalent callback scheduling; OS/process suspension
+cannot guarantee completion. Video callbacks alone are not used to drain the
+last pending sample. Ordinary turn-end events do not stop sampling or discard
+pending new-turn evidence. Retired turn IDs remain rejected. Stop/reconnect
+invalidates the observer generation and releases its callbacks/resources.
+
+Unavailable initialization or failed/lost GPU readback uses Canvas2D, invalidates
+old backend samples and retains the existing turn tracker. Backend diagnostics
+identify `webgl2` or `canvas2d`; there is no automatic WebGL recovery loop.
+The exported synchronous sampler remains available and is the fallback/reference.
+
+This avoids an immediate GPU wait in the normal readback path, not every driver
+stall. Import and CPU copying still cost time; measurements found
+`texSubImage2D(video)` much slower than `texImage2D(video)` on the tested driver.
+Native frame metadata is snapshotted at submission; importing an HTMLVideoElement
+during rVFC does not independently prove exact native RTP-to-pixel identity.
+
+For isolated real-Electron parity tests, run `npm run build`, then
+`STRIPE_TEST_OUTPUT=/private/result.json node integration/stripeReadback/run.cjs /absolute/path/to/electron`.
+The Node launcher removes its temporary profile after Electron exits, including
+failed runs; in-process cleanup is insufficient because Chromium can recreate
+profile files while shutting down. It uses synthetic canvas/video only, never
+the installed app profile or voice/audio services. Optional `STRIPE_TEST_FIXTURE`
+selects the finite-video performance harness; WebGL-designated runs fail if they
+switch to Canvas2D, and the mixed-backend receipt is retained. Deterministic Jest
+fixtures test observer ordering; they are not evidence of GPU performance.
+
 ### Avatar frame timing diagnostics
 
 On each validated turn-token change, `avatar_turn_observed` retains its existing
@@ -138,8 +184,22 @@ only the suffix; diagnostic failures must not interrupt playback.
 The separate `observation_timing` suffix contains six fields, all in the
 performance clock domain: `callback_entry_ms`, `sampling_end_ms`,
 `decoding_end_ms`, `callback_to_sampling_ms`, `sampling_to_decoding_ms`, and
-`callback_to_decoding_ms`. Sampling covers canvas draw/readback; decoding covers
-stripe conversion/decoding. Missing or nonfinite clock readings are `null`.
+`callback_to_decoding_ms`. Sampling ends when pixels become CPU-available;
+with asynchronous WebGL it includes elapsed GPU/scheduler waiting and is **not
+renderer blocking duration**. `sampling_to_decoding_ms` is also an elapsed
+span: batched retrieval and earlier samples' listeners/decoding can occur between
+this sample's copy end and decode completion. It is not isolated CPU decode time.
+Missing or nonfinite clock readings are `null`.
+
+WebGL observations additionally carry `readback_timing`: backend, submission
+sequence/generation, import start/end, submission start/end, first fence-ready
+observation, CPU copy start/end, CPU conversion/decode start/end, and whether the
+sample used synchronous draining. Use `decode_end_ms - decode_start_ms` for this
+sample's CPU conversion/decoding span, not `sampling_to_decoding_ms`.
+A blocking drain has no fence-ready observation (`null`); ready-observation time
+includes scheduling delay and is not GPU execution duration. Submission spans can
+include intervening saturation delivery, so do not sum overlapping fields as
+independent CPU/GPU stages.
 The suffix is emitted only for changed validated tokens and is diagnostic only;
 its request hook runs asynchronously after playback listeners.
 

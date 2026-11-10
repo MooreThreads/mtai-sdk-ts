@@ -1,0 +1,36 @@
+<!doctype html><meta charset="utf-8"><title>Isolated implemented-reader measurement</title><video muted playsinline style="width:320px;height:180px"></video><script>
+const {ipcRenderer}=require('electron'),path=require('node:path');
+const root=path.resolve(__dirname,'../../dist/dh2d');
+const {createAvatarStripeReadback}=require(path.join(root,'avatarStripeReadback.js'));
+const {createAvatarPlayback,createAvatarFrameSampler,createAvatarFrameRequester}=require(path.join(root,'avatarMedia.js'));
+const {performanceRunPassed}=require('./results.cjs');
+const video=document.querySelector('video'),runs=[];
+async function run(backend,number){
+ video.src=process.env.STRIPE_TEST_FIXTURE;video.load();
+ await new Promise((resolve,reject)=>{video.onloadeddata=resolve;video.onerror=()=>reject(Error('fixture_load_failed'));});
+ const result={backend,number,records:[],video_callback_cpu_ms:[],retirement_callback_cpu_ms:[],readbacks:[],diagnostics:[],peak_pending:0};
+ const sample=createAvatarFrameSampler(video),request=createAvatarFrameRequester(video);if(!request)throw Error('rvfc_unavailable');
+ let reader,playback,ended=false,observed=0,finished=false;
+ return new Promise((resolve,reject)=>{
+  function finish(){if(finished||!ended||reader?.pending)return;finished=true;playback.stop();const q=video.getVideoPlaybackQuality();result.quality={total:q.totalVideoFrames,dropped:q.droppedVideoFrames};result.observed=observed;result.finished_at=performance.now();resolve(result);}
+  function record(samples){for(const s of samples)result.readbacks.push({sequence:s.context.sequence,...s.timing});return samples;}
+  playback=createAvatarPlayback({
+   requestFrame:callback=>request((now,metadata)=>{const row={entry:performance.now(),presented_frames:metadata?.presentedFrames};result.records.push(row);const start=performance.now();callback(now,metadata);result.video_callback_cpu_ms.push(performance.now()-start);}),
+   sampleFrame:sample,
+   requestRetirement:callback=>{const handle=requestAnimationFrame(()=>{const start=performance.now();callback();result.retirement_callback_cpu_ms.push(performance.now()-start);finish();});return()=>cancelAnimationFrame(handle);},
+   ...(backend==='webgl'?{createReadback:()=>{
+    reader=createAvatarStripeReadback(video);if(!reader)throw Error('webgl_unavailable');
+    return {prepare:()=>reader.prepare(),submit:ctx=>{reader.submit(ctx);result.peak_pending=Math.max(result.peak_pending,reader.pending);},
+     retireReady:()=>record(reader.retireReady()),retireOldestBlocking:()=>{const s=reader.retireOldestBlocking();if(s)record([s]);return s;},
+     get pending(){return reader.pending;},dispose:()=>reader.dispose()};
+   }}:{}),
+   onPlaybackEnded:()=>{},
+   onTurnObserved:token=>{if(token!=='Z9')throw Error('unexpected_token');const row=result.records[observed++];row.observed_at=performance.now();row.elapsed_ms=row.observed_at-row.entry;},
+   logger:{log:line=>{if(line.startsWith('avatar_readback'))result.diagnostics.push(line);},error:()=>{result.diagnostics.push('observation_failed');}},
+  });
+  video.onended=()=>{ended=true;result.source_ended_at=performance.now();finish();};video.onerror=()=>reject(Error('fixture_play_failed'));
+  playback.start();video.play().catch(reject);
+ });
+}
+(async()=>{try{for(const [backend,number] of [['canvas',1],['webgl',1],['webgl',2],['canvas',2]])runs.push(await run(backend,number));ipcRenderer.send('stripe-result',{ok:runs.every(performanceRunPassed),runs});}catch(error){ipcRenderer.send('stripe-result',{ok:false,error:String(error),runs});}})();
+</script>
