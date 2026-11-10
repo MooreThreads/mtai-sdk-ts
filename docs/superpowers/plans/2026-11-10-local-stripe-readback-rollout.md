@@ -1,4 +1,6 @@
-# Local Electron stripe-readback rollout — 2026-11-10
+# Local Electron stripe-readback rollout — 2026-11-10 (completed)
+
+**Outcome:** Avatar 0.1.23 built from Electron commit `6f937e61` and installed locally. Fresh live before/after measurements completed with the identical probe; see [installed before/after comparison](2026-11-10-installed-stripe-before-after.md). Video-callback CPU median fell 7.3 ms → 0.5 ms; total measured stripe CPU per frame fell ~69%, with stripe bytes deferred ~16.7 ms to animation callbacks. Client/Pi/server/DH2D renderer were never restarted.
 
 User requested: measure current installed behavior, commit/push the reviewed SDK, build Electron from `~/Work/2d-digitalme-web` with that exact SDK, install locally, measure again and compare. Source/build/installation host for this operation is the current ARM64 workstation. Client, Pi backend, server and DH2D renderer are not authorized for restart/deployment by this Electron request.
 
@@ -20,7 +22,9 @@ Statistics are nearest-rank percentiles from all matching callback/call observat
 
 A large document-title export was truncated by window-manager title handling; it was rejected as invalid JSON, not treated as complete evidence. The complete already-recorded dataset was then exported once to an owned one-shot loopback collector with no credentials and mode 0600. The collector exited after POST. No case replay or substitution occurred.
 
-## Pending installation boundary
+## Pending installation boundary (resolved)
+
+Noninteractive root was unavailable during preparation, so a one-shot installer (`install-local.py`) was reviewed (Astra PASS) and later executed after the user supplied sudo authentication through a 0600 stdin file; the password was never stored in receipts or command text and the auth file was shredded after use. Installation completed: 0.1.23 verified (`dpkg -V` clean, ASAR hash match), launched via `mt-cortex-avatar.service` PID 1639155, reconnected to client 8780 (`avatar_attached=true`, `audio_attached=true`), zero startup error classes, and the identical 20-second probe was collected afterward.
 
 Noninteractive root authorization was unavailable (`sudo -n true` failed; no passwordless dpkg permission). Build/publication can proceed without root. Package installation requires the user's local authentication; never ask for or log a password. No after-install measurement or before/after improvement may be claimed until the selected package is actually installed/launched and the identical probe is repeated.
 
