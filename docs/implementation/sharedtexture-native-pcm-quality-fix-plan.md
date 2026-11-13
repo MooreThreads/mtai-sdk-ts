@@ -1,0 +1,5 @@
+# PCM QUALITY correction plan — before edits
+
+P2 completion notification maps to original callback-driven ownership requirement. Signal notifier for nonRT empty/late-cancelled admission and once after stop-prune batch only if completions added. Notifier contract signals availability only, never reenters control APIs (same callback must be RT-safe). Add event-driven empty/late/pruned cases with no unrelated RT completions.
+
+P2 collect exception loss maps to singular custody/exactly-once completion. Build full completion vector while retired chain remains owned unchanged, delete nodes only after successful construction. Use allocation fault instrumentation across each allocation point of a two-record collect; after each failure retry with faults disabled must return both original completions exactly once. Includes failures after prior output construction without coupling to private state or allocator growth representation. Preserve barrier retry ownership. Rerun coherent tests, max SPEC then independent QUALITY; no new runtime limits/timeouts/API inspection hooks.
