@@ -1,0 +1,8 @@
+# Native receiver foundation — bounded slice plan
+
+Implement inline after portable wire/state and producer slices. Read existing Astra native/broker plan and D2LM v1; preserve untracked B-clock draft, promote it only through tests/review.
+
+1. Add standalone C++17 native D2LM codec and move-only descriptor/seqpacket ownership. Exact-size nonblocking probe/consume with SCM_RIGHTS/CLOEXEC, strict UTF-8/length/schema/trailing validation, no guessed record cap or retry/deadline/polling policy. All12 families match frozen portable golden vectors. Transport API exposes readiness-needed to eventual libuv owner, not another thread or media queue. FRAME receipt monotonic timestamp captured immediately after recvmsg, before decoding/copying; producedNs is never scheduling anchor.
+2. Add native ordered output state + selected B clock resolution, same layout/target/dense sequence/sample/effective-state/EOS semantics as portable resolver. No frameApplied/ACK/audio acceptance at resolution. Preserve u64 without floating-point conversions. FD acceptance validates actual accessible extent/identity; actual GPU import/native audio remains separate.
+3. CPU/socketpair/memfd tests establish real FD lifetime, malformed ancillary cleanup, exact bytes, nonblocking readiness, generation/dense state, B arithmetic. Interop runner consumes existing13 golden vectors and compares byte-exact reencode. No live device/audio.
+4. This is a standalone receiver foundation, not N-API/libuv/PipeWire/Electron completion. Do not expose public native host until RT ownership, scoped stop and safe ACK lifecycle exist. No new queue/timeout/limit or hidden fallback. Focused tests + explicit max Astra SPEC then independent QUALITY before commit, bounded plans before fixes.
