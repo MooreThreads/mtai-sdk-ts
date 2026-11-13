@@ -1,0 +1,6 @@
+# PipeWire SPEC correction plan — before edits
+
+1 P1 actual stream resource synchronization: mainloop Lock around connected stream/data-loop lookup and entire blocking invoke; recursive lock permits callers already holding it. Still invoke real processing loop; process stays lock-free. Harness assert lookup occurs under owner lock via thread-local lock depth.
+2 P2 idle error delivery: central mainloop failure helper stores error, signals waiting worker and signals existing loop event for external notification. State/format/add-buffer failures use it; RT event failures retain atomic error. Fake idle ERROR must notify and collect reject with zeroPCM.
+3 P2 wait success must include error check: paused and drained predicate loops check before returning successful; EOS finalhandoff success also check before flush. Fake errors combined with PAUSED/drained must reject not flush/return success.
+4 P2 validate actual audio/raw media type/subtype with spa_format_parse then existing exact raw fields. RealSPA POD fake variants media video/raw and audio/encoded reject. Original requirements actual format, async failure and singular PW lifetimes; no new runtime policy/timeout/input behavior. Focused all native/portable, corrected max SPEC then QUALITY.
