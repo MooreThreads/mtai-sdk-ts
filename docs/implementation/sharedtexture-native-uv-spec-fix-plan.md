@@ -1,0 +1,5 @@
+# libuv SPEC correction plan — before edits
+
+P1 maps directly to approved EOF-after-EOS preservation: write-side EPIPE must not discard an already accepted B-gated tail when read-side orderly EOF confirms the same closed peer. Add a single shared orderly-EOF transition. On EPIPE only after accepted EOS, check actual nonblocking receive for EOF; confirmed EOF stops socket polling, retires undeliverable controls without asserting send success, keeps gated frames/timer and final EOS callback. Other errors, preEOS closure, nonEOF data/protocol errors remain terminal. No retry, extra deadline, drain/device certificate or policy queue introduced.
+
+Add actual socketpair witness combining accepted EOS, pending gated tail, backpressured controls, peer draining sent packets then closing, and immediate send attempt. Assert both paired eligibility callbacks then EOS and joined close; no reported failure. Existing tests unchanged. Rerun named native/portable checks, corrected max SPEC before independent QUALITY.
