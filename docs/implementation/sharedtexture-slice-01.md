@@ -2,7 +2,7 @@
 
 ## Scope
 
-Implements the first SDK separation slice of the reviewed DH2D/SDK/app plan. User authorized inline implementation, Astra review, commits and deployment; deployment destination/build host and renderer coordination are not yet supplied. No installation, component restart, push or deployment follows from this slice.
+Implements the first SDK separation slice of the reviewed DH2D/SDK/app plan. User authorized inline implementation, Astra review, commits and deployment; the user subsequently selected local build and local installation on this workstation. Renderer coordination and full product qualification remain outstanding. No installation, component restart, push or deployment follows from this slice.
 
 Baseline: `176e34b5128a62b1bfd2fed8b31a67c2a5afd804`, worktree `/home/mt/Work/mtai-sdk-ts-conversation-native`, branch `feat/conversation-native-media`. Client/server/standalone frontend/Pi backend untouched.
 
@@ -35,9 +35,9 @@ No timeout, cap, queue ceiling, buffer-duration policy, Origin control, source c
 1. Public session factory/compatibility binding and optional native/main/preload/React entries; migrate and finally remove SDK RTC/stripe implementations/exports.
 2. Versioned DH2D per-session SOCK_SEQPACKET broker with real FD transport, actual selected-output readiness and ordered paired-output state; no client changes.
 3. SDK native PipeWire, B clock, source-safe texture lifecycle and renderer-owned retained cover.
-4. Direct-RGBA NVP and permitted Wav2Lip upload. **Subsequent user selection resolved publication storage:** owned per-publication GPU-face snapshots, not B8 inference leases. Preserve background ownership and inference overlap; no fixed pool count or new queue ceiling. This source work and its qualification remain outstanding; snapshot approval is no longer a blocker.
+4. Direct-RGBA NVP and permitted Wav2Lip upload. **User-clarified boundary:** preserve existing face generation/blending/placement/copying logic, change only the handoff immediately before conversion to NV12, and try an owned GPU snapshot there first. Removing the snapshot copy is a later optimization; no B8 lease, fixed pool count or new queue ceiling. Preserve background ownership and inference overlap. Source work and qualification remain outstanding.
 5. Minor existing-app binding, exact SDK artifact vendoring, Electron pin/package/feature parity and rollout/rollback qualification.
-6. User-selected installation target(s), Electron ARM64 build host and installed-renderer coordination before deployment.
+6. Build and install locally on this workstation, as selected by the user; complete product qualification and installed-renderer coordination before deployment.
 
 ## Specification review and bounded fix plan (recorded before code edits)
 
@@ -76,4 +76,4 @@ Separate max-thinking QUALITY re-review: **PASS**, no remaining necessary replac
 
 Final verification: tsc/noEmit PASS; full isolated build `/tmp/mtai-conversation-slice01-quality-fixed-build.axgLeM` and plain-Node import without DOM/Electron/React/native PASS;10 focused suites388 tests PASS, all31 conversation cases. Existing warnings remain disclosed; no hardware/audio/GPU or packaged-product acceptance follows.
 
-**Slice gate: SPEC PASS → QUALITY PASS.** This is not whole-migration/deployment approval. Native/main/preload/React/DH2D/app work and the target/storage decisions listed above remain outstanding.
+**Slice gate: SPEC PASS → QUALITY PASS.** This is not whole-migration/deployment approval. Native/main/preload/React/DH2D/app work, product qualification and renderer restart coordination remain outstanding; build/installation are selected locally and snapshot-first pre-NV12 handoff is approved.
