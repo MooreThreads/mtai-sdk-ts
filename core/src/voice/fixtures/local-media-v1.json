@@ -1,0 +1,241 @@
+{
+  "version": 1,
+  "u64Fields": [
+    "allocation",
+    "stride",
+    "offset",
+    "modifier",
+    "extent",
+    "effectiveFrame",
+    "sequence",
+    "rendererFrame",
+    "producedNs",
+    "sampleStart",
+    "sampleCount",
+    "submissionReceiptNs",
+    "phaseOriginNs",
+    "phaseRevision",
+    "phaseEffectiveFrame",
+    "lastSequence",
+    "totalSamples",
+    "request",
+    "throughSequence"
+  ],
+  "vectors": [
+    {
+      "name": "attach",
+      "kind": "attach",
+      "code": 1,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {},
+      "hex": "44324c4d010001000f00000000000000010000007301000000670100000061"
+    },
+    {
+      "name": "layout",
+      "kind": "layout",
+      "code": 2,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "allocation": "1",
+        "width": 2560,
+        "height": 1440,
+        "fourcc": 875708993,
+        "stride": "10240",
+        "offset": "0",
+        "modifier": "0",
+        "extent": "14745600",
+        "rowOrigin": 1,
+        "colorSpace": 1,
+        "sampleRate": 22050,
+        "channels": 1,
+        "sampleFormat": 1
+      },
+      "hex": "44324c4d010002004d000000000000000100000073010000006701000000610100000000000000000a0000a0050000414232340028000000000000000000000000000000000000000000000000e1000000000001012256000001000100"
+    },
+    {
+      "name": "ready",
+      "kind": "ready",
+      "code": 3,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "allocation": "1"
+      },
+      "hex": "44324c4d0100030017000000000000000100000073010000006701000000610100000000000000"
+    },
+    {
+      "name": "attached",
+      "kind": "attached",
+      "code": 4,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "allocation": "1"
+      },
+      "hex": "44324c4d0100040017000000000000000100000073010000006701000000610100000000000000"
+    },
+    {
+      "name": "state",
+      "kind": "state",
+      "code": 5,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "effectiveFrame": "1",
+        "snapshot": true,
+        "turnId": "A0",
+        "audioActive": true
+      },
+      "hex": "44324c4d0100050020000000000000000100000073010000006701000000610100000000000000010102000000413001"
+    },
+    {
+      "name": "frame",
+      "kind": "frame",
+      "code": 6,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "sequence": "9007199254740993",
+        "allocation": "1",
+        "rendererFrame": "18446744073709551615",
+        "producedNs": "81985529216486895",
+        "sampleStart": "0",
+        "sampleCount": "2",
+        "pcm": [
+          0,
+          128,
+          255,
+          127
+        ]
+      },
+      "hex": "44324c4d010006004b0000000000000001000000730100000067010000006101000000000020000100000000000000ffffffffffffffffefcdab89674523010000000000000000020000000000000004000000000000000080ff7f"
+    },
+    {
+      "name": "reuseAck",
+      "kind": "reuseAck",
+      "code": 7,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "sequence": "9007199254740993",
+        "allocation": "1",
+        "submissionReceiptNs": "81985529216486895",
+        "phaseOriginNs": "9007199254740995",
+        "phaseRevision": "18446744073709551615",
+        "phaseEffectiveFrame": "9007199254740993"
+      },
+      "hex": "44324c4d010007003f0000000000000001000000730100000067010000006101000000000020000100000000000000efcdab89674523010300000000002000ffffffffffffffff0100000000002000"
+    },
+    {
+      "name": "eos",
+      "kind": "eos",
+      "code": 8,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "lastSequence": "0",
+        "totalSamples": "0"
+      },
+      "hex": "44324c4d010008001f0000000000000001000000730100000067010000006100000000000000000000000000000000"
+    },
+    {
+      "name": "detach",
+      "kind": "detach",
+      "code": 9,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "lastSequence": "3",
+        "reason": "normal"
+      },
+      "hex": "44324c4d0100090021000000000000000100000073010000006701000000610300000000000000060000006e6f726d616c"
+    },
+    {
+      "name": "failure",
+      "kind": "failure",
+      "code": 10,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "code": 7,
+        "message": "synthetic only"
+      },
+      "hex": "44324c4d01000a002500000000000000010000007301000000670100000061070000000e00000073796e746865746963206f6e6c79"
+    },
+    {
+      "name": "cancel",
+      "kind": "cancel",
+      "code": 11,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "request": "1",
+        "throughSequence": "3",
+        "turnId": null
+      },
+      "hex": "44324c4d01000b0020000000000000000100000073010000006701000000610100000000000000030000000000000000"
+    },
+    {
+      "name": "retired",
+      "kind": "retired",
+      "code": 12,
+      "target": {
+        "sessionId": "s",
+        "generation": "g",
+        "attachment": "a"
+      },
+      "fields": {
+        "request": "1",
+        "throughSequence": "3"
+      },
+      "hex": "44324c4d01000c001f0000000000000001000000730100000067010000006101000000000000000300000000000000"
+    },
+    {
+      "name": "utf8-attach",
+      "kind": "attach",
+      "code": 1,
+      "target": {
+        "sessionId": "\ufeff\u4f1a\u8bdd\ud83d\ude80\u0000",
+        "generation": "\u4e16\u4ee3",
+        "attachment": "a"
+      },
+      "fields": {},
+      "hex": "44324c4d0100010021000000000000000e000000efbbbfe4bc9ae8af9df09f9a800006000000e4b896e4bba30100000061"
+    }
+  ]
+}

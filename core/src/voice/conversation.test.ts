@@ -1,6 +1,8 @@
 /** @jest-environment jsdom */
 import { createConversationConnection } from './conversation'
 import { PROTOCOL_VERSION } from './adapter'
+import { LocalMediaState } from './localMediaState'
+import { ABGR8888 } from './localMediaProtocol'
 import { VoiceProtocolError } from './conversationProtocol'
 import type { AvatarAttachment, AvatarMediaEvent, AvatarMediaHost } from './avatarMediaHost'
 import type { Logger } from '../types'
@@ -603,5 +605,28 @@ test('readiness subscriber detaching the view cannot discard an already-applied 
   await detaching
   expect(f.output('playback.ended').map(x => x.turn_id)).toEqual(['A0'])
   expect(f.connection.connected).toBe(true)
+  await f.connection.close()
+})
+
+test('wire STATE and resolved FRAME are not playback; healthy applied A→B alone emits the receipt', async () => {
+  const f = fixture(); const t = await f.connected()
+  const target = { sessionId: t.dh2dSessionId, generation: t.generation, attachment: t.attachment }
+  const wire = new LocalMediaState(target)
+  wire.accept({ kind: 'layout', target, allocation: 1n, width: 3, height: 2, fourcc: ABGR8888,
+    stride: 16n, offset: 0n, modifier: 0n, extent: 32n, rowOrigin: 1, colorSpace: 1,
+    sampleRate: 22050, channels: 1, sampleFormat: 1 })
+  wire.accept({ kind: 'attached', target, allocation: 1n })
+  wire.accept({ kind: 'state', target, effectiveFrame: 1n, snapshot: true, turnId: 'A0', audioActive: true })
+  const a = wire.accept({ kind: 'frame', target, sequence: 1n, allocation: 1n, rendererFrame: 19n,
+    producedNs: 1n, sampleStart: 0n, sampleCount: 1n, pcm: Uint8Array.of(0, 0) })!
+  f.host.frame(t, 1, a.state.turnId ?? undefined, a.state.audioActive)
+  wire.accept({ kind: 'state', target, effectiveFrame: 2n, snapshot: false, turnId: 'B1', audioActive: false })
+  expect(f.output('playback.ended')).toEqual([])
+  const b = wire.accept({ kind: 'frame', target, sequence: 2n, allocation: 1n, rendererFrame: 20n,
+    producedNs: 2n, sampleStart: 1n, sampleCount: 1n, pcm: Uint8Array.of(0, 0) })!
+  expect(f.output('playback.ended')).toEqual([])
+  // Fake media owner signals only after its playback/submission gate, not RX.
+  f.host.frame(t, 2, b.state.turnId ?? undefined, b.state.audioActive)
+  expect(f.output('playback.ended').map(x => x.turn_id)).toEqual(['A0'])
   await f.connection.close()
 })
