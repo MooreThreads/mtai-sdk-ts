@@ -35,7 +35,7 @@ No timeout, cap, queue ceiling, buffer-duration policy, Origin control, source c
 1. Public session factory/compatibility binding and optional native/main/preload/React entries; migrate and finally remove SDK RTC/stripe implementations/exports.
 2. Versioned DH2D per-session SOCK_SEQPACKET broker with real FD transport, actual selected-output readiness and ordered paired-output state; no client changes.
 3. SDK native PipeWire, B clock, source-safe texture lifecycle and renderer-owned retained cover.
-4. Direct-RGBA NVP and permitted Wav2Lip upload. Plan explicitly requires approval of publication storage choice; parent recommended owned GPU-face snapshots (no new fixed pool/queue ceiling) and is awaiting confirmation rather than silently changing backpressure with a B8 lease.
+4. Direct-RGBA NVP and permitted Wav2Lip upload. **Subsequent user selection resolved publication storage:** owned per-publication GPU-face snapshots, not B8 inference leases. Preserve background ownership and inference overlap; no fixed pool count or new queue ceiling. This source work and its qualification remain outstanding; snapshot approval is no longer a blocker.
 5. Minor existing-app binding, exact SDK artifact vendoring, Electron pin/package/feature parity and rollout/rollback qualification.
 6. User-selected installation target(s), Electron ARM64 build host and installed-renderer coordination before deployment.
 
