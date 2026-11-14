@@ -1,0 +1,3 @@
+# Preload SPEC fix2 plan — before edits
+
+P1 makecompleteClose itselfactiveoperation acrossretireAll, capturestableeligibleownersbeforeiteration so reentrantnewimportsnotrevisited, collectnestedoperationError before singlesettlement. Reentrantreceive followsnestedbranchcleanup once, reentrantclosejoinssharedattempt; nestedfailedownershipretaineduntillaterexplicitclose. APIwitness explicitretryouterrelease injectsnestedimportwhosereleasefails ->oneattempt thenclose rejects then laterexplicitretry succeeds. No newlimits/timers/policy/generalredesign.

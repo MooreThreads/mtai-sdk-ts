@@ -1,0 +1,3 @@
+# Preload SPEC fix3 plan — before edits
+
+P2 register sharedattempt settlement-clear handler immediately aftercreation/beforeexposingpromise/invokingcleanup. Remove late registrationincompleteClose. Reentrantawaiter catchesfailurethenexplicitclose seesclearedattempt, while pendingactiveoperationstilljoins andnoauto retries. AddAPIregression waiterinsidecover.submit catchesreleasefailureandexplicitretry succeeds with2releases/nohealthyreceipt. No lifecyclepolicy/newtimeout.
