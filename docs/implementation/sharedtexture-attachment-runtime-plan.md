@@ -1,0 +1,10 @@
+# Holistic plan implementation — Slice 1 working contract
+
+Authority: `sharedtexture-holistic-astra-review-2026-11-14.md`, user request to implement. This is one integration slice, not separate signoffs for helpers. Keep existing native resolver/B as sole runtime authority, PipeWire OUTPUT only and current GPU/source/ACK requirements. No client/recording/server/frontend/Pi changes, timeout/limits/policies or operations.
+
+1. Replace AsyncPlayback's blocking whole-stream end with begin/progress driven by existing PCM/drained notifications so queued scoped stops remain executable. Preserve actual drain, protected/unknown handed B and joined close; regression both pre-handoff and actual downstream-drain stop, not a fabricated drain certificate.
+2. Integrate actual named SEQPACKET connect and native monotonic receipt, allocation export custody independent of socket retirement. The attachment owner must join actual texture/reference retirement before closing exported FD; source allocation duplicate protects native close/failure independently. Native environment cleanup retains its actual owned descriptors.
+3. SDK main attachment owner and preload installer use existing owners, one session target/generation and one paired native B callback; actual imported-layout GPU acceptance plus actual audio acceptance before acceptLayout, selected ATTACHED resolves attach. Trusted current-main-frame IPC only; distinct loading/first-submission readiness and qualified ACK. Main/preload own SDK IPC, not app callbacks. No second runtime resolver/scheduler. Production loader interface but artifact shipping is slice3.
+4. Bind receiver to actual Electron release/VideoFrame semantics; remove arbitrary recursive fake recoverability guarantees only as real boundary is integrated. Keep genuine failure fences and joins. One requirement-mapped API integration batch; actual GPU/audio remains later qualification.
+
+Parent implements inline. Review complete integrated slice SPEC then independent QUALITY, not individual repairs. Findings must map to preserved requirement/reachable production behavior. No deployment/install/restart or source-only readiness claim.

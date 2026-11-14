@@ -24,6 +24,7 @@ async function basic() {
   await done;assert.equal(events[1].sequence,9007199254740993n);assert.equal(events[1].sampleCount,0n);
   assert.throws(()=>output.submitEligible('not-buffer',state(1)),/Buffer/);
   assert.throws(()=>output.submitEligible(new Uint8Array(frame(1)),state(1)),/Buffer/);
+  await output.stop('session','generation','attachment','A1');
   const {port1,port2}=new MessageChannel();port1.on('message',()=>{});port1.ref();port2.ref();
   await output.close();port1.close();port2.close();await output.close();assert.throws(()=>output.end(),/closed/);
 }

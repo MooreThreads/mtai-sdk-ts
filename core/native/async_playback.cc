@@ -54,7 +54,7 @@ void AsyncPlayback::post(Event event){
 }
 void AsyncPlayback::run() noexcept {
   try{
-    output_.open();post(Ready{});
+    output_.open();post(Ready{});bool draining=false;
     while(true){
       std::optional<Command> command;bool collect=false;
       {std::unique_lock<std::mutex> lock(mutex_);changed_.wait(lock,[&]{return close_requested_||collect_||!commands_.empty();});
@@ -65,10 +65,11 @@ void AsyncPlayback::run() noexcept {
       if(command)std::visit([&](auto& value){
         using T=std::decay_t<decltype(value)>;
         if constexpr(std::is_same_v<T,ResolvedFrame>)output_.submit(std::move(value));
-        else if constexpr(std::is_same_v<T,Stop>)output_.stop(value.target,value.turn);
-        else {output_.end_and_drain();post(Drained{});}
+        else if constexpr(std::is_same_v<T,Stop>){output_.stop(value.target,value.turn);post(Stopped{});}
+        else {output_.begin_end();draining=true;}
       },*command);
       if(collect){auto completions=output_.collect();if(!completions.empty())post(std::move(completions));}
+      if(draining && output_.advance_drain()){draining=false;post(Drained{});}
     }
   }catch(...){
     std::lock_guard<std::mutex> lock(mutex_);
@@ -108,6 +109,7 @@ void AsyncPlayback::deliver() noexcept {
         using T=std::decay_t<decltype(value)>;
         if constexpr(std::is_same_v<T,Ready>){if(events_.ready)events_.ready();}
         else if constexpr(std::is_same_v<T,Drained>){if(events_.drained)events_.drained();}
+        else if constexpr(std::is_same_v<T,Stopped>){if(events_.stopped)events_.stopped();}
         else {if(events_.completed)events_.completed(std::move(value));}
       },*event);
     }catch(...){

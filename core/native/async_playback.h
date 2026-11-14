@@ -13,6 +13,7 @@ struct PlaybackEvents {
   std::function<void(std::vector<PcmCompletion>)> completed;
   std::function<void()> drained;
   std::function<void(std::string)> failed;
+  std::function<void()> stopped; // each successful scoped command, FIFO on uv
   std::function<void()> closed;
 };
 // libuv-thread public API; one owned worker serializes actual PW operations.
@@ -30,7 +31,8 @@ class AsyncPlayback : public std::enable_shared_from_this<AsyncPlayback> {
   using Command=std::variant<ResolvedFrame,Stop,End>;
   struct Ready {};
   struct Drained {};
-  using Event=std::variant<Ready,std::vector<PcmCompletion>,Drained>;
+  struct Stopped {};
+  using Event=std::variant<Ready,std::vector<PcmCompletion>,Drained,Stopped>;
   AsyncPlayback(Target,Layout,PlaybackEvents);
   void enqueue(Command);
   void request_close(bool retry);

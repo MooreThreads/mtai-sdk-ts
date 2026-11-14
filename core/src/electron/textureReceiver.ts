@@ -4,19 +4,19 @@ import type { AttachmentKey } from '../voice/localMediaProtocol'
 export interface ImportedVideo { getVideoFrame(): VideoFrame, release(): void }
 export interface FrameCover { submit(frame: VideoFrame, rowOrigin: number): void }
 export interface ReceiverEvents { submitted(identity: TextureIdentity): void, failed(error: Error): void }
-type OwnedVideo = { imported: ImportedVideo, frame?: VideoFrame }
 const errorOf = (value: unknown) => value instanceof Error ? value : new Error(String(value))
 
-/** Attachment-scoped receiver; the independent cover may outlive it for the
- * same avatar. Main stamps submission receipt after authenticating sender. */
+/** Electron delivers each transfer on the renderer loop. VideoFrame.close and
+ * the native import release have no application callbacks: arbitrary recursive
+ * delivery/retry through substituted release methods is not a supported API.
+ * Keep genuine failure custody and application-observer close fencing. */
 export class TextureReceiver {
   private readonly target: AttachmentKey
   private sequence = 0n
   private active = false
   private closed = false
   private healthy = true
-  private owners = new Set<OwnedVideo>()
-  private operationError?: Error
+  private uncertain?: { imported: ImportedVideo, frame?: VideoFrame, error: Error }
   private pendingClose?: { promise: Promise<void>, resolve(): void, reject(error: Error): void }
 
   constructor(target: AttachmentKey, private allocation: bigint,
@@ -25,34 +25,42 @@ export class TextureReceiver {
   }
 
   receive(imported: ImportedVideo, message: TextureMessage): void {
-    const owner: OwnedVideo = { imported }; this.owners.add(owner)
-    if (this.active) {
-      this.fail(new Error('overlapping texture receive'))
-      try { this.retire(owner) } catch (error) { this.operationError ??= errorOf(error) }
+    if (this.uncertain) {
+      // An earlier uncertain native release already fenced this attachment.
+      // Dispose the newly transferred import but keep the original custody.
+      try { imported.release() } catch { /* attachment remains failed */ }
       return
     }
-    this.active = true; this.operationError = undefined
-    let error: Error | undefined
+    this.active = true
+    let frame: VideoFrame | undefined, error: Error | undefined
     try {
       const id = message.identity
       if (this.closed || !this.healthy || id.sessionId !== this.target.sessionId || id.generation !== this.target.generation
         || id.attachment !== this.target.attachment || id.allocation !== this.allocation
         || id.sequence !== this.sequence + 1n || ![1, 2].includes(message.rowOrigin)) throw new Error('unmatched texture receive')
-      owner.frame = imported.getVideoFrame()
-      if (owner.frame.displayWidth !== this.width || owner.frame.displayHeight !== this.height) throw new Error('unexpected texture dimensions')
-      this.cover.submit(owner.frame, message.rowOrigin)
+      frame = imported.getVideoFrame()
+      if (frame.displayWidth !== this.width || frame.displayHeight !== this.height) throw new Error('unexpected texture dimensions')
+      this.cover.submit(frame, message.rowOrigin)
     } catch (caught) { error = errorOf(caught); this.fail(error) }
-    // One retirement attempt per receive; failures retain the owner until a
-    // subsequent explicit close. Failure is fenced before cleanup callbacks.
-    try { this.retire(owner) } catch (caught) { error ??= errorOf(caught); this.fail(errorOf(caught)) }
+    try {
+      if (frame) { frame.close(); frame = undefined }
+      imported.release()
+    } catch (caught) {
+      error ??= errorOf(caught)
+      // No proof that retrying a partially executed Electron release is safe.
+      // Retain uncertain ownership and reject close; never certify retirement.
+      this.uncertain = { imported, frame, error }; this.fail(error)
+    }
     if (!error && this.healthy && !this.closed) {
       this.sequence = message.identity.sequence
       try { this.events.submitted(Object.freeze({ ...message.identity })) }
       catch (caught) { error = errorOf(caught); this.fail(error) }
     }
-    this.operationError ??= error
     this.active = false
-    if (this.pendingClose) this.completeClose(this.operationError)
+    if (this.pendingClose) {
+      if (this.uncertain) this.pendingClose.reject(this.uncertain.error)
+      else this.pendingClose.resolve()
+    }
   }
 
   close(): Promise<void> {
@@ -60,32 +68,12 @@ export class TextureReceiver {
     if (this.pendingClose) return this.pendingClose.promise
     let resolve!: () => void, reject!: (error: Error) => void
     const promise = new Promise<void>((a, b) => { resolve = a; reject = b })
-    const attempt = { promise, resolve, reject }
-    this.pendingClose = attempt
-    // Register before any cleanup can expose this promise to a reentrant
-    // waiter. Its subsequent explicit retry must see the settled attempt gone.
-    void promise.then(() => { if (this.pendingClose === attempt) this.pendingClose = undefined },
-      () => { if (this.pendingClose === attempt) this.pendingClose = undefined })
-    if (!this.active) this.completeClose()
-    return promise
-  }
-  private completeClose(error?: Error) {
-    const attempt = this.pendingClose!
-    if (!error) {
-      this.active = true; this.operationError = undefined
-      try { this.retireAll() } catch (caught) { error = errorOf(caught) }
-      error ??= this.operationError; this.active = false
+    this.pendingClose = { promise, resolve, reject }
+    if (!this.active) {
+      if (this.uncertain) reject(this.uncertain.error)
+      else resolve()
     }
-    if (error) attempt.reject(error); else attempt.resolve()
-  }
-  private retire(owner: OwnedVideo) {
-    if (owner.frame) { owner.frame.close(); owner.frame = undefined }
-    owner.imported.release(); this.owners.delete(owner)
-  }
-  private retireAll() {
-    let error: Error | undefined
-    for (const owner of [...this.owners]) { try { this.retire(owner) } catch (caught) { error ??= errorOf(caught) } }
-    if (error) throw error
+    return promise
   }
   private fail(error: Error) {
     if (!this.healthy) return

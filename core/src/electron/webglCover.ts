@@ -70,6 +70,8 @@ export class WebGLCover implements FrameCover {
     } catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))); throw error }
   }
 
+  checkReady(): void { this.check() }
+
   resize(width: number, height: number): void {
     try {
       this.check()

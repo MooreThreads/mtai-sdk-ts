@@ -150,7 +150,11 @@ int pw_stream_set_active(pw_stream* stream,bool active){
   if(!active && hold_pause){pause_requested=true;return 0;}
   stream->events->state_changed(stream->data,PW_STREAM_STATE_STREAMING,active?PW_STREAM_STATE_STREAMING:PW_STREAM_STATE_PAUSED,nullptr);return 0;
 }
-int pw_stream_flush(pw_stream* stream,bool drain){if(drain){++drains;drain_requested=true;if(!hold_drain)stream->events->drained(stream->data);}else ++flushes;return 0;}
+int pw_stream_flush(pw_stream* stream,bool drain){if(drain){++drains;drain_requested=true;
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+  if(hold_drain)if(const char* path=std::getenv("MTAI_TEST_WAIT_FILE")){std::ofstream signal(path);signal<<"drain pending";}
+#endif
+  if(!hold_drain)stream->events->drained(stream->data);}else ++flushes;return 0;}
 int pw_stream_disconnect(pw_stream*){unsigned attempt=++disconnect_attempts;return (disconnect_first_only?attempt==1:fail_disconnect)?-EIO:0;}
 void pw_stream_destroy(pw_stream* stream){if(stream->buffer_added)stream->events->remove_buffer(stream->data,&stream->buffer);++destroys;delete stream;}
 }
@@ -276,6 +280,48 @@ void async_close_during_drain(){
   std::thread control([&]{while(!drain_requested.load())std::this_thread::yield();uv_async_send(&closer);});
   uv_run(&loop,UV_RUN_DEFAULT);control.join();assert(closed==1 && drained==0 && failed==0);output.reset();assert(uv_loop_close(&loop)==0);
 }
+void async_stop_during_eos(bool downstream,bool protect){
+  reset();hold_drain=downstream;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  if(downstream){
+    PipewireOutput output(target,layout(),notify,nullptr);output.open();output.submit(frame(1,"A1",{1,2,3,4}));
+    if(protect){auto other=frame(2,"B2",{5,6});other.state.turn=std::nullopt;output.submit(std::move(other));}
+    output.begin_end();assert(process(current,6)==(protect?6u:4u));assert(!output.advance_drain());
+    output.stop(target,"A1");assert(flushes==(protect?0u:1u));
+    assert(!output.advance_drain());
+    {std::lock_guard<std::recursive_mutex> lock(current->owner->mutex);hold_drain=false;current->events->drained(current->data);}
+    assert(output.advance_drain());output.close();return;
+  }
+  std::shared_ptr<AsyncPlayback> output;unsigned closed=0,cancelled=0,drained_events=0;
+  PlaybackEvents events;events.failed=[](std::string){assert(false);};events.closed=[&]{++closed;};
+  bool ready=false;
+  events.ready=[&]{output->submit(frame(1,"A1",{1,2,3,4}));if(protect){auto other=frame(2,"B2",{5,6});other.state.turn=std::nullopt;output->submit(std::move(other));}output->end();ready=true;};
+  events.completed=[&](std::vector<PcmCompletion> values){for(const auto& value:values)if(value.identity.turn=="A1" && value.disposition==PcmDisposition::cancelled)++cancelled;};
+  events.drained=[&]{++drained_events;};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));
+  // FIFO end then stop, with no processing callbacks: cancellation must run
+  // while EOS is waiting for accepted PCM handoff, not behind that wait.
+  while(!ready)uv_run(&loop,UV_RUN_ONCE);
+  output->stop(target,"A1");
+  while(cancelled==0){pump(current);uv_run(&loop,UV_RUN_NOWAIT);}
+  if(protect){assert(process(current,1)==2);assert(current->bytes[0]==5 && current->bytes[1]==6);}
+  while(drained_events==0){pump(current);uv_run(&loop,UV_RUN_NOWAIT);}
+  output->close();uv_run(&loop,UV_RUN_DEFAULT);
+  assert(closed==1 && drained_events==1 && flushes==1);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_stop_pending_device_drain(bool protect){
+  reset();hold_drain=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  std::shared_ptr<AsyncPlayback> output;bool ready=false,stopped=false;unsigned drained_events=0,closed=0;
+  PlaybackEvents events;events.ready=[&]{output->submit(frame(1,"A1",{1,2}));if(protect){auto b=frame(2,"B2",{3,4});b.state.turn=std::nullopt;output->submit(std::move(b));}output->end();ready=true;};
+  events.stopped=[&]{stopped=true;};events.drained=[&]{++drained_events;};events.failed=[](std::string){assert(false);};events.closed=[&]{++closed;};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));while(!ready)uv_run(&loop,UV_RUN_ONCE);
+  bool copied=false;while(!copied){copied=process(current,6)>0;uv_run(&loop,UV_RUN_NOWAIT);}
+  while(!drain_requested){process(current,6);uv_run(&loop,UV_RUN_NOWAIT);}
+  output->stop(target,"A1");while(!stopped){pump(current);uv_run(&loop,UV_RUN_NOWAIT);}
+  assert(drained_events==0 && flushes==(protect?0u:1u));
+  {std::lock_guard<std::recursive_mutex> lock(current->owner->mutex);current->events->drained(current->data);}
+  while(!drained_events)uv_run(&loop,UV_RUN_ONCE);
+  output->close();uv_run(&loop,UV_RUN_DEFAULT);assert(closed==1);output.reset();assert(uv_loop_close(&loop)==0);
+}
 void async_retirement_retry(){
   reset();fail_disconnect=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
   unsigned closed=0,failed=0;std::shared_ptr<AsyncPlayback> output;PlaybackEvents events;
@@ -385,5 +431,5 @@ extern "C" void mtai_install_fixture(napi_env env,napi_value exports){
 }
 #endif
 #ifndef MTAI_PIPEWIRE_NODE_FIXTURE
-int main(){acceptance_and_output();failed_format();delayed_pause_and_drain();failed_close_retry();idle_error();error_with_success(false);error_with_success(true);wrong_media(1);wrong_media(2);rejected_storage();cancel_wait(false);cancel_wait(true);cancel_paused_wait();async_close_during_open();async_ready_close(false);async_ready_close(true);async_close_during_drain();async_retirement_retry();async_command_custody();async_operation_and_retirement_failure();async_construction_faults();async_throwing_failure_notification();async_close_then_throw();async_retry_before_delivery();async_explicit_close_before_operation_failure_delivery();assert(process_allocations==0 && process_frees==0);std::cout<<"PipeWire adapter fake API negotiation/bytes/scoped stop/drain/close/async cancellation passed\n";}
+int main(){acceptance_and_output();failed_format();delayed_pause_and_drain();failed_close_retry();idle_error();error_with_success(false);error_with_success(true);wrong_media(1);wrong_media(2);rejected_storage();cancel_wait(false);cancel_wait(true);cancel_paused_wait();async_close_during_open();async_ready_close(false);async_ready_close(true);async_close_during_drain();async_stop_during_eos(false,false);async_stop_during_eos(false,true);async_stop_during_eos(true,false);async_stop_during_eos(true,true);async_stop_pending_device_drain(false);async_stop_pending_device_drain(true);async_retirement_retry();async_command_custody();async_operation_and_retirement_failure();async_construction_faults();async_throwing_failure_notification();async_close_then_throw();async_retry_before_delivery();async_explicit_close_before_operation_failure_delivery();assert(process_allocations==0 && process_frees==0);std::cout<<"PipeWire adapter fake API negotiation/bytes/scoped stop/drain/close/async cancellation passed\n";}
 #endif

@@ -121,7 +121,7 @@ void PipewireOutput::process() noexcept {
   buffer->size=bytes/(size_t(layout_.channels)*2);
   int status=pw_stream_queue_buffer(stream_,buffer);if(status<0){error_=status;completed(this);}
 }
-void PipewireOutput::drained(void* data) noexcept {auto& self=*static_cast<PipewireOutput*>(data);self.drained_=true;self.signal();}
+void PipewireOutput::drained(void* data) noexcept {auto& self=*static_cast<PipewireOutput*>(data);self.drained_=true;self.signal();self.notify_(self.notify_data_);}
 void PipewireOutput::submit(ResolvedFrame frame){if(!opened_ || ended_ || closed_)throw ProtocolError("output not accepting PCM");check();custody_->submit(std::move(frame));}
 std::vector<PcmCompletion> PipewireOutput::collect(){check();return custody_?custody_->collect():std::vector<PcmCompletion>{};}
 void PipewireOutput::wait_paused(){while(true){check();if(state_==PW_STREAM_STATE_PAUSED)return;pw_thread_loop_wait(loop_);}}
@@ -130,18 +130,33 @@ void PipewireOutput::stop(const Target& target,const std::string& turn){
   check();custody_->begin_stop(target,turn);
   if(custody_->whole_stream_flush_permitted()){
     Lock lock(loop_);checked(pw_stream_set_active(stream_,false),"pause output for scoped stop");wait_paused();
+    // A cancelled-only stream reset replaces any pending whole-stream drain.
+    // Protected/unknown handed PCM never enters this branch.
+    drain_started_=false;drained_=false;
     checked(pw_stream_flush(stream_,false),"flush cancelled-only output");custody_->stream_reset_completed();
     checked(pw_stream_set_active(stream_,true),"resume output after stop");
   }
   custody_->resume();
 }
-void PipewireOutput::end_and_drain(){
+void PipewireOutput::begin_end(){
   if(!opened_ || closed_ || ended_)throw ProtocolError("invalid output EOS");
-  ended_=true;custody_->end();
+  check();ended_=true;custody_->end();
+}
+bool PipewireOutput::advance_drain(){
+  if(!ended_ || closed_)throw ProtocolError("drain without output EOS");
+  check();
+  if(!custody_->handoff_complete())return false;
+  Lock lock(loop_);check();
+  if(!drain_started_){
+    drained_=false;drain_started_=true;
+    checked(pw_stream_flush(stream_,true),"drain output");
+  }
+  check();return drained_;
+}
+void PipewireOutput::end_and_drain(){
+  begin_end();
   Lock lock(loop_);
-  while(!custody_->handoff_complete()){check();pw_thread_loop_wait(loop_);}
-  check();drained_=false;checked(pw_stream_flush(stream_,true),"drain output");
-  while(true){check();if(drained_)break;pw_thread_loop_wait(loop_);}
+  while(!advance_drain())pw_thread_loop_wait(loop_);
 }
 void PipewireOutput::close(){
   if(closed_)return;

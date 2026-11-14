@@ -50,7 +50,7 @@ struct NodePlayback : std::enable_shared_from_this<NodePlayback> {
   napi_env env;napi_ref callback=nullptr,resource=nullptr,buffer_predicate=nullptr;napi_async_context context=nullptr;napi_async_cleanup_hook_handle hook=nullptr;
   Target target;Layout layout;std::shared_ptr<AsyncPlayback> playback;
   std::shared_ptr<NodePlayback> keepalive;
-  std::list<napi_deferred> closes;
+  std::list<napi_deferred> closes,stops;
   bool cleanup=false,closed=false,closing=false,reporting=false;
   NodePlayback(napi_env e,Target t,Layout l):env(e),target(std::move(t)),layout(l){}
   void emit(napi_value event){
@@ -76,6 +76,7 @@ struct NodePlayback : std::enable_shared_from_this<NodePlayback> {
     HandleScope scope(env);
     napi_value held;checked(napi_get_reference_value(env,resource,&held));CallbackScope callback_scope(env,held,context);
     auto error=text(env,message);
+    while(!stops.empty()){checked(napi_reject_deferred(env,stops.front(),error));stops.pop_front();}
     settle(error);
     // Reporting failure may not initiate an automatic native retirement retry.
     if(callback && !reporting){reporting=true;
@@ -98,6 +99,7 @@ struct NodePlayback : std::enable_shared_from_this<NodePlayback> {
     if(!cleanup){HandleScope scope(env);
       napi_value held;checked(napi_get_reference_value(env,resource,&held));
       {CallbackScope callback_scope(env,held,context);
+        while(!stops.empty()){checked(napi_reject_deferred(env,stops.front(),text(env,"playback retired")));stops.pop_front();}
         settle();
       }
       if(callback){checked(napi_delete_reference(env,callback));callback=nullptr;}
@@ -138,7 +140,10 @@ napi_value submit(napi_env env,napi_callback_info info){return guarded(env,[&]{
 napi_value stop(napi_env env,napi_callback_info info){return guarded(env,[&]{
   size_t count=4;napi_value args[4];auto self=owner(env,info,count,args);if(count!=4)throw ProtocolError("captured target and turn required");
   if(self->closing || self->closed)throw ProtocolError("playback closed");
-  Target target{string(env,args[0]),string(env,args[1]),string(env,args[2])};self->playback->stop(std::move(target),string(env,args[3]));return undefined(env);
+  Target target{string(env,args[0]),string(env,args[1]),string(env,args[2])};auto turn=string(env,args[3]);
+  auto slot=self->stops.emplace(self->stops.end(),nullptr);napi_value promise;
+  try{checked(napi_create_promise(env,&*slot,&promise));self->playback->stop(std::move(target),std::move(turn));}
+  catch(...){self->stops.erase(slot);throw;}return promise;
 });}
 napi_value end(napi_env env,napi_callback_info info){return guarded(env,[&]{size_t count=0;auto self=owner(env,info,count,nullptr);
   if(self->closing || self->closed)throw ProtocolError("playback closed");
@@ -175,6 +180,7 @@ napi_value create(napi_env env,napi_callback_info info){return guarded(env,[&]{
     uv_loop_t* loop;checked(napi_get_uv_event_loop(env,&loop));self->keepalive=self;
     PlaybackEvents events;
     events.ready=[self]{auto* raw=self.get();raw->dispatch([&]{raw->emit(raw->event("audioReady"));});};
+    events.stopped=[self]{self->dispatch([&]{if(!self->stops.empty()){auto deferred=self->stops.front();self->stops.pop_front();checked(napi_resolve_deferred(self->env,deferred,undefined(self->env)));}});};
     events.drained=[self]{auto* raw=self.get();raw->dispatch([&]{raw->emit(raw->event("drained"));});};
     events.completed=[self](std::vector<PcmCompletion> values){auto* raw=self.get();raw->dispatch([&]{
       for(const auto& completion:values){if(raw->closing)break;auto value=raw->event("pcmCompleted");

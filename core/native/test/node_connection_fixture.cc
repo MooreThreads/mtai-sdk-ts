@@ -2,6 +2,7 @@
 #include <uv.h>
 #include "../local_media_transport.h"
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -30,6 +31,8 @@ napi_value create(napi_env env,napi_callback_info){return guard(env,[&]{int sock
   check(napi_wrap(env,object,self.get(),[](napi_env,void* data,void*){delete static_cast<Peer*>(data);},nullptr,nullptr));self.release();
   napi_property_descriptor methods[]={{"waitAttach",nullptr,wait_attach,nullptr,nullptr,nullptr,napi_default,nullptr},{"send",nullptr,send,nullptr,nullptr,nullptr,napi_default,nullptr},{"receive",nullptr,receive,nullptr,nullptr,nullptr,napi_default,nullptr},{"close",nullptr,close,nullptr,nullptr,nullptr,napi_default,nullptr}};check(napi_define_properties(env,object,4,methods));
   napi_value fd;check(napi_create_int32(env,client.get(),&fd));prop(env,object,"fd",fd);client.release();return object;});}
+napi_value named(napi_env env,napi_callback_info info){return guard(env,[&]{size_t count=1;napi_value args[1];check(napi_get_cb_info(env,info,&count,args,nullptr,nullptr));sockaddr_un address{};address.sun_family=AF_UNIX;size_t copied;check(napi_get_value_string_utf8(env,args[0],address.sun_path,sizeof(address.sun_path),&copied));Descriptor listener(::socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0));if(listener.get()<0 || bind(listener.get(),reinterpret_cast<sockaddr*>(&address),sizeof(address)) || listen(listener.get(),1))throw std::runtime_error("fixture listener");napi_value result;check(napi_create_int32(env,listener.release(),&result));return result;});}
+napi_value accept_peer(napi_env env,napi_callback_info info){return guard(env,[&]{size_t count=1;napi_value args[1];check(napi_get_cb_info(env,info,&count,args,nullptr,nullptr));int32_t listener;check(napi_get_value_int32(env,args[0],&listener));Descriptor fd(accept4(listener,nullptr,nullptr,SOCK_CLOEXEC|SOCK_NONBLOCK));if(fd.get()<0)throw std::runtime_error("fixture accept");napi_value value;check(napi_create_int32(env,fd.release(),&value));return value;});}
 }
 extern "C" void mtai_test_connection_start(unsigned stage){const char* mode=std::getenv("MTAI_TEST_CONNECTION_FAILURE");if(mode && unsigned(std::strtoul(mode,nullptr,10))==stage)throw std::runtime_error("fixture connection startup failed");}
-extern "C" void mtai_install_connection_fixture(napi_env env,napi_value exports){napi_value function;check(napi_create_function(env,"testPeer",NAPI_AUTO_LENGTH,create,nullptr,&function));prop(env,exports,"testPeer",function);check(napi_create_function(env,"testFdContent",NAPI_AUTO_LENGTH,fd_content,nullptr,&function));prop(env,exports,"testFdContent",function);}
+extern "C" void mtai_install_connection_fixture(napi_env env,napi_value exports){napi_value function;check(napi_create_function(env,"testPeer",NAPI_AUTO_LENGTH,create,nullptr,&function));prop(env,exports,"testPeer",function);check(napi_create_function(env,"testFdContent",NAPI_AUTO_LENGTH,fd_content,nullptr,&function));prop(env,exports,"testFdContent",function);check(napi_create_function(env,"testListen",NAPI_AUTO_LENGTH,named,nullptr,&function));prop(env,exports,"testListen",function);check(napi_create_function(env,"testAccept",NAPI_AUTO_LENGTH,accept_peer,nullptr,&function));prop(env,exports,"testAccept",function);}

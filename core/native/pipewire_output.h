@@ -21,7 +21,9 @@ class PipewireOutput {
   void submit(ResolvedFrame frame); // already B-eligible, never reschedules
   std::vector<PcmCompletion> collect();
   void stop(const Target& target,const std::string& turn);
-  void end_and_drain(); // whole attachment only, actual drained event
+  void begin_end(); // nonblocking whole-attachment admission fence
+  bool advance_drain(); // notification-driven: true only after actual drained
+  void end_and_drain(); // synchronous caller convenience, never worker command
   void request_cancel(); // cross-thread permanent fence + actual wait wake
   void close(); // actual custody+stream+thread-loop join; repeatable
  private:
@@ -51,7 +53,7 @@ class PipewireOutput {
   pw_stream_events callbacks_{};
   pw_stream_state state_=PW_STREAM_STATE_UNCONNECTED;
   size_t usable_buffers_=0;
-  bool started_=false,connected_=false,format_ready_=false,opened_=false,ended_=false,drained_=false,closed_=false;
+  bool started_=false,connected_=false,format_ready_=false,opened_=false,ended_=false,drain_started_=false,drained_=false,closed_=false;
   std::atomic<int> error_{0};
   std::atomic<bool> cancelled_{false};
   std::mutex loop_lifetime_; // publication/destruction vs external cancel wake

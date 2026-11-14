@@ -6,6 +6,10 @@
 #include <cstring>
 #include <cmath>
 #include <system_error>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <time.h>
 
 namespace mtai::avatar {
 namespace {
@@ -105,6 +109,15 @@ void NodeConnection::activated(uv_async_t* handle) noexcept {
   uv_close(reinterpret_cast<uv_handle_t*>(handle),activation_retired);
 }
 using Holder=std::shared_ptr<NodeConnection>;
+// Allocation custody is independent of socket/uv retirement. The SDK main
+// attachment retains this object until all texture imports/references retire.
+struct AllocationLease {napi_env env;Descriptor descriptor;bool hooked=false;};
+void lease_cleanup(void* data){auto* self=static_cast<AllocationLease*>(data);self->descriptor=Descriptor();self->hooked=false;}
+void lease_finalized(napi_env,void* data,void*){auto* self=static_cast<AllocationLease*>(data);if(self->hooked)napi_remove_env_cleanup_hook(self->env,lease_cleanup,self);delete self;}
+napi_value lease_close(napi_env env,napi_callback_info info){napi_value object;size_t count=0;void* data=nullptr;
+  if(napi_get_cb_info(env,info,&count,nullptr,&object,nullptr)!=napi_ok || napi_unwrap(env,object,&data)!=napi_ok){napi_throw_error(env,nullptr,"allocation lease required");return nullptr;}
+  auto* self=static_cast<AllocationLease*>(data);self->descriptor=Descriptor();if(self->hooked){napi_remove_env_cleanup_hook(env,lease_cleanup,self);self->hooked=false;}return undef(env);
+}
 void finalizer(napi_env,void* data,void*){delete static_cast<Holder*>(data);}
 Holder owner(napi_env env,napi_callback_info info,size_t& count,napi_value* args){napi_value self;check(napi_get_cb_info(env,info,&count,args,&self,nullptr));void* data;check(napi_unwrap(env,self,&data));return *static_cast<Holder*>(data);}
 template<class Function> napi_value guarded(napi_env env,Function function){try{return function();}catch(const std::exception& error){napi_throw_error(env,nullptr,error.what());return nullptr;}}
@@ -125,18 +138,37 @@ napi_value close(napi_env env,napi_callback_info info){return guarded(env,[&]{
   napi_value promise;try{check(napi_create_promise(env,&*slot,&promise));}catch(...){self->closes.erase(slot);throw;}
   if(self->closed){auto deferred=*slot;self->closes.erase(slot);check(napi_resolve_deferred(env,deferred,undef(env)));}return promise;
 });}
+napi_value retain_allocation(napi_env env,napi_callback_info info){return guarded(env,[&]{
+  size_t count=0;auto self=owner(env,info,count,nullptr);if(self->allocation.get()<0 || self->closing)throw ProtocolError("no live allocation");
+  auto lease=std::make_unique<AllocationLease>();lease->env=env;lease->descriptor=Descriptor(fcntl(self->allocation.get(),F_DUPFD_CLOEXEC,0));
+  if(lease->descriptor.get()<0)throw std::system_error(errno,std::generic_category(),"retain allocation");
+  napi_value object,fd;check(napi_create_object(env,&object));check(napi_create_int32(env,lease->descriptor.get(),&fd));
+  napi_property_descriptor properties[]={{"fd",nullptr,nullptr,nullptr,nullptr,fd,napi_enumerable,nullptr},{"close",nullptr,lease_close,nullptr,nullptr,nullptr,napi_default,nullptr}};
+  check(napi_define_properties(env,object,2,properties));check(napi_add_env_cleanup_hook(env,lease_cleanup,lease.get()));lease->hooked=true;
+  auto status=napi_wrap(env,object,lease.get(),lease_finalized,nullptr,nullptr);if(status!=napi_ok){napi_remove_env_cleanup_hook(env,lease_cleanup,lease.get());check(status);}lease.release();return object;
+});}
 napi_value create(napi_env env,napi_callback_info info){return guarded(env,[&]{
   size_t count=3;napi_value args[3];check(napi_get_cb_info(env,info,&count,args,nullptr,nullptr));if(count!=3)throw ProtocolError("connected fd, ATTACH Buffer and callback required");
-  napi_valuetype type;check(napi_typeof(env,args[0],&type));if(type!=napi_number)throw ProtocolError("descriptor integer required");
-  double numeric;check(napi_get_value_double(env,args[0],&numeric));if(!std::isfinite(numeric) || numeric<0 || numeric>INT32_MAX || std::floor(numeric)!=numeric)throw ProtocolError("descriptor integer required");
+  napi_valuetype type;check(napi_typeof(env,args[0],&type));Descriptor socket;
+  if(type==napi_string){
+    size_t size;check(napi_get_value_string_utf8(env,args[0],nullptr,0,&size));sockaddr_un address{};address.sun_family=AF_UNIX;
+  if(!size || size>=sizeof(address.sun_path))throw ProtocolError("local socket path representation invalid");
+    size_t copied;check(napi_get_value_string_utf8(env,args[0],address.sun_path,sizeof(address.sun_path),&copied));
+    if(std::strlen(address.sun_path)!=size)throw ProtocolError("socket path contains NUL");
+    socket=Descriptor(::socket(AF_UNIX,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,0));
+    if(socket.get()<0 || ::connect(socket.get(),reinterpret_cast<sockaddr*>(&address),sizeof(address))<0)throw std::system_error(errno,std::generic_category(),"connect local media");
+  }else{
+    if(type!=napi_number)throw ProtocolError("trusted local path or descriptor required");
+    double numeric;check(napi_get_value_double(env,args[0],&numeric));if(!std::isfinite(numeric) || numeric<0 || numeric>INT32_MAX || std::floor(numeric)!=numeric)throw ProtocolError("descriptor integer required");
+    socket=Descriptor(fcntl(int(numeric),F_DUPFD_CLOEXEC,0));if(socket.get()<0)throw std::system_error(errno,std::generic_category(),"duplicate connection");
+  }
   napi_value global,constructor,predicate;check(napi_get_global(env,&global));check(napi_get_named_property(env,global,"Buffer",&constructor));check(napi_get_named_property(env,constructor,"isBuffer",&predicate));
   auto attach=decode_buffer(env,args[1],predicate);if(!std::holds_alternative<Attach>(attach.payload))throw ProtocolError("ATTACH required");
   check(napi_typeof(env,args[2],&type));if(type!=napi_function)throw ProtocolError("callback required");
-  Descriptor socket(fcntl(int(numeric),F_DUPFD_CLOEXEC,0));if(socket.get()<0)throw std::system_error(errno,std::generic_category(),"duplicate connection");
   auto self=std::make_shared<NodeConnection>(env,std::move(attach.target));napi_value object;check(napi_create_object(env,&object));
   auto holder=std::make_unique<Holder>(self);check(napi_wrap(env,object,holder.get(),finalizer,nullptr,nullptr));holder.release();
-  napi_property_descriptor methods[]={{"acceptLayout",nullptr,accept,nullptr,nullptr,nullptr,napi_default,nullptr},{"sendControl",nullptr,send,nullptr,nullptr,nullptr,napi_default,nullptr},{"close",nullptr,close,nullptr,nullptr,nullptr,napi_default,nullptr}};
-  check(napi_define_properties(env,object,3,methods));
+  napi_property_descriptor methods[]={{"retainAllocation",nullptr,retain_allocation,nullptr,nullptr,nullptr,napi_default,nullptr},{"acceptLayout",nullptr,accept,nullptr,nullptr,nullptr,napi_default,nullptr},{"sendControl",nullptr,send,nullptr,nullptr,nullptr,napi_default,nullptr},{"close",nullptr,close,nullptr,nullptr,nullptr,napi_default,nullptr}};
+  check(napi_define_properties(env,object,4,methods));
   try{
     check(napi_create_reference(env,args[2],1,&self->callback));check(napi_create_reference(env,predicate,1,&self->predicate));
     napi_value resource;check(napi_create_object(env,&resource));check(napi_create_reference(env,resource,1,&self->resource));check(napi_async_init(env,resource,text(env,"mtai.avatar.connection"),&self->context));
@@ -147,6 +179,7 @@ napi_value create(napi_env env,napi_callback_info info){return guarded(env,[&]{
   }catch(...){if(self->hook){napi_remove_async_cleanup_hook(self->hook);self->hook=nullptr;}self->dispose_refs();self->keepalive.reset();throw;}
   return object;
 });}
+napi_value clock(napi_env env,napi_callback_info){return guarded(env,[&]{timespec value{};if(clock_gettime(CLOCK_MONOTONIC,&value))throw std::system_error(errno,std::generic_category(),"monotonic clock");napi_value result;check(napi_create_bigint_uint64(env,uint64_t(value.tv_sec)*1000000000+uint64_t(value.tv_nsec),&result));return result;});}
 }
-void install_node_connection(napi_env env,napi_value exports){napi_value function;check(napi_create_function(env,"createConnection",NAPI_AUTO_LENGTH,create,nullptr,&function));prop(env,exports,"createConnection",function);}
+void install_node_connection(napi_env env,napi_value exports){napi_value function;check(napi_create_function(env,"createConnection",NAPI_AUTO_LENGTH,create,nullptr,&function));prop(env,exports,"createConnection",function);check(napi_create_function(env,"monotonicNs",NAPI_AUTO_LENGTH,clock,nullptr,&function));prop(env,exports,"monotonicNs",function);}
 }  // namespace mtai::avatar
