@@ -19,19 +19,26 @@ PipewireOutput::PipewireOutput(Target target,Layout layout,PcmCustody::Notify no
   // SPA raw audio representation, not a new media ceiling.
   if(layout_.channels>SPA_AUDIO_MAX_CHANNELS)throw ProtocolError("unsupported SPA channel representation");
 }
-PipewireOutput::~PipewireOutput(){if(!closed_)std::terminate();}
+PipewireOutput::~PipewireOutput(){if(!closed_ && (loop_ || custody_ || stream_))std::terminate();}
 pw_stream_events PipewireOutput::callbacks(){
   pw_stream_events value{};value.version=PW_VERSION_STREAM_EVENTS;value.state_changed=state;
   value.param_changed=format;value.add_buffer=added;value.remove_buffer=removed;
   value.process=processing;value.drained=drained;return value;
 }
-void PipewireOutput::check(){int error=error_.load();if(error)checked(error,"PipeWire output failed");}
+void PipewireOutput::check(){if(cancelled_)throw ProtocolError("avatar output cancelled");int error=error_.load();if(error)checked(error,"PipeWire output failed");}
+void PipewireOutput::request_cancel(){
+  cancelled_=true;
+  std::lock_guard<std::mutex> lifetime(loop_lifetime_);
+  if(loop_){Lock lock(loop_);signal();}
+}
 void PipewireOutput::signal() noexcept {if(loop_)pw_thread_loop_signal(loop_,false);}
 void PipewireOutput::failure(int error) noexcept {error_=error;signal();if(completion_event_)completed(this);}
 void PipewireOutput::open(){
   if(loop_ || closed_)throw ProtocolError("output already opened or retired");
   static std::once_flag initialized;std::call_once(initialized,[]{pw_init(nullptr,nullptr);});
-  loop_=pw_thread_loop_new("mtai-avatar-output",nullptr);if(!loop_)throw std::bad_alloc();
+  check();
+  {std::lock_guard<std::mutex> lifetime(loop_lifetime_);loop_=pw_thread_loop_new("mtai-avatar-output",nullptr);}
+  if(!loop_)throw std::bad_alloc();
   auto* main=pw_thread_loop_get_loop(loop_);
   completion_event_=pw_loop_add_event(main,event,this);if(!completion_event_)throw std::runtime_error("PipeWire completion event failed");
   custody_=std::make_unique<PcmCustody>(target_,layout_.channels,[this](auto command,void* data){barrier(command,data);},completed,this);
@@ -143,7 +150,8 @@ void PipewireOutput::close(){
   if(loop_){
     {Lock lock(loop_);if(stream_){if(connected_)checked(pw_stream_disconnect(stream_),"disconnect output");connected_=false;pw_stream_destroy(stream_);stream_=nullptr;}
       if(completion_event_){pw_loop_destroy_source(pw_thread_loop_get_loop(loop_),completion_event_);completion_event_=nullptr;}}
-    if(started_){pw_thread_loop_stop(loop_);started_=false;}pw_thread_loop_destroy(loop_);loop_=nullptr;
+    if(started_){pw_thread_loop_stop(loop_);started_=false;}
+    {std::lock_guard<std::mutex> lifetime(loop_lifetime_);pw_thread_loop_destroy(loop_);loop_=nullptr;}
   }
   custody_.reset();closed_=true;
 }

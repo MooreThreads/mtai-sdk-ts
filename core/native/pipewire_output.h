@@ -4,6 +4,7 @@
 #include <pipewire/pipewire.h>
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 namespace mtai::avatar {
 // One serialized nonRT control worker owns these synchronous operations. It is
@@ -21,6 +22,7 @@ class PipewireOutput {
   std::vector<PcmCompletion> collect();
   void stop(const Target& target,const std::string& turn);
   void end_and_drain(); // whole attachment only, actual drained event
+  void request_cancel(); // cross-thread permanent fence + actual wait wake
   void close(); // actual custody+stream+thread-loop join; repeatable
  private:
   struct BufferInfo {bool usable;};
@@ -51,6 +53,8 @@ class PipewireOutput {
   size_t usable_buffers_=0;
   bool started_=false,connected_=false,format_ready_=false,opened_=false,ended_=false,drained_=false,closed_=false;
   std::atomic<int> error_{0};
+  std::atomic<bool> cancelled_{false};
+  std::mutex loop_lifetime_; // publication/destruction vs external cancel wake
 };
 }  // namespace mtai::avatar
 #endif

@@ -7,11 +7,12 @@ mkdir -p -- "$1"
 read -r -a includes <<< "$(pkg-config --cflags-only-I libpipewire-0.3)"
 flags=()
 for include in "${includes[@]}"; do flags+=(-isystem "${include#-I}"); done
+flags+=(-isystem "${UV_INCLUDE_DIR:-/usr/include/node}")
 "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread "${flags[@]}" \
-  "$here/pcm_custody.cc" "$here/local_media_state.cc" "$here/pipewire_output.cc" \
-  "$here/test/test_pipewire_output.cc" $(pkg-config --libs libpipewire-0.3) -o "$1/test-pipewire-output"
+  "$here/pcm_custody.cc" "$here/local_media_state.cc" "$here/pipewire_output.cc" "$here/async_playback.cc" \
+  "$here/test/test_pipewire_output.cc" $(pkg-config --libs libpipewire-0.3) "${UV_LIBRARY:--l:libuv.so.1}" -o "$1/test-pipewire-output"
 "$1/test-pipewire-output"
 # Compile/link production without running or connecting to system PipeWire.
 "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -fPIC -shared -Wl,-z,defs "${flags[@]}" \
-  "$here/pcm_custody.cc" "$here/local_media_state.cc" "$here/pipewire_output.cc" \
-  $(pkg-config --libs libpipewire-0.3) -o "$1/libmtai-pipewire-check.so"
+  "$here/pcm_custody.cc" "$here/local_media_state.cc" "$here/pipewire_output.cc" "$here/async_playback.cc" \
+  $(pkg-config --libs libpipewire-0.3) "${UV_LIBRARY:--l:libuv.so.1}" -o "$1/libmtai-pipewire-check.so"

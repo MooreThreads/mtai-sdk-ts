@@ -1,4 +1,5 @@
 #include "../pipewire_output.h"
+#include "../async_playback.h"
 #include <spa/param/audio/format-utils.h>
 #include <cassert>
 #include <condition_variable>
@@ -8,11 +9,20 @@
 #include <thread>
 #include <cstdlib>
 #include <new>
+#include <dlfcn.h>
+#include <pthread.h>
 
 thread_local bool in_process=false;
+thread_local long fail_allocation=-1;
+thread_local bool fail_thread_start=false;
+extern "C" int pthread_create(pthread_t* thread,const pthread_attr_t* attr,void*(*start)(void*),void* data) noexcept {
+  if(fail_thread_start){fail_thread_start=false;return EAGAIN;}
+  using Create=int(*)(pthread_t*,const pthread_attr_t*,void*(*)(void*),void*);
+  static auto real=reinterpret_cast<Create>(dlsym(RTLD_NEXT,"pthread_create"));assert(real);return real(thread,attr,start,data);
+}
 thread_local unsigned pw_lock_depth=0;
 std::atomic<unsigned> process_allocations{0},process_frees{0};
-void* operator new(std::size_t size){if(in_process)++process_allocations;if(auto* p=std::malloc(size?size:1))return p;throw std::bad_alloc();}
+void* operator new(std::size_t size){if(fail_allocation==0){fail_allocation=-1;throw std::bad_alloc();}if(fail_allocation>0)--fail_allocation;if(in_process)++process_allocations;if(auto* p=std::malloc(size?size:1))return p;throw std::bad_alloc();}
 void operator delete(void* p) noexcept{if(in_process && p)++process_frees;std::free(p);}
 void operator delete(void* p,std::size_t) noexcept{::operator delete(p);}
 void* operator new[](std::size_t size){return ::operator new(size);}
@@ -37,6 +47,7 @@ pw_stream* current=nullptr;bool connected=false,hold_buffer=false,bad_format=fal
 unsigned barrier_count=0,flushes=0,drains=0,destroys=0,stops=0;std::atomic<unsigned> notifications{0};
 std::atomic<bool> pause_requested{false},drain_requested{false};bool fail_disconnect=false;
 unsigned invalid_media=0;bool unusable_buffer=false;
+std::atomic<unsigned> disconnect_attempts{0};bool disconnect_first_only=false;
 uint32_t queued_chunk_size=0,queued_chunk_offset=0;
 std::mutex rt_mutex;
 int invoke(void*,spa_invoke_func_t function,uint32_t seq,const void* data,size_t size,bool block,void* user) {
@@ -61,7 +72,7 @@ size_t process(pw_stream* stream,uint64_t requested) {
   {std::lock_guard<std::mutex> lock(rt_mutex);stream->buffer.requested=requested;stream->dequeuable=true;in_process=true;stream->events->process(stream->data);in_process=false;}
   pump(stream);return stream->chunk.size;
 }
-void reset() {std::lock_guard<std::mutex> lock(setup_mutex);current=nullptr;connected=false;hold_buffer=false;bad_format=false;hold_pause=false;hold_drain=false;barrier_count=flushes=drains=destroys=stops=0;notifications=0;pause_requested=false;drain_requested=false;fail_disconnect=false;invalid_media=0;unusable_buffer=false;queued_chunk_size=queued_chunk_offset=0;}
+void reset() {std::lock_guard<std::mutex> lock(setup_mutex);current=nullptr;connected=false;hold_buffer=false;bad_format=false;hold_pause=false;hold_drain=false;barrier_count=flushes=drains=destroys=stops=0;notifications=0;pause_requested=false;drain_requested=false;fail_disconnect=false;invalid_media=0;unusable_buffer=false;queued_chunk_size=queued_chunk_offset=0;disconnect_attempts=0;disconnect_first_only=false;}
 Target target{"session","generation","attachment"};
 Layout layout(){Layout p;p.allocation=7;p.width=4;p.height=4;p.fourcc=0x34324241;p.stride=16;p.extent=64;p.row_origin=1;p.color_space=1;p.sample_rate=16000;p.channels=1;p.sample_format=1;return p;}
 ResolvedFrame frame(uint64_t sequence,const std::string& turn,std::vector<uint8_t> pcm){auto count=pcm.size()/2;return {target,Frame{sequence,7,sequence,0,0,count,std::move(pcm)},EffectiveState{turn,true},PhaseDecision{}};}
@@ -113,7 +124,7 @@ int pw_stream_set_active(pw_stream* stream,bool active){
   stream->events->state_changed(stream->data,PW_STREAM_STATE_STREAMING,active?PW_STREAM_STATE_STREAMING:PW_STREAM_STATE_PAUSED,nullptr);return 0;
 }
 int pw_stream_flush(pw_stream* stream,bool drain){if(drain){++drains;drain_requested=true;if(!hold_drain)stream->events->drained(stream->data);}else ++flushes;return 0;}
-int pw_stream_disconnect(pw_stream*){return fail_disconnect?-EIO:0;}
+int pw_stream_disconnect(pw_stream*){unsigned attempt=++disconnect_attempts;return (disconnect_first_only?attempt==1:fail_disconnect)?-EIO:0;}
 void pw_stream_destroy(pw_stream* stream){if(stream->buffer_added)stream->events->remove_buffer(stream->data,&stream->buffer);++destroys;delete stream;}
 }
 void acceptance_and_output(){
@@ -189,4 +200,145 @@ void rejected_storage(){
   assert(process(current,1)==0);assert(queued_chunk_size==0 && queued_chunk_offset==0 && current->buffer.size==0);
   failed=false;try{output.collect();}catch(const std::exception&){failed=true;}assert(failed);output.close();
 }
-int main(){acceptance_and_output();failed_format();delayed_pause_and_drain();failed_close_retry();idle_error();error_with_success(false);error_with_success(true);wrong_media(1);wrong_media(2);rejected_storage();assert(process_allocations==0 && process_frees==0);std::cout<<"PipeWire adapter fake API negotiation/bytes/scoped stop/drain/close passed\n";}
+void cancel_wait(bool drain_wait){
+  reset();PipewireOutput output(target,layout(),notify,nullptr);std::atomic<bool> failed{false};
+  if(drain_wait){output.open();hold_drain=true;}
+  else hold_buffer=true;
+  std::thread worker([&]{try{if(drain_wait)output.end_and_drain();else output.open();}catch(const std::exception&){failed=true;}});
+  if(drain_wait){while(!drain_requested.load())std::this_thread::yield();}
+  else {std::unique_lock<std::mutex> lock(setup_mutex);setup_changed.wait(lock,[]{return connected;});}
+  output.request_cancel();worker.join();assert(failed);output.close();output.request_cancel();output.close();
+  assert(destroys==1 && stops==1);
+}
+void async_close_during_open(){
+  reset();hold_buffer=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  unsigned ready=0,closed=0,failed=0;
+  PlaybackEvents events;events.ready=[&]{++ready;};events.failed=[&](std::string){++failed;};events.closed=[&]{++closed;};
+  auto output=AsyncPlayback::open(&loop,target,layout(),std::move(events));
+  {std::unique_lock<std::mutex> lock(setup_mutex);setup_changed.wait(lock,[]{return connected;});}
+  // Loop can execute unrelated callbacks while actual audio negotiation waits.
+  bool responsive=false;uv_timer_t witness{};assert(uv_timer_init(&loop,&witness)==0);witness.data=&responsive;
+  assert(uv_timer_start(&witness,[](uv_timer_t* timer){*static_cast<bool*>(timer->data)=true;uv_close(reinterpret_cast<uv_handle_t*>(timer),nullptr);},0,0)==0);
+  uv_run(&loop,UV_RUN_NOWAIT);assert(responsive && ready==0);
+  output->close();uv_run(&loop,UV_RUN_DEFAULT);assert(closed==1 && ready==0 && failed==0);
+  output->close();output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_ready_close(bool throws){
+  reset();uv_loop_t loop;assert(uv_loop_init(&loop)==0);unsigned ready=0,closed=0,failed=0;
+  std::shared_ptr<AsyncPlayback> output;PlaybackEvents events;
+  events.ready=[&]{++ready;if(throws)throw std::runtime_error("application callback failed");output->close();};
+  events.failed=[&](std::string){++failed;};events.closed=[&]{++closed;};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));uv_run(&loop,UV_RUN_DEFAULT);
+  assert(ready==1 && closed==1 && failed==(throws?1u:0u));output.reset();assert(uv_loop_close(&loop)==0);
+}
+void cancel_paused_wait(){
+  reset();PipewireOutput output(target,layout(),notify,nullptr);output.open();hold_pause=true;
+  {std::lock_guard<std::recursive_mutex> lock(current->owner->mutex);current->events->state_changed(current->data,PW_STREAM_STATE_PAUSED,PW_STREAM_STATE_STREAMING,nullptr);}
+  std::atomic<bool> failed{false};std::thread worker([&]{try{output.stop(target,"A1");}catch(const std::exception&){failed=true;}});
+  while(!pause_requested.load())std::this_thread::yield();
+  output.request_cancel();worker.join();assert(failed && flushes==0);output.close();
+}
+void async_close_during_drain(){
+  reset();hold_drain=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  unsigned closed=0,drained=0,failed=0;std::shared_ptr<AsyncPlayback> output;
+  uv_async_t closer{};assert(uv_async_init(&loop,&closer,[](uv_async_t* handle){
+    auto& playback=*static_cast<std::shared_ptr<AsyncPlayback>*>(handle->data);playback->close();uv_close(reinterpret_cast<uv_handle_t*>(handle),nullptr);
+  })==0);closer.data=&output;
+  PlaybackEvents events;events.ready=[&]{output->end();};events.drained=[&]{++drained;};events.closed=[&]{++closed;};events.failed=[&](std::string){++failed;};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));
+  std::thread control([&]{while(!drain_requested.load())std::this_thread::yield();uv_async_send(&closer);});
+  uv_run(&loop,UV_RUN_DEFAULT);control.join();assert(closed==1 && drained==0 && failed==0);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_retirement_retry(){
+  reset();fail_disconnect=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  unsigned closed=0,failed=0;std::shared_ptr<AsyncPlayback> output;PlaybackEvents events;
+  events.ready=[&]{output->close();};events.closed=[&]{++closed;};events.failed=[&](std::string){++failed;assert(closed==0 && destroys==0);fail_disconnect=false;output->close();};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));uv_run(&loop,UV_RUN_DEFAULT);
+  assert(closed==1 && failed==1 && destroys==1);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_command_custody(){
+  reset();hold_pause=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  const auto loop_thread=std::this_thread::get_id();unsigned closed=0,completions=0;std::shared_ptr<AsyncPlayback> output;std::thread processing;
+  uv_async_t progress{};progress.data=&output;
+  assert(uv_async_init(&loop,&progress,[](uv_async_t* handle){
+    auto& playback=*static_cast<std::shared_ptr<AsyncPlayback>*>(handle->data);
+    playback->submit(frame(2,"B2",{5,6,7,8}));
+    {std::lock_guard<std::recursive_mutex> lock(current->owner->mutex);current->events->state_changed(current->data,PW_STREAM_STATE_STREAMING,PW_STREAM_STATE_PAUSED,nullptr);}
+    uv_close(reinterpret_cast<uv_handle_t*>(handle),nullptr);
+  })==0);progress.data=&output;
+  PlaybackEvents events;events.ready=[&]{
+    {std::lock_guard<std::recursive_mutex> lock(current->owner->mutex);current->events->state_changed(current->data,PW_STREAM_STATE_PAUSED,PW_STREAM_STATE_STREAMING,nullptr);}
+    output->submit(frame(1,"A1",{1,2,3,4}));output->stop(target,"A1");
+  };
+  events.failed=[](std::string){assert(false);};events.closed=[&]{++closed;};
+  events.completed=[&](std::vector<PcmCompletion> values){assert(std::this_thread::get_id()==loop_thread);
+    for(const auto& value:values){++completions;if(value.identity.turn=="A1")assert(value.disposition==PcmDisposition::cancelled);
+      else {assert(value.identity.turn=="B2" && value.identity.sequence==2 && value.disposition==PcmDisposition::copied);processing.join();output->close();}}
+  };
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));
+  processing=std::thread([&]{while(!pause_requested.load())std::this_thread::yield();uv_async_send(&progress);
+    // Drive actual callbacks until B is submitted; processing emits completion
+    // notifications through production worker and uv result delivery.
+    while(true){bool copied;{std::lock_guard<std::mutex> lock(rt_mutex);current->buffer.requested=2;current->dequeuable=true;in_process=true;current->events->process(current->data);in_process=false;copied=current->chunk.size==4;if(copied)assert(std::memcmp(current->bytes,"\5\6\7\10",4)==0);}
+      if(copied){pump(current);break;}std::this_thread::yield();}
+  });
+  uv_run(&loop,UV_RUN_DEFAULT);assert(!processing.joinable());assert(completions==2 && closed==1 && flushes==1);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_operation_and_retirement_failure(){
+  reset();bad_format=true;fail_disconnect=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  unsigned failed=0,closed=0;std::shared_ptr<AsyncPlayback> output;PlaybackEvents events;
+  events.failed=[&](std::string){++failed;assert(closed==0);if(failed==2)output->close();if(failed==3){fail_disconnect=false;output->close();}};
+  events.closed=[&]{++closed;};output=AsyncPlayback::open(&loop,target,layout(),std::move(events));uv_run(&loop,UV_RUN_DEFAULT);
+  assert(failed==3 && closed==1);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_construction_faults(){
+  bool success=false;unsigned failures=0;
+  for(long site=0;!success;++site){
+    reset();uv_loop_t loop;assert(uv_loop_init(&loop)==0);std::shared_ptr<AsyncPlayback> output;unsigned closed=0;
+    PlaybackEvents events;events.closed=[&]{++closed;};fail_allocation=site;
+    try{output=AsyncPlayback::open(&loop,target,layout(),std::move(events));success=true;}
+    catch(const std::bad_alloc&){++failures;}
+    fail_allocation=-1;if(output)output->close();uv_run(&loop,UV_RUN_DEFAULT);
+    output.reset();assert(uv_loop_close(&loop)==0);
+  }
+  assert(failures>1);
+  reset();uv_loop_t loop;assert(uv_loop_init(&loop)==0);bool failed=false;fail_thread_start=true;
+  try{AsyncPlayback::open(&loop,target,layout(),{});}catch(const std::system_error&){failed=true;}
+  assert(failed);uv_run(&loop,UV_RUN_DEFAULT);assert(uv_loop_close(&loop)==0);
+}
+void async_throwing_failure_notification(){
+  reset();fail_disconnect=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
+  unsigned failed=0,closed=0;std::shared_ptr<AsyncPlayback> output;PlaybackEvents events;
+  events.ready=[&]{output->close();};events.failed=[&](std::string){++failed;throw std::runtime_error("failure observer threw");};events.closed=[&]{++closed;};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));
+  while(failed==0)uv_run(&loop,UV_RUN_ONCE);
+  assert(closed==0 && destroys==0);uv_run(&loop,UV_RUN_NOWAIT);assert(failed==1 && closed==0);
+  fail_disconnect=false;output->close();uv_run(&loop,UV_RUN_DEFAULT);assert(closed==1);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_close_then_throw(){
+  reset();fail_disconnect=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);unsigned failed=0,closed=0;
+  std::shared_ptr<AsyncPlayback> output;PlaybackEvents events;
+  events.ready=[&]{output->close();while(disconnect_attempts.load()==0)std::this_thread::yield();throw std::runtime_error("closed then threw");};
+  events.failed=[&](std::string){++failed;};events.closed=[&]{++closed;};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));
+  while(failed<2)uv_run(&loop,UV_RUN_ONCE);
+  assert(disconnect_attempts==1 && closed==0);fail_disconnect=false;output->close();uv_run(&loop,UV_RUN_DEFAULT);
+  assert(closed==1);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_retry_before_delivery(){
+  reset();fail_disconnect=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);unsigned failed=0,closed=0;
+  std::shared_ptr<AsyncPlayback> output;PlaybackEvents events;
+  events.ready=[&]{output->close();while(disconnect_attempts.load()==0)std::this_thread::yield();output->close();};
+  events.failed=[&](std::string){++failed;if(failed==2){fail_disconnect=false;output->close();}};events.closed=[&]{++closed;};
+  output=AsyncPlayback::open(&loop,target,layout(),std::move(events));uv_run(&loop,UV_RUN_DEFAULT);
+  assert(failed==2 && closed==1 && disconnect_attempts==3);output.reset();assert(uv_loop_close(&loop)==0);
+}
+void async_explicit_close_before_operation_failure_delivery(){
+  reset();bad_format=true;disconnect_first_only=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);unsigned failed=0,closed=0;
+  PlaybackEvents events;events.failed=[&](std::string){++failed;};events.closed=[&]{++closed;};
+  auto output=AsyncPlayback::open(&loop,target,layout(),std::move(events));
+  while(disconnect_attempts.load()==0)std::this_thread::yield();
+  output->close();
+  uv_run(&loop,UV_RUN_DEFAULT);assert(failed==2 && closed==1 && disconnect_attempts==2);output.reset();assert(uv_loop_close(&loop)==0);
+}
+int main(){acceptance_and_output();failed_format();delayed_pause_and_drain();failed_close_retry();idle_error();error_with_success(false);error_with_success(true);wrong_media(1);wrong_media(2);rejected_storage();cancel_wait(false);cancel_wait(true);cancel_paused_wait();async_close_during_open();async_ready_close(false);async_ready_close(true);async_close_during_drain();async_retirement_retry();async_command_custody();async_operation_and_retirement_failure();async_construction_faults();async_throwing_failure_notification();async_close_then_throw();async_retry_before_delivery();async_explicit_close_before_operation_failure_delivery();assert(process_allocations==0 && process_frees==0);std::cout<<"PipeWire adapter fake API negotiation/bytes/scoped stop/drain/close/async cancellation passed\n";}
