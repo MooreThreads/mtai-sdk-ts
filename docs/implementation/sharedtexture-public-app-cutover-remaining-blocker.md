@@ -1,0 +1,9 @@
+# Slice 2 remaining blocker — bounded handoff note
+
+After consolidated six-finding correction and two rechecks, Astra SPEC remains NOTPASS with one P2 reachable regression. Stop the review churn here per holistic bounded-review contract; no QUALITY approval/commit for Slice2.
+
+Latest evidence: /tmp/mtai-public-cutover-review.u81gtzr2/spec-fixed2-result.private.md, completed gpt-6-astra/medium/stop. Frozen SDK43 entries andapp9 unchanged before this administrative note. Earlier reports retained: spec-result.private.md sixfindings, spec-fixed-result.private.md twofindings, spec-fixed2-result.private.md onefinding.
+
+Remaining source sessions.ts: coordinator awaits current.close while statusstillconnected. Publicsendroutes to disposedconversation and rejects commandsduringordinary/scheduledreconnect instead of buffering. Baseline switchedreconnecting/buffering beforeawaitdisconnect. Required bounded nextfix: classify nonterminal reconnect and setreconnecting/loading before awaitedretirement, keep terminal protocol failure sendrejection and actualjoins before replacement. Add publicfacadewitness holdingnativeclose pending, sendduringretirement thenexactlyonce deliveryreplacement. Do not change timers/retry or add wrapperframework. Further editing/review deferred pending continuation direction.
+
+Current verification: prior19named351PASS/app18PASS(oneexistingartifacttestexplicitlyexcludedsourceonly). Followingfixed2, tsc+3affected47PASS; no claimofwhole351 rerunafterfixed2. Earlier collection591->383(net-208) was before+4casesadded; currentexpected387 notcollectionverified, neveruseexpectedasPASS. Appfulltsc stillinherited19normalizedsourcediagnostics verifiedagainstcleanbaseline, notbuildPASS. No installation/restart/push/probes, DH2D/client/server/frontend/Pi unchanged. Slice1commit b532411b6ade74eb217576f8c95b3ac18a8923d5 remainslastapprovedcommit.

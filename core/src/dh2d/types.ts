@@ -1,50 +1,13 @@
+import type { AvatarStatus } from '../voice/avatarMediaHost';
 import { DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, EventSource, UnionEqual } from "../types";
 import type { VoiceClientToolHandler } from "../voice/channelBinding";
 
-/**
- * Represents a connection to the server.
- */
-export type DH2DConnection = EventSource<DHConnectionEvents> & {
-  /**
-   * The unique identifier for the session.
-   */
-  readonly sessionId: string
-  /**
-   * The WebSocket connection to the server.
-   */
-  readonly ws: WebSocket
-  /**
-   * The WebRTC connection to the server.
-   */
-  readonly pc: RTCPeerConnection
-  /**
-   * The WebRTC connection to the server for audio.
-   */
-  readonly audioPc?: RTCPeerConnection
-}
-/**
- * Represents the HTML elements used for the player.
- */
-export type DH2DPlayerElements = {
-  /** Untransformed host for SDK-owned UI. */
-  container?: HTMLElement
-  /** Releases player presentation listeners and error UI. */
-  dispose?: () => void
-  /** Shows a terminal error over the video; omit the message to clear it. */
-  showError?: (message?: string) => void
-  /**
-   * The video element used to display the video stream.
-   */
-  video: HTMLVideoElement
-  /**
-   * Optional canvas element used as a cover or overlay for the video.
-   */
-  cover?: HTMLCanvasElement
-}
+/** Conversation-owned UI container, independent of media presentation. */
+export type DH2DPlayerElements = { container?: HTMLElement }
 /**
  * Voice-client avatar mode: the SDK talks to the local voice client for
- * voice protocol traffic and exchanges the WebRTC offer directly with DH2D
- * using the canonical session id reported by `dh_2d_session_ready`.
+ * voice protocol traffic and attaches native local output using the canonical
+ * session id reported by `dh_2d_session_ready`.
  */
 export type DH2DVoiceClientConfig = {
   /**
@@ -55,7 +18,7 @@ export type DH2DVoiceClientConfig = {
   interaction_endpoint: string,
   /**
    * HTTP endpoint of the DH2D server used for voice-client avatar
-   * operations: avatar discovery and the direct WebRTC offer exchange,
+   * operations: avatar discovery,
    * for example `http://192.168.10.23:32107`. It is independent of the
    * global legacy `Config.endpoint`; a partial runtime config that omits
    * it falls back to that legacy endpoint.
@@ -151,10 +114,12 @@ export type ResolvedDH2DSessionConfig = Required<Omit<DH2DSessionConfig, 'voiceC
 }
 
 export type DH2DSessionEvents = DHConnectionEvents & {
+  mediaStatus: AvatarStatus
   statuschange: typeof DH2DSessionStatus[number]
 }
 export const DH2DSessionEventTypes = [
   ...DHConnectionEventTypes,
+  "mediaStatus",
   "statuschange",
 ] as const;
 /**
@@ -173,6 +138,12 @@ export type DH2DSession = EventSource<DH2DSessionEvents> & {
    * The current status of the session.
    */
   readonly status: typeof DH2DSessionStatus[number]
+  readonly mediaStatus: AvatarStatus
+  attachMedia(): Promise<void>
+  detachMedia(): Promise<void>
+  /** SDK presentation entry; no native media ownership in the view. */
+  mountAvatar(selector: string): void
+  unmountAvatar(): void
 
   /**
    * Sends a configuration message to the server.

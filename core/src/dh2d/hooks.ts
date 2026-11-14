@@ -1,130 +1,32 @@
-import { connect, disconnect, untilFailed } from "./connections";
-import { connectPc } from "../pc";
-import { connectVoiceClient, disconnectVoiceClient } from "./voiceConnections";
-import { createAvatarFrameRequester, createAvatarFrameSampler } from "./avatarMedia";
-import { createAvatarStripeReadback } from './avatarStripeReadback';
-import { DH2DSessionConfig, DH2DPlayerElements, DH2DSession, ResolvedDH2DSessionConfig } from "./types";
-import { Abortable, Box } from "../types";
-import { box } from "../box";
-import { config as rootConfig } from "../config";
-import { createPlayerPresentation } from './playerPresentation';
+import { DH2DSessionConfig, DH2DSession, ResolvedDH2DSessionConfig } from './types'
+import { Abortable, Box } from '../types'
+import { box } from '../box'
+import { config as rootConfig } from '../config'
 
 function defaultConfig(config?: DH2DSessionConfig): ResolvedDH2DSessionConfig {
-    return {
-        ...config,
-        voiceClient: config?.voiceClient || rootConfig().voiceClient,
-        rtcConfiguration: config?.rtcConfiguration || {},
-        audioInput: config?.audioInput || false,
-        sessionId: config?.sessionId || Math.random().toString(36).substring(2, 15),
-        videoId: config?.videoId || 'liruyun',
-        frameRate: config?.frameRate || 25,
-        reconnectInterval: config?.reconnectInterval || 20 * 60 * 1000,
-        connectTimeout: config?.connectTimeout || 60 * 1000,
-        maxAudioVideoDurationDifference: config?.maxAudioVideoDurationDifference || 10 * 1000,
-        pingInterval: config?.pingInterval || 10 * 1000,
-        pingTimeout: config?.pingTimeout || 5 * 1000,
-    }
+  return { ...config, voiceClient: config?.voiceClient || rootConfig().voiceClient,
+    rtcConfiguration: config?.rtcConfiguration || {}, audioInput: config?.audioInput || false,
+    sessionId: config?.sessionId || Math.random().toString(36).substring(2, 15), videoId: config?.videoId || 'liruyun',
+    frameRate: config?.frameRate || 25, reconnectInterval: config?.reconnectInterval || 20 * 60 * 1000,
+    connectTimeout: config?.connectTimeout || 60 * 1000, maxAudioVideoDurationDifference: config?.maxAudioVideoDurationDifference || 10 * 1000,
+    pingInterval: config?.pingInterval || 10 * 1000, pingTimeout: config?.pingTimeout || 5 * 1000 }
 }
-
-function getOrCreatePlayer(parent: HTMLElement): DH2DPlayerElements {
-    let container = parent.querySelector("#mt_dh2d_container") as HTMLDivElement;
-    if (!container) {
-        container = document.createElement("div");
-        container.id = "mt_dh2d_container";
-        parent.appendChild(container);
-        container.style.width = "100%";
-        container.style.height = "100%";
-        container.style.position = "relative";
-    }
-    let video = container.querySelector("#mt_dh2d_video") as HTMLVideoElement;
-    if (!video) {
-        video = document.createElement("video");
-        video.id = "mt_dh2d_video";
-        container.appendChild(video);
-        video.style.objectFit = "contain";
-        video.style.position = "absolute";
-        video.style.top = "0";
-        video.style.left = "0";
-        video.style.right = "0";
-        video.style.bottom = "0";
-        video.style.width = "100%";
-        video.style.height = "100%";
-    }
-    let cover = container.querySelector("#mt_dh2d_cover") as HTMLCanvasElement;
-    if (!cover) {
-        cover = document.createElement("canvas");
-        cover.id = "mt_dh2d_cover"
-        container.appendChild(cover);
-        cover.style.objectFit = "contain";
-        cover.style.position = "absolute";
-        cover.style.top = "0";
-        cover.style.left = "0";
-        cover.style.right = "0";
-        cover.style.bottom = "0";
-        cover.style.opacity = "0";
-        cover.style.width = "100%";
-        cover.style.height = "100%";
-    }
-    const presentation = createPlayerPresentation(container, video, cover, rootConfig().show_turn_id === true)
-    return {
-        video,
-        cover,
-        container,
-        ...presentation,
-    }
-}
-
-
 export const globalDH2DSessions: Box<DH2DSession[]> = box([])
-
 export const untilSessionCountLessThanOrEqualTo = (count: number) => async (session: DH2DSession, abortable: Abortable) => {
-    await new Promise<void>(resolve => {
-        let finished = false
-        const timers = new Set<ReturnType<typeof setTimeout>>()
-        let unsubscribe = () => {}
-        let unregister = () => {}
-        const finish = () => {
-            finished = true
-            unsubscribe()
-            unregister()
-            timers.forEach(clearTimeout)
-            timers.clear()
-            resolve()
-        }
-        const claim = () => {
-            if (finished || globalDH2DSessions.value.length > count) return
-            finish()
-            globalDH2DSessions.value = [...globalDH2DSessions.value, session]
-        }
-        unregister = abortable.onabort(finish)
-        if (finished) return
-        unsubscribe = globalDH2DSessions.on('value', () => {
-            const timer = setTimeout(() => {
-                timers.delete(timer)
-                claim()
-            }, 1000)
-            timers.add(timer)
-        })
-        claim()
-    })
+  await new Promise<void>(resolve => {
+    let finished = false
+    const timers = new Set<ReturnType<typeof setTimeout>>()
+    let unsubscribe = () => {}, unregister = () => {}
+    const finish = () => { finished = true; unsubscribe(); unregister(); timers.forEach(clearTimeout); timers.clear(); resolve() }
+    const claim = () => {
+      if (finished || globalDH2DSessions.value.length > count) return
+      finish(); globalDH2DSessions.value = [...globalDH2DSessions.value, session]
+    }
+    unregister = abortable.onabort(finish)
+    if (finished) return
+    unsubscribe = globalDH2DSessions.on('value', () => { const timer = setTimeout(() => { timers.delete(timer); claim() }, 1000); timers.add(timer) })
+    claim()
+  })
 }
-
-async function afterClosingSession(session: DH2DSession) {
-    globalDH2DSessions.value = globalDH2DSessions.value.filter(s => s !== session)
-}
-
-export const dh2dHooks = {
-    defaultConfig,
-    getOrCreatePlayer,
-    connect,
-    disconnect,
-    untilFailed,
-    connectPc,
-    connectVoiceClient,
-    disconnectVoiceClient,
-    createAvatarFrameRequester,
-    createAvatarFrameSampler,
-    createAvatarStripeReadback,
-    beforeConnectingSession: untilSessionCountLessThanOrEqualTo(0),
-    afterClosingSession,
-}
+async function afterClosingSession(session: DH2DSession) { globalDH2DSessions.value = globalDH2DSessions.value.filter(s => s !== session) }
+export const dh2dHooks = { defaultConfig, beforeConnectingSession: untilSessionCountLessThanOrEqualTo(0), afterClosingSession }

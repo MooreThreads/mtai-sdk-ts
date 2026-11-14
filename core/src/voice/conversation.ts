@@ -4,8 +4,7 @@ import type { DH2DVoiceClientConfig } from '../dh2d/types'
 import { createVoiceMessageAdapter, PROTOCOL_VERSION } from './adapter'
 import { createVoiceInputControl } from './inputControl'
 import { createVoiceMicrophone, type VoiceMicrophone } from './microphone'
-import { createChannelBindingToolHandler, type VoiceClientToolHandler } from './channelBinding'
-import { createChannelBindingUI } from './channelBindingUI'
+import { createConversationBinding, type ConversationBinding } from './conversationBinding'
 import { createTurnTransitionTracker } from './turnTransition'
 import { VoiceProtocolError, voiceClientWebSocketUrl, sendVoiceClientMessage,
   isFrontendToolCall, isSerializedFrontendToolResult, sanitizeFrontendToolResult, FRONTEND_TOOL_FAILURE } from './conversationProtocol'
@@ -28,6 +27,7 @@ export type ConversationOptions = {
   logger: Logger,
   audioInput?: boolean | MediaStream,
   bindingContainer?: HTMLElement,
+  binding?: ConversationBinding,
   socketFactory?: (url: string) => WebSocket,
   attachmentIdFactory?: () => string,
   microphoneFactory?: (onPcm: (data: Uint8Array) => void, onLost: () => void) => VoiceMicrophone,
@@ -76,14 +76,9 @@ export function createConversationConnection(options: ConversationOptions) {
     if (options.audioInput !== true) throw new Error('host-default microphone input unavailable or overridden')
     return createVoiceMicrophone({ audioInput: true, logger: options.logger, onPcm, onLost })
   } })
-  let bindingUI: ReturnType<typeof createChannelBindingUI> | undefined
-  const binding = options.voice.wechatPluginEndpoint ? createChannelBindingToolHandler({
-    endpoint: options.voice.wechatPluginEndpoint,
-    onSnapshot: snapshot => bindingUI?.update(snapshot),
-    onError: error => bindingUI?.error(error),
-  }) : undefined
-  if (binding && options.bindingContainer) bindingUI = createChannelBindingUI(options.bindingContainer, binding.workflow)
-  const toolHandler: VoiceClientToolHandler | undefined = options.voice.frontendToolHandler ?? binding?.handler
+  const ownedBinding = !options.binding && options.voice.wechatPluginEndpoint
+    ? createConversationBinding(options.voice.wechatPluginEndpoint, options.bindingContainer) : undefined
+  const toolHandler = options.voice.frontendToolHandler ?? options.binding?.handler ?? ownedBinding?.handler
 
   function setMediaStatus(status: AvatarStatus) {
     if (disposed || mediaStatus === status) return
@@ -160,7 +155,7 @@ export function createConversationConnection(options: ConversationOptions) {
         setMediaStatus('loading')
         if (disposed || revision !== mediaRevision) return
         const identity = (options.attachmentIdFactory ?? (() => crypto.randomUUID()))()
-        const next: AvatarAttachment = { conversationSessionId: sessionId, dh2dSessionId: canonical,
+        const next: AvatarAttachment = { conversationSessionId: sessionId, dh2dSessionId: canonical, avatarId: options.videoId,
           generation: identity, attachment: identity }
         target = next
         lastSequence = 0n
@@ -276,7 +271,7 @@ export function createConversationConnection(options: ConversationOptions) {
     if (message.type === 'audio.output.start' && message.session_id === sessionId
         && typeof message.turn_id === 'string' && message.turn_id && !reported.has(message.turn_id)) accepted.add(message.turn_id)
     if (message.type === 'playback.stop' && (message.session_id === undefined || message.session_id === sessionId)) {
-      const turnId = typeof message.turn_id === 'string' ? message.turn_id : tracker.currentTurn()
+      const turnId = typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : tracker.currentTurn()
       if (turnId !== undefined && (accepted.has(turnId) || tracker.currentTurn() === turnId)) {
         const generation = target?.generation
         if (generation) stopMedia({ generation, turnId, reason: 'interrupt' })
@@ -306,8 +301,7 @@ export function createConversationConnection(options: ConversationOptions) {
       const results = await Promise.allSettled([
         Promise.resolve().then(unsubscribeMedia),
         Promise.resolve().then(() => ws.close()),
-        Promise.resolve().then(() => binding?.workflow.dispose()),
-        Promise.resolve().then(() => bindingUI?.dispose()),
+        Promise.resolve().then(() => ownedBinding?.dispose()),
         Promise.resolve().then(() => input.dispose()),
         Promise.resolve().then(() => options.mediaHost.dispose()),
         mediaTransition,

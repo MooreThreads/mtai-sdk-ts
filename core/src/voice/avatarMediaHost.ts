@@ -3,6 +3,8 @@ export type AvatarStatus = 'loading' | 'ready' | 'failed'
 export type AvatarAttachment = {
   conversationSessionId: string,
   dh2dSessionId: string,
+  /** SDK-local presentation selection, never added to the client/native wire. */
+  avatarId?: string,
   /** SDK-created attachment identity, echoed/fenced by the DH2D/native host. */
   generation: string,
   attachment: string,

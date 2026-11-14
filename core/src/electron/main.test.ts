@@ -8,18 +8,34 @@ const attachment={conversationSessionId:'voice',dh2dSessionId:'dh',generation:'g
 const layout={kind:'layout' as const,target,allocation:7n,width:4,height:3,fourcc:ABGR8888,stride:16n,offset:0n,modifier:0n,extent:48n,rowOrigin:1,colorSpace:1,sampleRate:16000,channels:1,sampleFormat:1}
 const tick=async()=>{for(let i=0;i<12;i++)await Promise.resolve()}
 function fixture(playbackFailure?: Error){
- const handlers=new Map<string,Function>(),windowHandlers=new Map<string,Function>(),sent:any[]=[]
- const contents={mainFrame:{},send:(channel:string,payload:unknown)=>sent.push([channel,payload]),on:(name:string,listener:Function)=>{windowHandlers.set(name,listener)},removeListener:(name:string)=>{windowHandlers.delete(name)}}
+ const handlers=new Map<string,Function>(),windowHandlers=new Map<string,Function>(),sent:any[]=[],controlsIpc=new Map<string,Function>()
+ const contents={mainFrame:{},send:jest.fn((channel:string,payload:unknown)=>{sent.push([channel,payload])}),on:(name:string,listener:Function)=>{windowHandlers.set(name,listener)},removeListener:(name:string)=>{windowHandlers.delete(name)}}
  const window:AvatarWindow={webContents:contents,on:(name,listener)=>{windowHandlers.set(name,listener)},removeListener:name=>{windowHandlers.delete(name)}}
  let receive!:(event:ConnectionEvent)=>void,audio!:(event:{type:string})=>void
  const controls:any[]=[],release=jest.fn(),connection={retainAllocation:()=>({fd:43,close:release}),acceptLayout:jest.fn(),sendControl:jest.fn(),close:jest.fn(async()=>{})}
  const playback={submitEligible:jest.fn(),stop:jest.fn(async()=>{}),end:jest.fn(),close:jest.fn(async()=>{})}
  const native:AvatarNative={createConnection:(_path,_wire,callback)=>{receive=callback;return connection},createPlayback:(_wire,callback)=>{if(playbackFailure)throw playbackFailure;audio=callback;return playback},monotonicNs:()=>123n}
- const ports:MainPorts={ipcMain:{on:(channel,handler)=>{handlers.set(channel,handler)},removeListener:channel=>{handlers.delete(channel)}},sharedTexture:{importSharedTexture:options=>({release:()=>options.allReferencesReleased()}),sendSharedTexture:async(_options,message)=>{controls.push(message)}}}
+ const ports:MainPorts={ipcMain:{handle:(channel,handler)=>{controlsIpc.set(channel,handler)},removeHandler:channel=>{controlsIpc.delete(channel)},on:(channel,handler)=>{handlers.set(channel,handler)},removeListener:channel=>{handlers.delete(channel)}},sharedTexture:{importSharedTexture:options=>({release:()=>options.allReferencesReleased()}),sendSharedTexture:async(_options,message)=>{controls.push(message)}}}
  const host=installAvatarHost(window,{socketPath:'/trusted',nativeAddonPath:'/unused'},ports,native)
  const ipc=(channel:string,value:unknown,trusted=true)=>handlers.get(channel)?.({sender:trusted?contents:{},senderFrame:contents.mainFrame},value)
- return {host,handlers,sent,controls,connection,playback,release,ipc,windowHandlers,receive:(event:ConnectionEvent)=>receive(event),audio:()=>audio({type:'audioReady'})}
+ return {host,controlsIpc,contents,handlers,sent,controls,connection,playback,release,ipc,windowHandlers,receive:(event:ConnectionEvent)=>receive(event),audio:()=>audio({type:'audioReady'})}
 }
+it('closed window never sends to destroyed contents and removes host registrations after joined retirement',async()=>{
+ const f=fixture();const attaching=f.host.attach(attachment);const failure=expect(attaching).rejects.toThrow();await tick();f.receive({type:'layout',wire:encodeLocalMedia(layout),fd:42});await tick()
+ f.contents.send.mockImplementation(()=>{throw Error('Object has been destroyed')})
+ expect(()=>f.windowHandlers.get('closed')!()).not.toThrow();await failure;await tick();await f.host.dispose()
+ expect(f.connection.close).toHaveBeenCalledTimes(1);expect(f.release).toHaveBeenCalledTimes(1);expect(f.controlsIpc.size).toBe(0);expect(f.handlers.size).toBe(0)
+ const replacement=fixture();expect(replacement.controlsIpc.has('mtai:avatar:control')).toBe(true);await replacement.host.dispose()
+})
+
+it('installed control entry rejects a foreign frame and routes only typed SDK attachment/stop operations',async()=>{
+ const f=fixture(),control=f.controlsIpc.get('mtai:avatar:control')!
+ await expect(control({sender:{},senderFrame:f.contents.mainFrame},{operation:'attach',target:attachment})).rejects.toThrow('sender rejected')
+ await expect(control({sender:f.contents,senderFrame:f.contents.mainFrame},{operation:'arbitrary-native-call'})).rejects.toThrow('invalid avatar control')
+ await control({sender:f.contents,senderFrame:f.contents.mainFrame},{operation:'stop',request:{generation:'g',reason:'detach'}})
+ await f.host.dispose();expect(f.controlsIpc.size).toBe(0)
+})
+
 it('authenticates main-frame preparation/submission and resolves only selected ATTACHED',async()=>{
  const f=fixture(),events:any[]=[];f.host.subscribe(event=>events.push(event));let ready=false
  const attaching=f.host.attach(attachment).then(()=>{ready=true});await tick();f.receive({type:'layout',wire:encodeLocalMedia(layout),fd:42});f.audio()

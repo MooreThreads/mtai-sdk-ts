@@ -1,0 +1,11 @@
+# Slice 2 — public SDK and existing app cutover
+
+Authority: holistic Astra three-slice plan; Slice 1 committed b532411. Parent implements inline in the two authorized SDK/app worktrees.
+
+Deliver one coherent installed call flow: main registration exposes only attachment/stop/retirement operations over authenticated current-main-frame IPC; preload owns the canvas, import receiver, resize and retained cover and exposes a narrow contextBridge capability. Portable session facade supplies that capability to the existing conversation owner; portable imports acquire neither Electron/native nor React. Optional React Avatar mounts only SDK presentation, never creates a conversation or second audio owner. Conversation/tools/QR survive presentation remount and media failure. Use the compatible createDH2DSession(parent, config) facade for existing app control/event handling; no video element/RTC fallback.
+
+Preserve existing coordinator connectTimeout/retry, scheduled reconnect and close wait values/callers/failure behavior; remove only obsolete RTC-specific sampling, stats, stripe and offer paths during working cutover. No timeout/limit/device/capture changes. Normal completion remains healthy applied A->B; empty explicit stop normalizes to captured current turn.
+
+Minimal app changes: one main/preload registration; SDK Avatar in existing media slot; independent outer QR container; wsOpen stays conversation-connected; avatar switch resolves only matching session connected plus media-ready with the existing 30000ms timeout unchanged; remove video/cover-specific player override. Preserve pet/main ownership, microphone/input, settings/auth/history/subtitles and non-avatar audio. Production addon loader and exact packed exports/artifact vendoring remain Slice 3; do not claim installed packaging acceptance.
+
+Acceptance: named portable/installed-boundary and app tests covering public facade, hidden/bootstrap, media failure/remount with QR/conversation survival, stale callbacks, repeated observations/stop, same-avatar cover, switch readiness and timeout preservation. Audit consumers before retiring old RTC/stripe implementations/tests; port observable laws, delete internal-only assertions with accounting. Whole coherent Slice 2 SPEC then independent QUALITY, not helper reviews. No install/restart/probes.

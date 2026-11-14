@@ -9,6 +9,16 @@
   "description": "SDK for MT AI Services",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./electron/main": { "types": "./dist/electron/main.d.ts", "default": "./dist/electron/main.js" },
+    "./electron/preload": { "types": "./dist/electron/preload.d.ts", "default": "./dist/electron/preload.js" },
+    "./package.json": "./package.json",
+    "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" }
+  },
+  "typesVersions": { "*": { "electron/main": ["dist/electron/main.d.ts"], "electron/preload": ["dist/electron/preload.d.ts"], "react": ["dist/react.d.ts"] } },
+  "peerDependencies": { "react": "^18.2.0" },
+  "peerDependenciesMeta": { "react": { "optional": true } },
   "scripts": {
     "build": "tsc",
     "test": "jest",
@@ -29,6 +39,10 @@
   "license": "MIT",
   "devDependencies": {
     "@types/jest": "^29.5.12",
+    "@types/react": "18.2.21",
+    "@types/react-dom": "18.2.7",
+    "react-dom": "18.2.0",
+    "react": "18.2.0",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
     "eslint": "^8.56.0",
