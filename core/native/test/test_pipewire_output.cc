@@ -11,6 +11,10 @@
 #include <new>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <fstream>
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+#include <node_api.h>
+#endif
 
 thread_local bool in_process=false;
 thread_local long fail_allocation=-1;
@@ -20,6 +24,11 @@ extern "C" int pthread_create(pthread_t* thread,const pthread_attr_t* attr,void*
   using Create=int(*)(pthread_t*,const pthread_attr_t*,void*(*)(void*),void*);
   static auto real=reinterpret_cast<Create>(dlsym(RTLD_NEXT,"pthread_create"));assert(real);return real(thread,attr,start,data);
 }
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+extern "C" void mtai_test_thread_start(){
+  if(fail_thread_start){fail_thread_start=false;throw std::system_error(EAGAIN,std::generic_category());}
+}
+#endif
 thread_local unsigned pw_lock_depth=0;
 std::atomic<unsigned> process_allocations{0},process_frees{0};
 void* operator new(std::size_t size){if(fail_allocation==0){fail_allocation=-1;throw std::bad_alloc();}if(fail_allocation>0)--fail_allocation;if(in_process)++process_allocations;if(auto* p=std::malloc(size?size:1))return p;throw std::bad_alloc();}
@@ -57,7 +66,14 @@ int invoke(void*,spa_invoke_func_t function,uint32_t seq,const void* data,size_t
 spa_source* add_event(void* object,spa_source_event_func_t function,void* data) {
   auto* loop=static_cast<pw_thread_loop*>(object);loop->event=function;loop->event_data=data;return &loop->source;
 }
-int signal_event(void* object,spa_source*) {auto* loop=static_cast<pw_thread_loop*>(object);loop->event_pending=true;return 0;}
+int signal_event(void* object,spa_source*) {auto* loop=static_cast<pw_thread_loop*>(object);
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+  std::lock_guard<std::recursive_mutex> lock(loop->mutex);loop->event(loop->event_data,1);
+#else
+  loop->event_pending=true;
+#endif
+  return 0;
+}
 void destroy_source(void*,spa_source*){}
 spa_loop_methods loop_methods{};spa_loop_utils_methods utils_methods{};
 void notify(void*) noexcept {++notifications;}
@@ -92,10 +108,21 @@ void pw_thread_loop_stop(pw_thread_loop* loop){assert(!loop->stopped);loop->stop
 void pw_thread_loop_destroy(pw_thread_loop* loop){delete loop;}
 void pw_thread_loop_lock(pw_thread_loop* loop){loop->mutex.lock();++pw_lock_depth;}
 void pw_thread_loop_unlock(pw_thread_loop* loop){assert(pw_lock_depth);--pw_lock_depth;loop->mutex.unlock();}
-void pw_thread_loop_wait(pw_thread_loop* loop){loop->changed.wait(loop->mutex);}
+void pw_thread_loop_wait(pw_thread_loop* loop){
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+  if(const char* path=std::getenv("MTAI_TEST_WAIT_FILE")){std::ofstream signal(path);signal<<"waiting";}
+#endif
+  loop->changed.wait(loop->mutex);
+}
 void pw_thread_loop_signal(pw_thread_loop* loop,bool){loop->changed.notify_all();}
 pw_stream* pw_stream_new_simple(pw_loop* loop,const char*,pw_properties* props,const pw_stream_events* events,void* data) {
-  pw_properties_free(props);auto* stream=new pw_stream;
+  pw_properties_free(props);
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+  const char* mode=std::getenv("MTAI_TEST_OUTPUT_MODE");
+  disconnect_attempts=0;hold_buffer=hold_drain=bad_format=disconnect_first_only=false;
+  if(mode){hold_buffer=std::strcmp(mode,"pending")==0;hold_drain=std::strcmp(mode,"drain")==0;bad_format=std::strcmp(mode,"invalid")==0;disconnect_first_only=std::strcmp(mode,"close-fail")==0;}
+#endif
+  auto* stream=new pw_stream;
   stream->owner=static_cast<pw_thread_loop*>(loop->loop->iface.cb.data);stream->events=events;stream->data=data;
   stream->plane.data=stream->bytes;stream->plane.maxsize=sizeof(stream->bytes);stream->plane.chunk=&stream->chunk;
   stream->spa.n_datas=1;stream->spa.datas=&stream->plane;stream->buffer.buffer=&stream->spa;return stream;
@@ -303,8 +330,9 @@ void async_construction_faults(){
   }
   assert(failures>1);
   reset();uv_loop_t loop;assert(uv_loop_init(&loop)==0);bool failed=false;fail_thread_start=true;
-  try{AsyncPlayback::open(&loop,target,layout(),{});}catch(const std::system_error&){failed=true;}
-  assert(failed);uv_run(&loop,UV_RUN_DEFAULT);assert(uv_loop_close(&loop)==0);
+  PlaybackEvents events;unsigned reported=0,retired=0;events.failed=[&](std::string){++reported;};events.closed=[&]{++retired;};
+  auto failed_owner=AsyncPlayback::open(&loop,target,layout(),std::move(events));failed=true;
+  assert(failed);uv_run(&loop,UV_RUN_DEFAULT);assert(reported==1 && retired==1);failed_owner.reset();assert(uv_loop_close(&loop)==0);
 }
 void async_throwing_failure_notification(){
   reset();fail_disconnect=true;uv_loop_t loop;assert(uv_loop_init(&loop)==0);
@@ -341,4 +369,21 @@ void async_explicit_close_before_operation_failure_delivery(){
   output->close();
   uv_run(&loop,UV_RUN_DEFAULT);assert(failed==2 && closed==1 && disconnect_attempts==2);output.reset();assert(uv_loop_close(&loop)==0);
 }
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+extern "C" void mtai_install_fixture(napi_env env,napi_value exports){
+  napi_value fault,attempts,thread_fault;
+  napi_create_function(env,"fault",NAPI_AUTO_LENGTH,[](napi_env e,napi_callback_info info)->napi_value {
+    size_t count=1;napi_value args[1];napi_get_cb_info(e,info,&count,args,nullptr,nullptr);int32_t site=-1;napi_get_value_int32(e,args[0],&site);fail_allocation=site;
+    napi_value result;napi_get_undefined(e,&result);return result;
+  },nullptr,&fault);napi_set_named_property(env,exports,"testFault",fault);
+  napi_create_function(env,"attempts",NAPI_AUTO_LENGTH,[](napi_env e,napi_callback_info)->napi_value {
+    napi_value result;napi_create_uint32(e,disconnect_attempts.load(),&result);return result;
+  },nullptr,&attempts);napi_set_named_property(env,exports,"testAttempts",attempts);
+  napi_create_function(env,"threadFault",NAPI_AUTO_LENGTH,[](napi_env e,napi_callback_info)->napi_value {
+    fail_thread_start=true;napi_value result;napi_get_undefined(e,&result);return result;
+  },nullptr,&thread_fault);napi_set_named_property(env,exports,"testThreadFault",thread_fault);
+}
+#endif
+#ifndef MTAI_PIPEWIRE_NODE_FIXTURE
 int main(){acceptance_and_output();failed_format();delayed_pause_and_drain();failed_close_retry();idle_error();error_with_success(false);error_with_success(true);wrong_media(1);wrong_media(2);rejected_storage();cancel_wait(false);cancel_wait(true);cancel_paused_wait();async_close_during_open();async_ready_close(false);async_ready_close(true);async_close_during_drain();async_retirement_retry();async_command_custody();async_operation_and_retirement_failure();async_construction_faults();async_throwing_failure_notification();async_close_then_throw();async_retry_before_delivery();async_explicit_close_before_operation_failure_delivery();assert(process_allocations==0 && process_frees==0);std::cout<<"PipeWire adapter fake API negotiation/bytes/scoped stop/drain/close/async cancellation passed\n";}
+#endif

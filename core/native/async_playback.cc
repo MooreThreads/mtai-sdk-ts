@@ -1,6 +1,9 @@
 #include "async_playback.h"
 #include <type_traits>
 
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+extern "C" void mtai_test_thread_start();
+#endif
 namespace mtai::avatar {
 AsyncPlayback::AsyncPlayback(Target target,Layout layout,PlaybackEvents events)
  :output_(std::move(target),layout,notify,this),events_(std::move(events)){}
@@ -9,8 +12,19 @@ std::shared_ptr<AsyncPlayback> AsyncPlayback::open(uv_loop_t* loop,Target target
   int status=uv_async_init(loop,&owner->async_,awakened);
   if(status<0){owner->output_.close();throw std::runtime_error(uv_strerror(status));}
   owner->async_.data=owner.get();owner->keepalive_=owner;
-  try{owner->worker_=std::thread([self=owner.get()]{self->run();});}
-  catch(...){owner->output_.close();owner->closing_=true;owner->async_closing_=true;uv_close(reinterpret_cast<uv_handle_t*>(&owner->async_),retired);throw;}
+  try{
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+    mtai_test_thread_start();
+#endif
+    owner->worker_=std::thread([self=owner.get()]{self->run();});}
+  catch(...){
+    // Once uv is initialized return an owned failing instance; its caller can
+    // retain environment cleanup until the actual asynchronous retirement.
+    {std::lock_guard<std::mutex> lock(owner->mutex_);owner->operation_error_=std::current_exception();owner->close_requested_=true;}
+    try{owner->output_.close();}catch(...){std::terminate();} // unopened resource-free owner
+    {std::lock_guard<std::mutex> lock(owner->mutex_);owner->worker_finished_=true;}
+    uv_async_send(&owner->async_);
+  }
   return owner;
 }
 void AsyncPlayback::enqueue(Command command){
