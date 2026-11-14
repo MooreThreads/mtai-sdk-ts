@@ -1,0 +1,3 @@
+# Main texture QUALITY fix plan — before edits
+
+P2 overlapping closecalls mustnot independently authorize retries beyond entryfailure. Coalesce intoone owned in-flight closePromise; failure retainspublication/import, clearsattemptonlyaftersettlement so subsequentexplicitclose canretry. Existing entryfailureguard keeps pre-failurewaitingclose fromauthorizinglaterunknownfailure. No retryloop/timeout/strongerguarantee. APIregression initialreleasefailure+twooverlappingcloses+retryfailure -> samerejection/no thirdrelease/appliedACK until laterexplicitclose. Re-runcoherentslice SPECthenindependentQUALITY.
