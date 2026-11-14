@@ -7,8 +7,10 @@
 
 #ifdef MTAI_PIPEWIRE_NODE_FIXTURE
 extern "C" void mtai_install_fixture(napi_env,napi_value);
+extern "C" void mtai_install_connection_fixture(napi_env,napi_value);
 #endif
 namespace mtai::avatar {
+void install_node_connection(napi_env,napi_value);
 namespace {
 void checked(napi_status status){if(status!=napi_ok)throw std::runtime_error("Node-API call failed");}
 struct HandleScope {
@@ -188,12 +190,16 @@ napi_value create(napi_env env,napi_callback_info info){return guarded(env,[&]{
   return object;
 });}
 napi_value initialize(napi_env env,napi_value exports){
+ try{
   napi_value function;if(napi_create_function(env,"createPlayback",NAPI_AUTO_LENGTH,create,nullptr,&function)!=napi_ok)return nullptr;
   if(napi_set_named_property(env,exports,"createPlayback",function)!=napi_ok)return nullptr;
+  install_node_connection(env,exports);
 #ifdef MTAI_PIPEWIRE_NODE_FIXTURE
   mtai_install_fixture(env,exports);
+  mtai_install_connection_fixture(env,exports);
 #endif
   return exports;
+ }catch(const std::exception& error){bool pending=false;napi_is_exception_pending(env,&pending);if(!pending)napi_throw_error(env,nullptr,error.what());return nullptr;}
 }
 }
 }  // namespace mtai::avatar

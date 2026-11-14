@@ -3,6 +3,9 @@
 #include <time.h>
 #include <system_error>
 
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+extern "C" void mtai_test_connection_start(unsigned);
+#endif
 namespace mtai::avatar {
 namespace {
 uint64_t now() {
@@ -21,7 +24,13 @@ std::shared_ptr<LocalConnection> LocalConnection::open(uv_loop_t* loop,Descripto
   return owner;
 }
 void LocalConnection::start(uv_loop_t* loop) {
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+  mtai_test_connection_start(0);
+#endif
   checked(uv_poll_init(loop,&poll_,socket_.descriptor()));poll_initialized_=true;poll_.data=this;
+#ifdef MTAI_PIPEWIRE_NODE_FIXTURE
+  mtai_test_connection_start(1);
+#endif
   checked(uv_timer_init(loop,&timer_));timer_initialized_=true;timer_.data=this;
   writes_.push_back({target_,Attach{}});write();
 }
