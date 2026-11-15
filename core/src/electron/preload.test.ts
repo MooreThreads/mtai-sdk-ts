@@ -13,9 +13,14 @@ function fixture(){
  const handlers=new Map<string,Function>(),messages:[string,any][]=[];let receive!:(data:{importedSharedTexture:ImportedVideo},message:TextureMessage)=>Promise<void>
  const ports:PreloadPorts={ipc:{on:(channel,callback)=>{handlers.set(channel,callback)},removeListener:channel=>{handlers.delete(channel)},send:(channel,payload)=>{messages.push([channel,payload])}},sharedTexture:{setSharedTextureReceiver:callback=>{receive=callback}}}
  const bridge=installAvatarBridge({} as HTMLCanvasElement,ports)
+ const retired = () => new Promise<void>(resolve => {
+   const send = ports.ipc.send
+   ports.ipc.send = (channel, payload) => { send(channel, payload); if (channel === avatarChannels.retired) resolve() }
+   handlers.get(avatarChannels.retire)!(null,target)
+ })
  const close=jest.fn(),release=jest.fn(),frame={displayWidth:4,displayHeight:3,close} as unknown as VideoFrame
  const imported={getVideoFrame:()=>frame,release}
- return {bridge,handlers,messages,close,release,imported,receive:(sequence:bigint,generation='g')=>receive({importedSharedTexture:imported},{identity:{...target,generation,allocation:7n,sequence},rowOrigin:1})}
+ return {bridge,retired,handlers,messages,close,release,imported,receive:(sequence:bigint,generation='g')=>receive({importedSharedTexture:imported},{identity:{...target,generation,allocation:7n,sequence},rowOrigin:1})}
 }
 beforeEach(()=>{submit.mockReset();dispose.mockReset();resize.mockReset();checkReady.mockReset();defaultIpc.on.mockClear();defaultIpc.invoke.mockClear();expose.mockClear();defaultShared.setSharedTextureReceiver.mockClear()})
 it('window bridge owns the hidden receiver and moves its same-avatar cover without another native attachment',async()=>{
@@ -60,7 +65,7 @@ it('prepares hidden receiver, validates allocation probe without copying/turn ob
  const f=fixture();f.handlers.get(avatarChannels.prepare)!(null,{target,layout});expect(f.messages[0][0]).toBe(avatarChannels.prepared)
  await f.receive(0n);expect(submit).not.toHaveBeenCalled();expect(f.messages[1]).toEqual([avatarChannels.accepted,{target}]);expect(f.close).toHaveBeenCalledTimes(1);expect(f.release).toHaveBeenCalledTimes(1)
  await f.receive(1n);expect(submit).toHaveBeenCalledTimes(1);expect(f.messages[2][0]).toBe(avatarChannels.submitted)
- f.handlers.get(avatarChannels.retire)!(null,target);await Promise.resolve();expect(f.messages[3]).toEqual([avatarChannels.retired,{target}]);expect(dispose).not.toHaveBeenCalled()
+ await f.retired();expect(f.messages[3]).toEqual([avatarChannels.retired,{target}]);expect(dispose).not.toHaveBeenCalled()
  f.bridge.resize(8,6);expect(resize).toHaveBeenCalledWith(8,6);await f.bridge.dispose();expect(dispose).toHaveBeenCalledTimes(1)
 })
 it('rejects stale imported content without healthy callback and acknowledges retirement before prepare',async()=>{
@@ -70,4 +75,32 @@ it('rejects stale imported content without healthy callback and acknowledges ret
 it('draw failure releases actual imports, reports media failure and never healthy submission',async()=>{
  const f=fixture();f.handlers.get(avatarChannels.prepare)!(null,{target,layout});submit.mockImplementationOnce(()=>{throw Error('GPU failed')});await f.receive(1n)
  expect(f.close).toHaveBeenCalledTimes(1);expect(f.release).toHaveBeenCalledTimes(1);expect(f.messages.some(([channel])=>channel===avatarChannels.failed)).toBe(true);expect(f.messages.some(([channel])=>channel===avatarChannels.submitted)).toBe(false);await f.bridge.dispose()
+})
+it('keeps a failed receiver retirement failed across repeated retire and dispose',async()=>{
+ const f=fixture();f.handlers.get(avatarChannels.prepare)!(null,{target,layout})
+ f.release.mockImplementation(()=>{throw Error('uncertain import release')});await f.receive(1n)
+ f.handlers.get(avatarChannels.retire)!(null,target)
+ await expect(f.bridge.dispose()).rejects.toThrow('uncertain import release')
+ await expect(f.bridge.dispose()).rejects.toThrow('uncertain import release')
+ expect(f.messages.some(([channel])=>channel===avatarChannels.retired)).toBe(false)
+ expect(f.release).toHaveBeenCalledTimes(1)
+})
+it('bootstrap closes independent references and retains uncertainty across retirement',async()=>{
+ const f=fixture();f.handlers.get(avatarChannels.prepare)!(null,{target,layout})
+ f.close.mockImplementation(()=>{throw Error('uncertain probe frame')})
+ await expect(f.receive(0n)).rejects.toThrow('uncertain probe frame')
+ expect(f.release).toHaveBeenCalledTimes(1)
+ f.handlers.get(avatarChannels.retire)!(null,target)
+ await expect(f.bridge.dispose()).rejects.toThrow('uncertain probe frame')
+ expect(f.messages.some(([channel])=>channel===avatarChannels.accepted||channel===avatarChannels.retired)).toBe(false)
+ expect(f.close).toHaveBeenCalledTimes(1)
+})
+it('a throwing window subscriber does not suppress later subscribers',async()=>{
+ ;(globalThis as any).ResizeObserver=class {observe(){}disconnect(){}}
+ installAvatarBridge();const bridge=expose.mock.calls[0][1]
+ await bridge.attach({conversationSessionId:'voice',dh2dSessionId:'dh',generation:'g',attachment:'a'})
+ const error=jest.spyOn(console,'error').mockImplementation(()=>{})
+ const later=jest.fn();bridge.subscribe(()=>{throw Error('observer failed')});bridge.subscribe(later)
+ defaultIpc.on.mock.calls.find(([channel])=>channel==='mtai:avatar:event')![1](null,{type:'frameApplied',generation:'g',sequence:1n})
+ expect(later).toHaveBeenCalledWith(expect.objectContaining({sequence:1n}));expect(error).toHaveBeenCalled();error.mockRestore();await bridge.dispose()
 })

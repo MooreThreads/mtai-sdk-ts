@@ -9,7 +9,7 @@ function render(element: ReturnType<typeof createElement>) {
   const container = document.createElement('div'); document.body.appendChild(container)
   const root = createRoot(container)
   act(() => root.render(element))
-  return { unmount() { act(() => root.unmount()); container.remove() } }
+  return { unmount() { act(() => root.unmount()); container.remove() }, rerender(next: ReturnType<typeof createElement>) { act(() => root.render(next)) } }
 }
 afterEach(() => { document.body.innerHTML = '' })
 test('Avatar mounts presentation only, replays status and remounts without disposing conversation or audio', () => {
@@ -26,4 +26,14 @@ test('Avatar mounts presentation only, replays status and remounts without dispo
   first.unmount();expect(unmountAvatar).toHaveBeenCalledTimes(1)
   const second = render(createElement(Avatar, { session, onStatusChange: status }));expect(mountAvatar).toHaveBeenCalledTimes(2)
   expect(close).not.toHaveBeenCalled();expect(detachMedia).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();second.unmount()
+})
+test('rerender changes callback without replaying unchanged status or resubscribing', () => {
+  let notify!: (status: AvatarStatus) => void
+  const on = jest.fn((_event: string, listener: typeof notify) => { notify = listener; listener('ready'); return () => {} })
+  const session = { mediaStatus: 'ready', mountAvatar() {}, unmountAvatar() {}, on } as unknown as DH2DSession
+  const first = jest.fn(), latest = jest.fn()
+  const view = render(createElement(Avatar, { session, onStatusChange: first }))
+  view.rerender(createElement(Avatar, { session, onStatusChange: latest }))
+  expect(on).toHaveBeenCalledTimes(1); expect(first).toHaveBeenCalledTimes(1); expect(latest).not.toHaveBeenCalled()
+  act(() => notify('failed')); expect(latest).toHaveBeenCalledWith('failed'); view.unmount()
 })

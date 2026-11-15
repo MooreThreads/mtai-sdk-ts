@@ -2,7 +2,7 @@ import type { TextureIdentity, TextureMessage } from './mainTexture'
 import type { AttachmentKey } from '../voice/localMediaProtocol'
 
 export interface ImportedVideo { getVideoFrame(): VideoFrame, release(): void }
-export interface FrameCover { submit(frame: VideoFrame, rowOrigin: number): void }
+export interface FrameCover { submit(frame: VideoFrame, rowOrigin: number): void, checkReady?(): void }
 export interface ReceiverEvents { submitted(identity: TextureIdentity): void, failed(error: Error): void }
 const errorOf = (value: unknown) => value instanceof Error ? value : new Error(String(value))
 
@@ -16,7 +16,7 @@ export class TextureReceiver {
   private active = false
   private closed = false
   private healthy = true
-  private uncertain?: { imported: ImportedVideo, frame?: VideoFrame, error: Error }
+  private uncertain: { imported: ImportedVideo, frame?: VideoFrame, error: Error }[] = []
   private pendingClose?: { promise: Promise<void>, resolve(): void, reject(error: Error): void }
 
   constructor(target: AttachmentKey, private allocation: bigint,
@@ -24,11 +24,15 @@ export class TextureReceiver {
     this.target = Object.freeze({ ...target })
   }
 
-  receive(imported: ImportedVideo, message: TextureMessage): void {
-    if (this.uncertain) {
-      // An earlier uncertain native release already fenced this attachment.
-      // Dispose the newly transferred import but keep the original custody.
-      try { imported.release() } catch { /* attachment remains failed */ }
+  accept(imported: ImportedVideo, message: TextureMessage): void {
+    this.receive(imported, message, true)
+  }
+
+  receive(imported: ImportedVideo, message: TextureMessage, bootstrap = false): void {
+    if (this.uncertain.length) {
+      const error = this.uncertain[0].error
+      try { imported.release() } catch (caught) { this.uncertain.push({ imported, error: errorOf(caught) }) }
+      if (bootstrap) throw error
       return
     }
     this.active = true
@@ -37,30 +41,28 @@ export class TextureReceiver {
       const id = message.identity
       if (this.closed || !this.healthy || id.sessionId !== this.target.sessionId || id.generation !== this.target.generation
         || id.attachment !== this.target.attachment || id.allocation !== this.allocation
-        || id.sequence !== this.sequence + 1n || ![1, 2].includes(message.rowOrigin)) throw new Error('unmatched texture receive')
+        || id.sequence !== (bootstrap ? 0n : this.sequence + 1n) || ![1, 2].includes(message.rowOrigin)) throw new Error('unmatched texture receive')
+      if (bootstrap) this.cover.checkReady?.()
       frame = imported.getVideoFrame()
       if (frame.displayWidth !== this.width || frame.displayHeight !== this.height) throw new Error('unexpected texture dimensions')
-      this.cover.submit(frame, message.rowOrigin)
+      if (!bootstrap) this.cover.submit(frame, message.rowOrigin)
     } catch (caught) { error = errorOf(caught); this.fail(error) }
-    try {
-      if (frame) { frame.close(); frame = undefined }
-      imported.release()
-    } catch (caught) {
-      error ??= errorOf(caught)
-      // No proof that retrying a partially executed Electron release is safe.
-      // Retain uncertain ownership and reject close; never certify retirement.
-      this.uncertain = { imported, frame, error }; this.fail(error)
-    }
-    if (!error && this.healthy && !this.closed) {
+    // Independent obligations; neither failure may skip the other release.
+    try { if (frame) { frame.close(); frame = undefined } }
+    catch (caught) { error ??= errorOf(caught); this.uncertain.push({ imported, frame, error }); this.fail(error) }
+    try { imported.release() }
+    catch (caught) { error ??= errorOf(caught); this.uncertain.push({ imported, error }); this.fail(error) }
+    if (!bootstrap && !error && this.healthy && !this.closed) {
       this.sequence = message.identity.sequence
       try { this.events.submitted(Object.freeze({ ...message.identity })) }
       catch (caught) { error = errorOf(caught); this.fail(error) }
     }
     this.active = false
     if (this.pendingClose) {
-      if (this.uncertain) this.pendingClose.reject(this.uncertain.error)
+      if (this.uncertain.length) this.pendingClose.reject(this.uncertain[0].error)
       else this.pendingClose.resolve()
     }
+    if (bootstrap && error) throw error
   }
 
   close(): Promise<void> {
@@ -70,7 +72,7 @@ export class TextureReceiver {
     const promise = new Promise<void>((a, b) => { resolve = a; reject = b })
     this.pendingClose = { promise, resolve, reject }
     if (!this.active) {
-      if (this.uncertain) reject(this.uncertain.error)
+      if (this.uncertain.length) reject(this.uncertain[0].error)
       else resolve()
     }
     return promise

@@ -61,7 +61,7 @@ it('bridge disposal while window survives cancels preparation and does not wait 
 it('load completion does not erase a preload failure or wait for a missing receiver',async()=>{
  const f=fixture()
  f.windowHandlers.get('preload-error')!(null,'preload.js',Error('WebGL unavailable'))
- f.windowHandlers.get('did-finish-load')!()
+ f.windowHandlers.get('dom-ready')!()
  const attaching=f.host.attach(attachment);const failure=expect(attaching).rejects.toThrow('renderer unavailable')
  await tick();f.receive({type:'layout',wire:encodeLocalMedia(layout),fd:42});await failure;await f.host.dispose()
  expect(f.sent.some(([channel])=>channel===avatarChannels.prepare)).toBe(false)
@@ -70,14 +70,28 @@ it('load completion does not erase a preload failure or wait for a missing recei
 })
 it('a genuinely new document can prepare afresh after a previous preload failure',async()=>{
  const f=fixture()
- f.windowHandlers.get('preload-error')!(null,'preload.js',Error('WebGL unavailable'));f.windowHandlers.get('did-finish-load')!()
- f.windowHandlers.get('did-start-navigation')!(null,'file:///replacement',false,true);f.windowHandlers.get('did-finish-load')!()
+ f.windowHandlers.get('preload-error')!(null,'preload.js',Error('WebGL unavailable'));f.windowHandlers.get('dom-ready')!()
+ f.windowHandlers.get('did-start-navigation')!(null,'file:///replacement',false,true);f.windowHandlers.get('dom-ready')!()
+ const challenge=f.sent.find(([channel])=>channel===avatarChannels.bridgeChallenge)![1];f.ipc(avatarChannels.bridgeReady,challenge)
  const attaching=f.host.attach(attachment);await tick();f.receive({type:'layout',wire:encodeLocalMedia(layout),fd:42});f.audio();await tick()
- expect(f.sent[0][0]).toBe(avatarChannels.prepare)
+ expect(f.sent.some(([channel])=>channel===avatarChannels.prepare)).toBe(true)
  f.ipc(avatarChannels.prepared,{target});await tick();f.ipc(avatarChannels.accepted,{target});await tick();f.receive({type:'attached'});await attaching
  const disposal=f.host.dispose();await tick();f.ipc(avatarChannels.retired,{target});await disposal
 })
 
+it('current bridge readiness unblocks preparation before full load and rejects old document signals',async()=>{
+ const f=fixture()
+ f.windowHandlers.get('did-start-navigation')!(null,'file:///replacement',false,true)
+ f.ipc(avatarChannels.bridgeReady,undefined)
+ const attaching=f.host.attach(attachment);await tick();f.receive({type:'layout',wire:encodeLocalMedia(layout),fd:42});f.audio();await tick()
+ expect(f.sent.some(([channel])=>channel===avatarChannels.prepare)).toBe(false)
+ f.windowHandlers.get('dom-ready')!()
+ const token=f.sent.find(([channel])=>channel===avatarChannels.bridgeChallenge)![1]
+ f.ipc(avatarChannels.bridgeReady,'old-document');await tick();expect(f.sent.some(([channel])=>channel===avatarChannels.prepare)).toBe(false)
+ f.ipc(avatarChannels.bridgeReady,token);await tick();expect(f.sent.some(([channel])=>channel===avatarChannels.prepare)).toBe(true)
+ f.ipc(avatarChannels.prepared,{target});await tick();f.ipc(avatarChannels.accepted,{target});await tick();f.receive({type:'attached'});await attaching
+ const closing=f.host.dispose();await tick();f.ipc(avatarChannels.retired,{target});await closing
+})
 it('synchronous native playback construction failure rejects attachment and joins without an unhandled audio rejection',async()=>{
  const f=fixture(Error('native playback initialization failed'))
  const attaching=f.host.attach(attachment);const failure=expect(attaching).rejects.toThrow('native playback initialization failed')

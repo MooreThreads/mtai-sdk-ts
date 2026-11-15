@@ -55,6 +55,8 @@ export class AttachmentRuntime {
   private preparationImport?: ReturnType<SharedTextures['importSharedTexture']>
   private audioAcceptance?: ReturnType<typeof deferred>
   private preparationReferences?: ReturnType<typeof deferred>
+  private textureRetirement?: Promise<void>
+  private pendingStops = new Map<string, ReturnType<typeof deferred>>()
 
   constructor(readonly attachment: AvatarAttachment, private socketPath: string,
     private native: AvatarNative, private textures: SharedTextures, private destination: TextureDestination,
@@ -77,11 +79,20 @@ export class AttachmentRuntime {
     if (this.closing) return
     // Missing identity is normalized/captured by the portable conversation.
     // Never turn a scoped stop into an attachment-global flush.
-    if (turn) await this.playback?.stop(this.target.sessionId, this.target.generation, this.target.attachment, turn)
+    if (!turn) return
+    if (this.playback) return this.playback.stop(this.target.sessionId, this.target.generation, this.target.attachment, turn)
+    let pending = this.pendingStops.get(turn)
+    if (!pending) { pending = deferred(); void pending.promise.catch(() => {}); this.pendingStops.set(turn, pending) }
+    return pending.promise
   }
   close(): Promise<void> {
     if (this.closeAttempt) return this.closeAttempt
     this.closing = true; this.audioAcceptance?.reject(new Error('attachment retired')); this.ready.reject(new Error('attachment retired'))
+    // Fence publication synchronously, before receiver/socket retirement yields.
+    if (!this.textureRetirement) this.textureRetirement = this.texture?.close()
+    void this.textureRetirement?.catch(() => {})
+    for (const pending of this.pendingStops.values()) pending.reject(new Error('attachment retired'))
+    this.pendingStops.clear()
     const attempt = this.retire(); this.closeAttempt = attempt
     void attempt.then(() => { if (this.closeAttempt === attempt) this.closeAttempt = undefined },
       () => { if (this.closeAttempt === attempt) this.closeAttempt = undefined })
@@ -137,8 +148,8 @@ export class AttachmentRuntime {
     // B, produces a turn observation, or authorizes REUSE_ACK.
     const references = deferred(); this.preparationReferences = references
     const output = new TextureOutput(this.target, layout, this.allocation!.fd, this.destination.frame, this.textures, {
-      applied: value => this.emit({ type: 'frameApplied', generation: this.target.generation, sequence: value.identity.sequence,
-        turnId: value.state.turnId ?? undefined, audioActive: value.state.audioActive }),
+      applied: value => { if (!this.closing) this.emit({ type: 'frameApplied', generation: this.target.generation, sequence: value.identity.sequence,
+        turnId: value.state.turnId ?? undefined, audioActive: value.state.audioActive }) },
       reuse: record => this.connection!.sendControl(buffer(encodeLocalMedia(record))),
       failed: error => this.fail(error),
     })
@@ -164,6 +175,17 @@ export class AttachmentRuntime {
     }
     finally { this.preparationImport.release(); this.preparationImport = undefined }
     await references.promise
+    if (this.closing) return
+    // No FRAME can be accepted until READY. Carry stop debt into the actual
+    // native owner, including accepted work retained across media reattachment.
+    const stops = [...this.pendingStops]
+    await Promise.all(stops.map(async ([turn, pending]) => {
+      try {
+        await this.playback!.stop(this.target.sessionId, this.target.generation, this.target.attachment, turn)
+        pending.resolve()
+      } catch (error) { pending.reject(errorOf(error)); throw error }
+      finally { if (this.pendingStops.get(turn) === pending) this.pendingStops.delete(turn) }
+    }))
     if (!this.closing) this.connection!.acceptLayout(layout.allocation)
   }
 
@@ -185,7 +207,7 @@ export class AttachmentRuntime {
     try { await this.preparation } catch { /* original preparation failure reported */ }
     try { if (this.preparationImport) { this.preparationImport.release(); this.preparationImport = undefined } } catch (error) { failure ??= error }
     if (!this.preparationImport) await this.preparationReferences?.promise
-    try { await this.texture?.close() } catch (error) { failure ??= error }
+    try { await (this.textureRetirement ?? this.texture?.close()) } catch (error) { failure ??= error }
     for (const result of await results) if (result.status === 'rejected') failure ??= result.reason
     if (failure) throw failure
     this.allocation?.close(); this.allocation = undefined

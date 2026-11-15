@@ -1,0 +1,11 @@
+# Shared-texture GPU-player lifecycle fixes
+
+Integrated SDK/renderer/app source passed Astra SPEC then fresh independent QUALITY on the same frozen 44-file slice. This is not installed-runtime or physical audio/visual acceptance.
+
+SDK fixes: isolate optional subscribers and immediate replay; receiver-owned bootstrap acceptance independently attempts frame/import cleanup and retains uncertainty; retirement failure stays failed; synchronously fence publication on close; retain scoped stops before playback construction; authenticate current-document readiness before full page load; stable React status subscription. App callbacks fence actual session identity, including same-avatar input replacement.
+
+Renderer fixes: route video/overlay/events through selected ready output, including local RGBA; reuse existing file decoder and replacement lifecycle without RTC-side pacing on local output; preserve paired PCM and actual decoded color metadata with existing profile validation; cancel/join blocked acquisition and keep cancellation distinct from completion; persistent producer failure wakes readers independently of GPU drain, blocks preparation/switching and preserves unsafe dependencies through shutdown. Previously reviewed GBM EGL correction remains included.
+
+Validation: renderer 245 tests plus 6 subtests (latest focused batch); SDK typecheck and 11 suites/179 tests; native clock/protocol interop; packaging hooks; affected app tests. App full typecheck remains red: current and pristine HEAD each reproduce 70 identical diagnostics after path/line normalization in the same dependency environment. No new diagnostic found. Deterministic cancellation tests cover public outcomes for EOF/decode failure; exact terminal commit atomicity is source-reviewed, not dynamically proven. One test invocation timed out due late test subscription; replaced with explicit subscriber/accepted-event synchronization, no runtime deadline changed.
+
+No timing/buffering/queue/drop policy changed. No voice client/server, standalone frontend, Pi backend or MT-Cortex recording changed. Independent retained WebGL copy remains intentional, not zero-copy. Release installation and hardware/E2E acceptance are separate gates.

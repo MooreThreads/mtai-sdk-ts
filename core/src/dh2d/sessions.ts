@@ -1,5 +1,5 @@
 import { abortable, withChild } from '../abortable'
-import { events } from '../events'
+import { events, notifySubscriber } from '../events'
 import { hooks } from '../hooks'
 import type { DHInputMessage, DHOutputMessage } from '../types'
 import type { AvatarStatus } from '../voice/avatarMediaHost'
@@ -28,8 +28,8 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
   const setMedia = (next: AvatarStatus) => { if (mediaStatus === next) return; mediaStatus = next; evt.emit('mediaStatus', next) }
   const on: typeof evt.on = (event, handler) => {
     const off = evt.on(event, handler)
-    if (event === 'mediaStatus') (handler as (status: AvatarStatus) => void)(mediaStatus)
-    if (event === 'message' && status === 'connected' && latestVoiceStatus) (handler as (value: DHOutputMessage) => void)({ ...latestVoiceStatus })
+    if (event === 'mediaStatus') notifySubscriber(handler as (status: AvatarStatus) => void, mediaStatus)
+    if (event === 'message' && status === 'connected' && latestVoiceStatus) notifySubscriber(handler as (value: DHOutputMessage) => void, { ...latestVoiceStatus })
     return off
   }
   const session: DH2DSession = {

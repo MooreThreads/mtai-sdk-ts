@@ -1,5 +1,11 @@
 import { EventSource, EventTarget } from "./types"
 
+/** Optional observers cannot interrupt another subscriber or owned lifecycle. */
+export function notifySubscriber<T>(listener: (value: T) => void, value: T): void {
+    try { listener(value) }
+    catch (error) { console.error('SDK event subscriber failed', error) }
+}
+
 /**
  * Creates an event system that allows subscribing to and emitting events.
  * 
@@ -43,7 +49,7 @@ export function events<T>(): EventSource<T> & EventTarget<T> {
         }
     }
     const emit = (event: any, data: T[keyof T]) => {
-        listeners.get(event)?.forEach(handler => handler(data))
+        listeners.get(event)?.forEach(handler => notifySubscriber(handler, data))
     }
     return { on, off, emit }
 }

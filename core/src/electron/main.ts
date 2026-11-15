@@ -1,3 +1,4 @@
+import { notifySubscriber } from '../events'
 import type { AvatarAttachment, AvatarMediaEvent, AvatarMediaHost } from '../voice/avatarMediaHost'
 import type { AttachmentKey, Layout } from '../voice/localMediaProtocol'
 import { AttachmentRuntime, type AvatarNative } from './attachmentRuntime'
@@ -33,11 +34,16 @@ export function installAvatarHost(window: AvatarWindow, options: { socketPath: s
   let runtime: AttachmentRuntime | undefined, disposed = false, pendingTarget: AttachmentKey | undefined
   let prepared: ReturnType<typeof wait> | undefined, accepted: ReturnType<typeof wait> | undefined, retired: ReturnType<typeof wait> | undefined
   let unavailable = false, documentFailed = false, destinationDestroyed = false
+  let navigatingDocument = false, bridgeChallenge: string | undefined, documentRevision = 0
+  let documentReady = wait(); documentReady.resolve()
   let retirement: Promise<void> | undefined
   let revision = 0, requestedGeneration: string | undefined
   const emit = (event: AvatarMediaEvent) => {
-    if (!destinationDestroyed) window.webContents.send(eventChannel, event.type === 'failed' ? { ...event, error: undefined, message: event.error.message } : event)
-    for (const listener of [...listeners]) listener(event)
+    if (!destinationDestroyed) {
+      try { window.webContents.send(eventChannel, event.type === 'failed' ? { ...event, error: undefined, message: event.error.message } : event) }
+      catch (error) { console.error('SDK avatar event transport failed', error) }
+    }
+    for (const listener of [...listeners]) notifySubscriber(listener, event)
   }
   const trusted = (event: MainEvent) => event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame
   const onPrepared = (event: MainEvent, value: { target: AttachmentKey }) => { if (trusted(event) && same(value?.target, pendingTarget)) prepared?.resolve() }
@@ -63,25 +69,36 @@ export function installAvatarHost(window: AvatarWindow, options: { socketPath: s
     void attempt.then(() => { if (runtime === owned) runtime = undefined; retirement = undefined }, () => { retirement = undefined })
     return attempt
   }
-  const gone = () => { documentFailed = true; unavailable = true; retired?.resolve(); fail(new Error('avatar renderer retired')) }
+  const gone = () => { documentFailed = true; unavailable = true; documentReady.reject(new Error('avatar renderer unavailable')); retired?.resolve(); fail(new Error('avatar renderer retired')) }
+  const bridgeReady = (event: MainEvent, token?: string) => {
+    if (!trusted(event) || documentFailed || navigatingDocument || destinationDestroyed) return
+    if (bridgeChallenge !== undefined && token !== bridgeChallenge) return
+    unavailable = false; documentReady.resolve()
+  }
+  const committed = () => {
+    navigatingDocument = false
+    bridgeChallenge = `document-${++documentRevision}`
+    if (!documentFailed) window.webContents.send(avatarChannels.bridgeChallenge, bridgeChallenge)
+  }
   const navigating = (_event: unknown, _url: string, inPlace: boolean, mainFrame: boolean) => {
     if (mainFrame && !inPlace) {
       gone()
       // A new document may install a fresh bridge. Keep it unavailable while
       // loading; any preload failure for this document must survive load end.
+      navigatingDocument = true; bridgeChallenge = undefined
       documentFailed = false
+      documentReady = wait(); void documentReady.promise.catch(() => {})
     }
   }
-  const loaded = () => { unavailable = documentFailed }
   const gpuGone = (_event: unknown, details: { type: string }) => { if (details.type === 'GPU') gone() }
   const destroyed = () => {
     destinationDestroyed = true
     try { gone() } finally { void dispose().catch(() => {}) }
   }
-  const handlers = [[avatarChannels.prepared, onPrepared], [avatarChannels.accepted, onAccepted], [avatarChannels.retired, onRetired],
+  const handlers = [[avatarChannels.bridgeReady, bridgeReady], [avatarChannels.prepared, onPrepared], [avatarChannels.accepted, onAccepted], [avatarChannels.retired, onRetired],
     [avatarChannels.disposed, onDisposed], [avatarChannels.submitted, onSubmitted], [avatarChannels.failed, onFailed]] as const
   for (const [channel, handler] of handlers) ports.ipcMain.on(channel, handler)
-  window.webContents.on('did-start-navigation', navigating); window.webContents.on('did-finish-load', loaded)
+  window.webContents.on('did-start-navigation', navigating); window.webContents.on('dom-ready', committed)
   window.webContents.on('render-process-gone', gone); window.webContents.on('preload-error', gone)
   window.on('closed', destroyed); ports.app?.on('child-process-gone', gpuGone)
   const control = async (event: MainEvent, value: { operation: string, target?: AvatarAttachment, request?: Parameters<AvatarMediaHost['stop']>[0] }) => {
@@ -103,7 +120,7 @@ export function installAvatarHost(window: AvatarWindow, options: { socketPath: s
     await closeCurrent()
     ports.ipcMain.removeHandler?.(controlChannel)
     for (const [channel, handler] of handlers) ports.ipcMain.removeListener(channel, handler)
-    window.webContents.removeListener('did-start-navigation', navigating); window.webContents.removeListener('did-finish-load', loaded)
+    window.webContents.removeListener('did-start-navigation', navigating); window.webContents.removeListener('dom-ready', committed)
     window.webContents.removeListener('render-process-gone', gone); window.webContents.removeListener('preload-error', gone)
     window.removeListener('closed', destroyed); ports.app?.removeListener('child-process-gone', gpuGone); listeners.clear()
   }
@@ -118,9 +135,12 @@ export function installAvatarHost(window: AvatarWindow, options: { socketPath: s
       pendingTarget = { sessionId: attachment.dh2dSessionId, generation: attachment.generation, attachment: attachment.attachment }
       const destination = {
         get frame() { return window.webContents.mainFrame },
-        prepare(target: AttachmentKey, layout: Layout) {
-          if (unavailable) return Promise.reject(new Error('avatar renderer unavailable'))
-          prepared = wait(); window.webContents.send(avatarChannels.prepare, { target, layout }); return prepared.promise
+        async prepare(target: AttachmentKey, layout: Layout) {
+          if (documentFailed) throw new Error('avatar renderer unavailable')
+          prepared = wait()
+          await Promise.race([documentReady.promise, prepared.promise])
+          if (unavailable) throw new Error('avatar renderer unavailable')
+          window.webContents.send(avatarChannels.prepare, { target, layout }); return prepared.promise
         },
         accepted(_target: AttachmentKey) { accepted = wait(); return accepted.promise },
         retire(target: AttachmentKey) {

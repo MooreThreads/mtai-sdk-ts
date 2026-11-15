@@ -1,3 +1,4 @@
+import { notifySubscriber } from '../events'
 import type { AvatarMediaEvent } from '../voice/avatarMediaHost'
 import type { AvatarBridge } from '../voice/avatarBridge'
 import type { AttachmentKey, Layout } from '../voice/localMediaProtocol'
@@ -6,7 +7,7 @@ import { TextureReceiver, type ImportedVideo } from './textureReceiver'
 import { WebGLCover } from './webglCover'
 
 /** SDK-owned channels, not an unrestricted page-to-native API. */
-export const avatarChannels = Object.freeze({ prepare: 'mtai:avatar:prepare', retire: 'mtai:avatar:retire',
+export const avatarChannels = Object.freeze({ bridgeChallenge: 'mtai:avatar:bridge-challenge', bridgeReady: 'mtai:avatar:bridge-ready', prepare: 'mtai:avatar:prepare', retire: 'mtai:avatar:retire',
   prepared: 'mtai:avatar:prepared', disposed: 'mtai:avatar:disposed', accepted: 'mtai:avatar:accepted', retired: 'mtai:avatar:retired', submitted: 'mtai:avatar:submitted', failed: 'mtai:avatar:failed' })
 export type PrepareAvatar = { target: AttachmentKey, layout: Layout }
 export interface PreloadPorts {
@@ -59,9 +60,11 @@ function installWindowBridge() {
     if (value.generation !== generation) return
     if (value.type === 'frameApplied' && canvas && (avatarId === undefined || avatarId === attachmentAvatar)) canvas.style.visibility = 'visible'
     const event: AvatarMediaEvent = value.type === 'failed' ? { ...value, error: new Error(value.message ?? 'avatar media failed') } : value
-    for (const listener of [...listeners]) listener(event)
+    for (const listener of [...listeners]) notifySubscriber(listener, event)
   })
+  ipcRenderer.on(avatarChannels.bridgeChallenge, (_event: unknown, token: string) => ipcRenderer.send(avatarChannels.bridgeReady, token))
   contextBridge.exposeInMainWorld('mtaiAvatar', bridge)
+  ipcRenderer.send(avatarChannels.bridgeReady)
 }
 
 const same = (a: AttachmentKey, b: AttachmentKey) => a.sessionId === b.sessionId && a.generation === b.generation && a.attachment === b.attachment
@@ -78,11 +81,14 @@ export function installAvatarBridge(canvas?: HTMLCanvasElement, input?: PreloadP
   const makeCover = () => new WebGLCover(canvas, error => { graphicsFailure = error; fail(error) })
   let cover = makeCover()
   let receiver: TextureReceiver | undefined, prepared: PrepareAvatar | undefined, disposed = false
+  let layout: Layout | undefined
+  let retirement: Promise<void> | undefined
   const fail = (error: Error) => { if (prepared && !disposed) ports.ipc.send(avatarChannels.failed, { target: prepared.target, message: error.message }) }
   const prepare = (_event: unknown, value: PrepareAvatar) => {
     if (disposed) return
     if (receiver) { fail(new Error('avatar receiver replacement requires joined retirement')); return }
-    prepared = value
+    retirement = undefined
+    prepared = value; layout = value.layout
     try {
       if (graphicsFailure) { cover.dispose(); cover = makeCover(); graphicsFailure = undefined }
       cover.checkReady(); cover.resize(value.layout.width, value.layout.height)
@@ -93,10 +99,18 @@ export function installAvatarBridge(canvas?: HTMLCanvasElement, input?: PreloadP
     })
     ports.ipc.send(avatarChannels.prepared, { target: value.target })
   }
+  const closeReceiver = () => {
+    if (retirement) return retirement
+    const owned = receiver
+    retirement = Promise.resolve().then(async () => {
+      await owned?.close()
+      if (receiver === owned) { receiver = undefined; prepared = undefined }
+    })
+    return retirement
+  }
   const retire = (_event: unknown, target: AttachmentKey) => {
     if (!prepared || !same(target, prepared.target)) { ports.ipc.send(avatarChannels.retired, { target }); return }
-    const owned = receiver; receiver = undefined
-    void (owned?.close() ?? Promise.resolve()).then(() => ports.ipc.send(avatarChannels.retired, { target })).catch(fail)
+    void closeReceiver().then(() => ports.ipc.send(avatarChannels.retired, { target })).catch(fail)
   }
   ports.ipc.on(avatarChannels.prepare, prepare); ports.ipc.on(avatarChannels.retire, retire)
   ports.sharedTexture.setSharedTextureReceiver(async ({ importedSharedTexture }, message) => {
@@ -104,14 +118,8 @@ export function installAvatarBridge(canvas?: HTMLCanvasElement, input?: PreloadP
     if (message.identity.sequence === 0n) {
       // Actual allocation import acceptance, not FRAME1 or a healthy playback
       // observation. Do not copy unproduced pixels or advance receiver sequence.
-      let frame: VideoFrame | undefined
-      try {
-        if (graphicsFailure) throw graphicsFailure
-        cover.checkReady()
-        frame = importedSharedTexture.getVideoFrame()
-        if (frame.displayWidth !== prepared.layout.width || frame.displayHeight !== prepared.layout.height) throw new Error('avatar allocation dimensions mismatch')
-      } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); throw error }
-      finally { frame?.close(); importedSharedTexture.release() }
+      if (!receiver) { importedSharedTexture.release(); throw graphicsFailure ?? new Error('avatar receiver retired') }
+      receiver.accept(importedSharedTexture, message)
       ports.ipc.send(avatarChannels.accepted, { target: prepared.target })
       return
     }
@@ -120,15 +128,15 @@ export function installAvatarBridge(canvas?: HTMLCanvasElement, input?: PreloadP
   })
   return {
     resize(width: number, height: number) {
-      if (!prepared) return
-      const scale = Math.min(width / prepared.layout.width, height / prepared.layout.height)
-      cover.resize(Math.round(prepared.layout.width * scale), Math.round(prepared.layout.height * scale))
+      if (!layout) return
+      const scale = Math.min(width / layout.width, height / layout.height)
+      cover.resize(Math.round(layout.width * scale), Math.round(layout.height * scale))
     },
-    async dispose() { if (disposed) return
+    async dispose() { if (disposed) return closeReceiver()
       ports.ipc.send(avatarChannels.disposed, { target: prepared?.target })
       disposed = true
       ports.ipc.removeListener(avatarChannels.prepare, prepare); ports.ipc.removeListener(avatarChannels.retire, retire)
-      await receiver?.close(); receiver = undefined; cover.dispose()
+      await closeReceiver(); cover.dispose()
     },
   }
 }

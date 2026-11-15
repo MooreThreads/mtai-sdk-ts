@@ -1,4 +1,4 @@
-import { events } from '../events'
+import { events, notifySubscriber } from '../events'
 import type { DHInputMessage, DHOutputMessage, Logger } from '../types'
 import type { DH2DVoiceClientConfig } from '../dh2d/types'
 import { createVoiceMessageAdapter, PROTOCOL_VERSION } from './adapter'
@@ -89,7 +89,7 @@ export function createConversationConnection(options: ConversationOptions) {
     const listeners = mediaStatusListeners
     for (const listener of listeners) {
       if (disposed || revision !== mediaStatusRevision) break
-      listener(status)
+      notifySubscriber(listener, status)
     }
   }
   function offMediaStatus(handler?: (status: AvatarStatus) => void) {
@@ -330,11 +330,11 @@ export function createConversationConnection(options: ConversationOptions) {
       if (event === 'mediaStatus') {
         if (disposed) return () => undefined
         mediaStatusListeners = [...mediaStatusListeners, handler]
-        handler(mediaStatus)
+        notifySubscriber(handler, mediaStatus)
         return () => offMediaStatus(handler)
       }
       const off = evt.on(event, handler)
-      if (event === 'message' && protocolConfirmed && !disposed) adapter.replaySnapshot().forEach(handler)
+      if (event === 'message' && protocolConfirmed && !disposed) adapter.replaySnapshot().forEach(value => notifySubscriber(handler, value))
       return off
     }) as typeof evt.on,
     off: ((event: keyof ConversationEvents, handler?: (value: any) => void) => {

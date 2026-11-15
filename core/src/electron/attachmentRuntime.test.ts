@@ -40,6 +40,21 @@ it('dispatches one native-eligible pair and applies only healthy submission; EOS
  expect(f.events).toEqual([{type:'frameApplied',generation:'g',sequence:1n,turnId:'A1',audioActive:true}]);expect(f.controls[0]).toMatchObject({kind:'reuseAck',submissionReceiptNs:123n,phaseOriginNs:7n})
  await f.runtime.stop('A1');expect(f.playback.stop).toHaveBeenCalledWith('dh','g','a','A1');f.send({type:'eos'});expect(f.playback.end).toHaveBeenCalledTimes(1);expect(f.events).toHaveLength(1);await f.runtime.close()
 })
+it('retains pre-LAYOUT scoped stop until its actual playback owner accepts it',async()=>{
+ const f=fixture();const attaching=f.runtime.attach();let stopped=false
+ const stop=f.runtime.stop('A1').then(()=>{stopped=true});await tick();expect(stopped).toBe(false)
+ f.send({type:'layout',wire:encodeLocalMedia(layout),fd:42});f.audio('audioReady');f.gpu.resolve();f.accepted.resolve()
+ await f.selected.promise;await stop;expect(f.playback.stop).toHaveBeenCalledWith('dh','g','a','A1')
+ f.send({type:'attached'});await attaching;await f.runtime.close()
+})
+it('close fences a submitted transfer while send remains pending',async()=>{
+ const f=fixture();const attaching=f.runtime.attach();f.send({type:'layout',wire:encodeLocalMedia(layout),fd:42});f.audio('audioReady');f.gpu.resolve();f.accepted.resolve();await f.selected.promise;f.send({type:'attached'});await attaching
+ const sent=deferred();(f.textures.sendSharedTexture as jest.Mock).mockImplementationOnce(()=>sent.promise)
+ const frame={kind:'frame' as const,target,sequence:1n,allocation:7n,rendererFrame:9n,producedNs:0n,sampleStart:0n,sampleCount:1n,pcm:Uint8Array.of(1,2)}
+ f.send({type:'eligible',frame:encodeLocalMedia(frame),state:encodeLocalMedia({kind:'state',target,effectiveFrame:1n,snapshot:true,turnId:'A1',audioActive:true}),originNs:7n,revision:2n})
+ f.runtime.submitted({...target,allocation:7n,sequence:1n},true)
+ const closing=f.runtime.close();sent.resolve();await closing;expect(f.events).toEqual([]);expect(f.controls).toEqual([])
+})
 it('close during audio/graphics preparation cancels and joins without READY or released allocation early',async()=>{
  const f=fixture();const attaching=f.runtime.attach();const outcome=expect(attaching).rejects.toThrow('retired');f.send({type:'layout',wire:encodeLocalMedia(layout),fd:42});await f.runtime.close();await outcome
  expect(f.connection.acceptLayout).not.toHaveBeenCalled();expect(f.playback.close).toHaveBeenCalledTimes(1);expect(f.lease.close).toHaveBeenCalledTimes(1)
