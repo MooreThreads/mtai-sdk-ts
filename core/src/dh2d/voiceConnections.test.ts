@@ -310,7 +310,7 @@ async function connectReady(config: any, video: any, canonicalSessionId = 'canon
   await flushMicrotasks()
   ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: canonicalSessionId }))
   ws.receive(JSON.stringify({ type: 'session.state', session_id: config.voiceClient.sessionId || 'avatar-channel-session',
-    state: 'connected', protocol_version: 2 }))
+    state: 'connected', protocol_version: 3 }))
   await flushMicrotasks()
   const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
   pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
@@ -351,7 +351,7 @@ async function readyRealSession(video: any) {
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
   ws.open()
   ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'real' }))
-  ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+  ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
   await jest.advanceTimersByTimeAsync(0)
   const pc = FakeRTCPeerConnection.instances.find(peer => peer.transceivers.some(track => track.kind === 'video'))!
   const stream = { id: 'real' }
@@ -383,9 +383,9 @@ describe('version-only handshake', () => {
           await flushMicrotasks()
           expect(ready).toBe(false)
           expect(ws.sent.map(value => JSON.parse(value))).toEqual([
-            { type: 'session.start', session_id: 'voice-1', protocol_version: 2 },
+            { type: 'session.start', session_id: 'voice-1', protocol_version: 3 },
           ])
-          ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+          ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
           const connection = await connecting
           expect(connection.sessionId).toBe(`native-${attempt}`)
           await disconnectVoiceClient(logger, connection, { video }, abortable())
@@ -400,8 +400,8 @@ describe('version-only handshake', () => {
   })
 
   test.each([
-    {}, { protocol_version: 1 }, { protocol_version: '2' }, { protocol_version: true },
-    { protocol_version: 2, session_id: 'foreign' },
+    {}, { protocol_version: 1 }, { protocol_version: '3' }, { protocol_version: true },
+    { protocol_version: 3, session_id: 'foreign' },
   ])('fails explicitly without retrying an invalid acknowledgement %j', async fields => {
     const globals = setupGlobals()
     const scope = abortable()
@@ -504,7 +504,7 @@ describe('version-only handshake', () => {
       ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'old', revision: 9, state }))
       ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'new', revision: 0, state }))
       expect(messages).toHaveLength(1)
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'new', revision: 0, state }))
       expect(messages).toEqual([
         { type: 'status_change', status: 'sleeping' }, { type: 'status_change', status: 'sleeping' },
@@ -569,7 +569,7 @@ describe('protocol failure presentation', () => {
       if (phase === 'offer') {
         await entered.promise
       } else {
-        ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+        ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
         ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 }))
         await jest.advanceTimersByTimeAsync(0)
         expect(microphoneFactory).toHaveBeenCalledTimes(1)
@@ -579,7 +579,7 @@ describe('protocol failure presentation', () => {
       expect(settled).toBe(false)
       expect(ws.closed).toBe(true)
       expect(FakeWebSocket.instances).toHaveLength(1)
-      expect(showError).toHaveBeenLastCalledWith(expect.stringContaining('protocol version 2'))
+      expect(showError).toHaveBeenLastCalledWith(expect.stringContaining('protocol version 3'))
       if (phase === 'offer') pending.resolve({ json: async () => ({ type: 'answer', sdp: 'answer' }) })
       else pending.reject(shutdownError)
       await jest.advanceTimersByTimeAsync(2000)
@@ -613,7 +613,7 @@ describe('protocol failure presentation', () => {
       ws.open()
       await flushMicrotasks()
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native' }))
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       await flushMicrotasks()
       // A prior version acknowledgement cannot consume the fatal-error path.
       // No canplay event has arrived, so connection setup is still pending.
@@ -656,7 +656,7 @@ describe('protocol failure presentation', () => {
       ws.close = () => { ws.closed = true; ws.readyState = FakeWebSocket.CLOSING }
       ws.send = data => { if (ws.readyState === FakeWebSocket.CLOSING) return; send(data) }
       if (phase === 'recovery') {
-        ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+        ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
         receiveAvatarTracks()
         video.dispatchEvent(new Event('canplay'))
         await flushMicrotasks()
@@ -668,7 +668,7 @@ describe('protocol failure presentation', () => {
       await flushMicrotasks()
       await flushMicrotasks()
       const alert = parent.querySelector('[role="alert"]')
-      expect(alert?.textContent).toContain('protocol version 2')
+      expect(alert?.textContent).toContain('protocol version 3')
       expect(alert?.textContent).toContain('received 1')
       expect(alert?.textContent).toMatch(/update.*client.*SDK/i)
       expect(session.status).toBe('failed')
@@ -712,7 +712,7 @@ describe('protocol failure presentation', () => {
       first.open()
       await flushMicrotasks()
       first.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native-first' }))
-      first.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      first.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       receiveAvatarTracks()
       video.dispatchEvent(new Event('canplay'))
       await flushMicrotasks(); await flushMicrotasks()
@@ -727,7 +727,7 @@ describe('protocol failure presentation', () => {
       next.open()
       await flushMicrotasks()
       next.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'native-next' }))
-      next.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      next.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       receiveAvatarTracks()
       video.dispatchEvent(new Event('canplay'))
       await flushMicrotasks(); await flushMicrotasks()
@@ -842,7 +842,7 @@ describe('connectVoiceClient', () => {
       const ws = FakeWebSocket.instances[0]
       ws.open()
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'failed' }))
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       await jest.advanceTimersByTimeAsync(0)
       ws.receive(JSON.stringify({ type: 'audio.input.prepare', session_id: 'voice-1', state_epoch: 'e', source_revision: 1 }))
       await jest.advanceTimersByTimeAsync(0)
@@ -1067,7 +1067,7 @@ describe('connectVoiceClient', () => {
       const ws = FakeWebSocket.instances[0]
       ws.open()
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       await entered.promise
       const pc = FakeRTCPeerConnection.instances[0]
       const stream = { id: 'old' }
@@ -1177,7 +1177,7 @@ describe('connectVoiceClient', () => {
       const ws = FakeWebSocket.instances[0]
       ws.open()
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       video.srcObject = { id: 'foreign' } as any
       video.dispatch('canplay')
       await jest.advanceTimersByTimeAsync(0)
@@ -1199,7 +1199,7 @@ describe('connectVoiceClient', () => {
       const ws = FakeWebSocket.instances[0]
       ws.open()
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'old' }))
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       const pc = FakeRTCPeerConnection.instances[0]
       const stream = { id: 'old' }
       pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
@@ -1354,10 +1354,10 @@ describe('connectVoiceClient', () => {
       await flushMicrotasks()
       expect(ws.prematureSends).toEqual([])
       expect(ws.sent.map((d: string) => JSON.parse(d))).toEqual([
-        { type: 'session.start', session_id: 'voice-1', protocol_version: 2 },
+        { type: 'session.start', session_id: 'voice-1', protocol_version: 3 },
       ])
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       await flushMicrotasks()
       const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
       pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
@@ -1504,13 +1504,13 @@ describe('connectVoiceClient', () => {
     }
   })
 
-  test('sends session.start with protocol version 2 and never opens a DH2D command websocket', async () => {
+  test('sends session.start with protocol version 3 and never opens a DH2D command websocket', async () => {
     const globals = setupGlobals()
     try {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig(), video)
       expect(JSON.parse(ws.sent[0])).toEqual({
-        type: 'session.start', session_id: 'voice-1', protocol_version: 2,
+        type: 'session.start', session_id: 'voice-1', protocol_version: 3,
       })
       expect(FakeWebSocket.instances.map(_ => _.url)).toEqual([
         'ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai',
@@ -2193,7 +2193,7 @@ describe('connectVoiceClient', () => {
       ws.open()
       await flushMicrotasks()
       ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'canonical-avatar' }))
-      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 2 }))
+      ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
       await flushMicrotasks()
       ws.receive(JSON.stringify({ type: 'audio.output.start', session_id: 'voice-1', turn_id: 'B2' }))
       ws.receive(JSON.stringify({ type: 'playback.stop', session_id: 'voice-1', turn_id: 'B2' }))

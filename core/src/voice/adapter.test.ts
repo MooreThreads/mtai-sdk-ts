@@ -656,7 +656,7 @@ describe('SDK actions translate to client frames', () => {
   test('startFrame produces session.start with protocol version 2', () => {
     const adapter = createAdapter()
     expect(adapter.startFrame()).toEqual({
-      type: 'session.start', session_id: sessionId, protocol_version: 2,
+      type: 'session.start', session_id: sessionId, protocol_version: 3,
     })
   })
 

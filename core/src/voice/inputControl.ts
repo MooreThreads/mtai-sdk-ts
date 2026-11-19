@@ -93,7 +93,7 @@ export function createVoiceInputControl(options: {
         options.send({ type: 'capture.started', ...identity, turn_id: capturedTurn })
       } else if (event.type === 'capture.stop' && turn === event.turn_id) {
         retireCapture()
-        options.send({ type: 'capture.stopped', ...identity, turn_id: event.turn_id })
+        options.send({ type: 'capture.ended', ...identity, turn_id: event.turn_id })
       }
     }
     return true

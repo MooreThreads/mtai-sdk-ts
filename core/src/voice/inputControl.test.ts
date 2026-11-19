@@ -58,7 +58,7 @@ test('prepare owns resources before capture; ack precedes PCM; stop gates withou
   const oldPcm = pcm
   control.ingest({ type: 'capture.stop', ...id, turn_id: 'A' })
   pcm(new Uint8Array([3, 4]))
-  expect(sent[sent.length - 1].type).toBe('capture.stopped')
+  expect(sent[sent.length - 1].type).toBe('capture.ended')
   expect(stop).not.toHaveBeenCalled()
   control.ingest({ type: 'capture.start', ...id, turn_id: 'B' })
   expect(create).toHaveBeenCalledTimes(1)

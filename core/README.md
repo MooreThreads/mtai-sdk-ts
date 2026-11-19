@@ -71,9 +71,9 @@ Other session IDs are unaffected, including IDs containing dots.
 
 ### Exact wire-version handshake
 
-The SDK sends exactly `{"type":"session.start","session_id":"…","protocol_version":2}`.
+The SDK sends exactly `{"type":"session.start","session_id":"…","protocol_version":3}`.
 The client validates it and replies with its own
-`{"type":"session.state","session_id":"…","state":"connected","protocol_version":2}`.
+`{"type":"session.state","session_id":"…","state":"connected","protocol_version":3}`.
 Only an exact version/session match completes the handshake; native avatar/media
 readiness alone is insufficient. Capture, frontend tool execution and queued
 session sends wait for this acknowledgement. Missing or unequal versions and
@@ -331,7 +331,7 @@ observed and a text-bearing sleep simply never sends its deferred stop.
 
 Managed microphone input: configure `audioInput: true` to consent to the host-selected default frontend input. Connecting alone does not open it. Client `audio.input.prepare` initializes a usable AudioContext and sends ready; capture commands gate forwarding without reopening resources; release frees owned resources. `audioInput:false` reports unavailable input without disabling text/playback. Application-supplied MediaStream overrides cannot be reconciled with the host's selected source and report unavailable rather than silently using another microphone; application tracks remain owned by the application. The standalone microphone utility still supports supplied streams explicitly.
 
-Captured mono 16-kHz PCM16 uses `audio.input.delta` with session/epoch/source revision/turn fences, immediately followed by binary PCM. `capture.started` is sent before PCM and `capture.stopped` fences late callbacks. Xunfei mode requires no frontend microphone. `session.snapshot` alone drives listening/talking/sleeping projection, including Xunfei capture; applying snapshots never executes device commands or emits intents. Latest projection is replayed to late application listeners. Disconnecting a voice-client session fences the retired
+Captured mono 16-kHz PCM16 uses `audio.input.delta` with session/epoch/source revision/turn fences, immediately followed by binary PCM. `capture.started` is sent before PCM and `capture.ended` fences late callbacks. Xunfei mode requires no frontend microphone. `session.snapshot` alone drives listening/talking/sleeping projection, including Xunfei capture; applying snapshots never executes device commands or emits intents. Latest projection is replayed to late application listeners. Disconnecting a voice-client session fences the retired
 connection: late websocket events, microphone batches, and stripe evidence
 are dropped, and the video element's stream is cleared.
 

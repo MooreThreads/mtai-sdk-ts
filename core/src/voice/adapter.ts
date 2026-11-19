@@ -49,7 +49,7 @@ export type VoiceMessageAdapterOptions = {
   requestIdFactory?: () => string,
 }
 
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 
 function defaultRequestIdFactory() {
   const cryptoApi = (globalThis as any).crypto
