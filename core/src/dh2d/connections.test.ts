@@ -2,6 +2,8 @@ import { abortable } from '../abortable'
 import { events } from '../events'
 import { createLogger } from '../log'
 import { connect, untilFailed } from './connections'
+import { dh2dHooks } from './hooks'
+import { setConfig } from '../config'
 
 it('retires legacy attempt abort subscriptions across failed attempts and backoff', async () => {
   jest.useFakeTimers()
@@ -107,6 +109,7 @@ function createConnection(ws: FakeWebSocket, pc: FakePeerConnection, audioPc?: F
     ...(audioPc ? { audioPc } : {}),
     on: evt.on,
     off: evt.off,
+    emit: evt.emit,
   }
 }
 
@@ -151,6 +154,70 @@ describe('untilFailed without audio activity monitoring', () => {
     ;(globalThis as any).window = originalWindow
     ;(globalThis as any).MediaStream = originalMediaStream
     ;(globalThis as any).AudioContext = originalAudioContext
+  })
+
+  const voice = { interaction_endpoint: 'ws://client:8300', dh2d_endpoint: 'http://client:32106' }
+  const interval = 20 * 60 * 1000
+
+  test.each(['session', 'root'])('default %s voice mode retains a healthy peer across both age triggers', async source => {
+    setConfig({ endpoint: 'http://localhost', voiceClient: source === 'root' ? voice : undefined })
+    const connection = createConnection(new FakeWebSocket(), new FakePeerConnection())
+    const scope = abortable()
+    const stopped = jest.fn()
+    const result = untilFailed(logger, connection as any, { video: {} } as any, {
+      ...dh2dHooks.defaultConfig({ voiceClient: source === 'session' ? voice : undefined }),
+      maxAudioVideoDurationDifference: 0,
+    }, scope).then(stopped)
+    try {
+      await jest.advanceTimersByTimeAsync(interval + 1)
+      expect(stopped).not.toHaveBeenCalled()
+      connection.emit('message', { type: 'status_change', status: 'listening' })
+      await flushPromises()
+      expect(stopped).not.toHaveBeenCalled()
+      connection.pc.connectionState = 'failed'
+      connection.pc.dispatch('connectionstatechange')
+      await result
+      expect(stopped).toHaveBeenCalledTimes(1)
+    } finally {
+      scope.abort()
+      await result
+      setConfig({ endpoint: 'http://localhost', voiceClient: undefined })
+    }
+  })
+
+  test.each([
+    ['direct', 'timer'], ['direct', 'status'], ['explicit voice', 'timer'], ['explicit voice', 'status'],
+  ])('%s age replacement still honors the %s trigger', async (mode, trigger) => {
+    setConfig({ endpoint: 'http://localhost', voiceClient: undefined })
+    const connection = createConnection(new FakeWebSocket(), new FakePeerConnection())
+    const scope = abortable()
+    const stopped = jest.fn()
+    const configuredInterval = mode === 'direct' ? interval : 4 * 60 * 1000
+    const result = untilFailed(logger, connection as any, { video: {} } as any, {
+      ...dh2dHooks.defaultConfig(mode === 'direct' ? {} : { voiceClient: voice, reconnectInterval: configuredInterval }),
+      maxAudioVideoDurationDifference: 0, pingInterval: 0,
+    }, scope).then(stopped)
+    try {
+      if (trigger === 'status') connection.emit('message', { type: 'status_change', status: 'talking' })
+      await jest.advanceTimersByTimeAsync(configuredInterval - 1)
+      if (trigger === 'status') {
+        connection.emit('message', { type: 'status_change', status: 'listening' })
+        await jest.advanceTimersByTimeAsync(0)
+        connection.emit('message', { type: 'status_change', status: 'talking' })
+      }
+      expect(stopped).not.toHaveBeenCalled()
+      await jest.advanceTimersByTimeAsync(1)
+      if (trigger === 'status') {
+        await jest.advanceTimersByTimeAsync(1)
+        expect(stopped).not.toHaveBeenCalled()
+        connection.emit('message', { type: 'status_change', status: 'listening' })
+      }
+      await jest.advanceTimersByTimeAsync(0)
+      expect(stopped).toHaveBeenCalledTimes(1)
+    } finally {
+      scope.abort()
+      await result
+    }
   })
 
   test('never starts an AudioContext or reports dh_2d_audio_activity on a direct DH2D connection', async () => {

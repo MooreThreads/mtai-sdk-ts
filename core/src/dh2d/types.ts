@@ -108,8 +108,9 @@ export type DH2DSessionConfig = {
   rtcConfiguration?: RTCConfiguration
 
   /**
-   * The interval to reconnect to the server.
-   * @default 20 * 60 * 1000 (20 minutes)
+   * Age-based connection replacement interval in milliseconds. Real
+   * transport failures still reconnect independently.
+   * @default 20 minutes for direct DH2D; disabled in voice-client mode
    */
   reconnectInterval?: number
 

@@ -10,15 +10,18 @@ import { config as rootConfig } from "../config";
 import { createPlayerPresentation } from './playerPresentation';
 
 function defaultConfig(config?: DH2DSessionConfig): ResolvedDH2DSessionConfig {
+    const voiceClient = config?.voiceClient || rootConfig().voiceClient
     return {
         ...config,
-        voiceClient: config?.voiceClient || rootConfig().voiceClient,
+        voiceClient,
         rtcConfiguration: config?.rtcConfiguration || {},
         audioInput: config?.audioInput || false,
         sessionId: config?.sessionId || Math.random().toString(36).substring(2, 15),
         videoId: config?.videoId || 'liruyun',
         frameRate: config?.frameRate || 25,
-        reconnectInterval: config?.reconnectInterval || 20 * 60 * 1000,
+        // An upstream voice outage is not a reason to replace healthy local media.
+        // Keep explicitly configured renewal and the direct DH2D default.
+        reconnectInterval: config?.reconnectInterval || (voiceClient ? 0 : 20 * 60 * 1000),
         connectTimeout: config?.connectTimeout || 60 * 1000,
         maxAudioVideoDurationDifference: config?.maxAudioVideoDurationDifference || 10 * 1000,
         pingInterval: config?.pingInterval || 10 * 1000,
