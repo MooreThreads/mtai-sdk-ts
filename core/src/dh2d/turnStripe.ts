@@ -140,9 +140,9 @@ export type TurnTransition = {
  * valid token (idle, corrupt, CRC-failing) or with conflicting tokens are
  * never treated as evidence — neither for a turn transition nor for the
  * idle boundary. Each turn is reported at most once per generation, and a
- * retired turn stays rejected for the whole connection/session generation,
- * even after an explicit media end cleared the current turn: only `reset`
- * (a new generation) clears retirement.
+ * retired turn stays rejected even after an explicit media end. The caller
+ * may explicitly re-admit one ID for fresh output after a negotiated execution
+ * change; stale pixels alone never re-admit it.
  */
 export function createTurnTransitionTracker() {
   let currentTurn: string | undefined = undefined
@@ -165,8 +165,8 @@ export function createTurnTransitionTracker() {
       // generation, so this frame is a stale re-observation of a retired
       // turn: it must never read as a transition away from the current
       // turn, replace it, or re-open after an explicit media end cleared
-      // the current turn. Only `reset` — a new connection/session
-      // generation — clears retirement.
+      // the current turn. Retirement can only be cleared by a new tracker
+      // or by explicit output admission, never from observing another stripe.
       return { endedTurnId: undefined, observedTurnId: undefined }
     }
     const previous = currentTurn
@@ -213,5 +213,9 @@ export function createTurnTransitionTracker() {
     reported.clear()
   }
 
-  return { observe, endCurrent, endAcceptedTurn, currentTurn: currentTurnId, reset }
+  function readmitOutput(turnId: string) {
+    return reported.delete(turnId)
+  }
+
+  return { observe, endCurrent, endAcceptedTurn, currentTurn: currentTurnId, readmitOutput, reset }
 }

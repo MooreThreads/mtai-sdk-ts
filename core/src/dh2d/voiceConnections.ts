@@ -17,6 +17,7 @@ import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from ".
 import { avatarTimingNow, createAvatarPlayback, AvatarFrameContext } from "./avatarMedia"
 import { createReceiverStats } from "./receiverStats"
 import { createChannelBindingUI } from '../voice/channelBindingUI'
+import { createServiceUnavailableBadge } from './serviceUnavailableBadge'
 
 /**
  * A DH2D connection whose voice-protocol traffic is carried by the voice
@@ -28,6 +29,8 @@ import { createChannelBindingUI } from '../voice/channelBindingUI'
 export type VoiceClientConnection = DH2DConnection & {
   /** The voice protocol adapter owning this connection's session identity. */
   readonly voice: VoiceMessageAdapter,
+  /** Submit text on the negotiated connection and await client admission. */
+  readonly sendVoice?: (message: DHInputMessage) => Promise<void>,
   /** Connection failure, observed during setup and by the active session. */
   readonly failure: Promise<never>,
   /** Stops avatar playback observation. */
@@ -167,7 +170,14 @@ export async function sendVoiceClientMessage(
   ws: WebSocket,
   adapter: VoiceMessageAdapter,
   message: DHInputMessage,
+  sendFrame: (frame: VoiceClientFrame) => void | Promise<void> = frame => ws.send(JSON.stringify(frame)),
 ): Promise<void> {
+  const startsWork = message.type === 'input' || message.type === 'wakeup'
+    || (message.type === 'sleep' && !!message.text?.trim())
+    || (message.type === 'asr_session' && message.command === 'start')
+  if (adapter.serviceNegotiated?.() && adapter.serviceState?.()?.status !== 'ready' && startsWork) {
+    throw new Error('Service unavailable; request was not accepted.')
+  }
   let frames: VoiceClientFrame[] = []
   switch (message.type) {
     case 'wakeup':
@@ -211,7 +221,7 @@ export async function sendVoiceClientMessage(
     default:
       break
   }
-  frames.forEach(frame => ws.send(JSON.stringify(frame)))
+  await Promise.all(frames.map(sendFrame))
 }
 
 async function connectOnce(
@@ -235,7 +245,9 @@ async function connectOnce(
   const ownsVideo = () => ownedStream !== undefined && elements.video.srcObject === ownedStream
   let videoVisible = false
   const sessionId = voiceConfig.sessionId!
-  const ws = new WebSocket(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId, sessionId))
+  const interactionUrl = new URL(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId, sessionId))
+  interactionUrl.searchParams.set('service_snapshot', 'v1')
+  const ws = new WebSocket(interactionUrl.toString())
   innerAbortable.onabort(() => {
     ws.close()
   })
@@ -256,9 +268,42 @@ async function connectOnce(
   const acceptedOutputTurns = new Set<string>()
   const pendingOutputStops = new Set<string>()
   const reportedOutputTurns = new Set<string>()
+  const outputGeneration = new Map<string, number>()
   const receiverStats = createReceiverStats({ pc, logger: attemptLogger })
   let disposed = false
   let protocolConfirmed = false
+  let acknowledgedEpoch: string | undefined
+  let acknowledgedGeneration = -1
+  const pendingText = new Map<string, { resolve: () => void, reject: (error: Error) => void }>()
+  const rejectPendingText = (error: Error) => {
+    for (const pending of pendingText.values()) pending.reject(error)
+    pendingText.clear()
+  }
+  const sendVoice = (message: DHInputMessage) => sendVoiceClientMessage(ws, adapter, message, frame => {
+    if (!adapter.serviceNegotiated() || frame.type !== 'text.input') {
+      ws.send(JSON.stringify(frame))
+      return
+    }
+    return new Promise<void>((resolve, reject) => {
+      pendingText.set(frame.request_id, { resolve, reject })
+      try { ws.send(JSON.stringify(frame)) }
+      catch (error) { pendingText.delete(frame.request_id); reject(error) }
+    })
+  })
+  let serviceBadge: HTMLElement | undefined
+  let badgeReason: string | undefined
+  const refreshServiceBadge = () => {
+    const state = adapter.serviceState()
+    const reason = state?.status === 'unavailable' ? state.reason : undefined
+    if (reason === badgeReason) return
+    serviceBadge?.remove()
+    serviceBadge = undefined
+    badgeReason = reason
+    if (reason && elements.container?.ownerDocument) {
+      serviceBadge = createServiceUnavailableBadge(elements.container.ownerDocument, reason)
+      elements.container.append(serviceBadge)
+    }
+  }
   function diagnostic(line: () => string) {
     try {
       sessionLogger.log(line())
@@ -284,6 +329,10 @@ async function connectOnce(
       outbound.push(data)
       return 'queued'
     }
+    if (adapter.serviceNegotiated() && adapter.serviceState()?.status !== 'ready') {
+      const type = typeof data === 'string' ? JSON.parse(data).type : undefined
+      if (!['audio.input.released', 'capture.ended', 'playback.ended'].includes(type)) return 'suppressed'
+    }
     ws.send(data)
     return 'sent'
   }
@@ -306,7 +355,8 @@ async function connectOnce(
   innerAbortable.onabort(inputControl.dispose)
 
   function acknowledgePlaybackEnd(turnId: string, source?: 'stripe' | 'lifecycle', nextTurnId?: string) {
-    if (reportedOutputTurns.has(turnId)) return
+    if (reportedOutputTurns.has(turnId)
+        || (adapter.serviceNegotiated() && !acceptedOutputTurns.has(turnId))) return
     reportedOutputTurns.add(turnId)
     acceptedOutputTurns.delete(turnId)
     // Point 6 is the existing receipt send boundary, independent of whether
@@ -317,7 +367,9 @@ async function connectOnce(
         + ` next=${nextTurnId ?? '-'} source=${source ?? 'stripe'}`
         + ` now=${avatarTimingNow().toFixed(3)} epoch_ms=${Date.now()}`)
     } catch { /* diagnostics must not suppress the receipt */ }
-    const frame = JSON.stringify(adapter.playbackEnded(turnId))
+    const ended = adapter.playbackEnded(turnId)
+    const frame = JSON.stringify(adapter.serviceNegotiated() && source === 'stripe'
+      ? { ...ended, disposition: 'played' } : ended)
     let disposition: 'suppressed' | 'queued' | 'sent'
     try {
       disposition = sendFrame(frame)
@@ -579,10 +631,29 @@ async function connectOnce(
           failProtocol(`expected connected session ${sessionId} with protocol version ${PROTOCOL_VERSION}; received ${String(message.protocol_version)}`)
           return
         }
+        const offeredService = 'service_snapshot' in message || 'state_epoch' in message
+        const negotiated = message.service_snapshot === 'v1'
+          && typeof message.state_epoch === 'string' && !!message.state_epoch
+          && Number.isSafeInteger(message.generation) && message.generation >= 0
+        if (offeredService && !negotiated) {
+          failProtocol('malformed service snapshot acknowledgement')
+          return
+        }
+        if (acknowledgedEpoch) {
+          // An old or duplicate acknowledgement must not re-key the projection,
+          // reset input control, or acknowledge pending text on another execution.
+          if (!negotiated || message.generation <= acknowledgedGeneration || message.state_epoch === acknowledgedEpoch) return
+        }
         protocolConfirmed = true
         inputControl.synchronize()
+        if (negotiated) {
+          rejectPendingText(new Error('Text acceptance unknown: voice service execution changed.'))
+          acknowledgedEpoch = message.state_epoch
+          acknowledgedGeneration = message.generation
+        }
         adapter.ingest(message)
-        for (const data of outbound.splice(0)) ws.send(data)
+        const early = outbound.splice(0)
+        if (!adapter.serviceNegotiated()) for (const data of early) ws.send(data)
         acknowledgeProtocol()
         return
       }
@@ -590,11 +661,45 @@ async function connectOnce(
         failProtocol('expected versioned session.state acknowledgement')
         return
       }
+      if (message.type === 'session.snapshot' && adapter.serviceNegotiated()) {
+        const changes = adapter.ingest(message)
+        if (changes.length) refreshServiceBadge()
+        for (const change of changes) evt.emit('message', change)
+        return
+      }
+      if (message.session_id === adapter.sessionId && typeof message.request_id === 'string'
+          && ((message.type === 'text.accepted' && typeof message.turn_id === 'string') || message.type === 'error')) {
+        const pending = pendingText.get(message.request_id)
+        if (pending) {
+          pendingText.delete(message.request_id)
+          if (message.type === 'text.accepted') pending.resolve()
+          else pending.reject(new Error(typeof message.message === 'string' ? message.message : 'Voice text was refused.'))
+        }
+      }
       if (message.type === 'audio.output.start' && message.session_id === adapter.sessionId
-          && typeof message.turn_id === 'string' && message.turn_id && !reportedOutputTurns.has(message.turn_id)) {
-        acceptedOutputTurns.add(message.turn_id)
+          && typeof message.turn_id === 'string' && message.turn_id) {
+        const turn = message.turn_id
+        if (adapter.serviceNegotiated() && !acceptedOutputTurns.has(turn)
+            && outputGeneration.get(turn) !== acknowledgedGeneration) {
+          // Only a newly admitted output on the current execution can re-arm
+          // a settled short ID. Repeated segments and pixels alone cannot.
+          outputGeneration.set(turn, acknowledgedGeneration)
+          reportedOutputTurns.delete(turn)
+          avatarPlayback?.readmitOutput(turn)
+        }
+        if (!reportedOutputTurns.has(turn)) acceptedOutputTurns.add(turn)
       }
       if (message.type === 'playback.stop') {
+        if ('disposition' in message) {
+          if (!adapter.serviceNegotiated() || message.disposition !== 'retire'
+              || message.session_id !== adapter.sessionId || typeof message.turn_id !== 'string') return
+          const turn = message.turn_id
+          reportedOutputTurns.add(turn)
+          acceptedOutputTurns.delete(turn)
+          pendingOutputStops.delete(turn)
+          avatarPlayback?.notifyMediaEnded(turn, true) // Retire tracker; expected receipt is fenced above.
+          return
+        }
         // Explicit playback lifecycle end: the A-to-idle boundary. DH2D idle
         // frames are undecodable, so the boundary comes from this
         // protocol-safe signal and is never inferred from invalid stripes.
@@ -639,6 +744,7 @@ async function connectOnce(
   const dispose = () => {
     if (retirement) return retirement
     disposed = true
+    rejectPendingText(new Error('Voice connection closed before text acceptance.'))
     // Fence input immediately, but retain its asynchronous acquisition/stop
     // retirement alongside signalling work. Abort callbacks cannot await it;
     // attempt failure and normal disconnect both join this same result.
@@ -652,6 +758,8 @@ async function connectOnce(
     running = false
     configuredBinding?.workflow.dispose()
     bindingUI?.dispose()
+    serviceBadge?.remove()
+    serviceBadge = undefined
     receiverStats.stop()
     avatarPlayback?.stop()
     ws.onopen = null
@@ -715,12 +823,14 @@ async function connectOnce(
     }
     return {
       ...connectionBase(ws, pc, canonicalSessionId, adapter, stopPlayback, dispose, failure),
+      sendVoice,
       ...(({ on, off }) => ({ on, off }))(evt),
     }
   }
   sessionLogger.warn('requestVideoFrameCallback unavailable; avatar turn decoding disabled')
   return {
     ...connectionBase(ws, pc, canonicalSessionId, adapter, () => receiverStats.stop(), dispose, failure),
+    sendVoice,
     ...(({ on, off }) => ({ on, off }))(evt),
   }
 }

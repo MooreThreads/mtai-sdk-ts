@@ -174,7 +174,13 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     }
     switch (event.type) {
       case 'session.state':
-        if (event.session_id === sessionId && event.state === 'connected') snapshots = createSessionSnapshotProjection(sessionId)
+        if (event.session_id === sessionId && event.state === 'connected') {
+          if (event.service_snapshot === 'v1' && typeof event.state_epoch === 'string' && event.state_epoch) {
+            if (snapshots.acknowledge(event.state_epoch)) resetExecution()
+          } else if (!snapshots.negotiated()) {
+            snapshots = createSessionSnapshotProjection(sessionId)
+          }
+        }
         return []
       case 'session.snapshot':
         return snapshots.ingest(event)
@@ -435,13 +441,17 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     }
   }
 
-  function reset() {
-    snapshots = createSessionSnapshotProjection(sessionId)
+  function resetExecution() {
     invalidatePendingSequence()
     captureTurnId = undefined
     fragments.clear()
     confirmedAsrTurns.clear()
     finalizedTurns.clear()
+  }
+
+  function reset() {
+    snapshots = createSessionSnapshotProjection(sessionId)
+    resetExecution()
   }
 
   return {
@@ -458,6 +468,8 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     observeAvatarTurn,
     reset,
     invalidatePendingSequence,
+    serviceNegotiated: () => snapshots.negotiated(),
+    serviceState: () => snapshots.service(),
     replaySnapshot: () => snapshots.replay(),
   }
 }

@@ -1,10 +1,35 @@
 import { DHOutputMessage } from '../types'
 
+export type ServiceState = { status: 'connecting' | 'ready' }
+  | { status: 'unavailable'; reason: 'service_fault' | 'local_network' | 'unknown' }
+
+function serviceState(value: any): ServiceState | undefined {
+  if (!value || typeof value !== 'object') return
+  if (value.status === 'unavailable') {
+    if (Object.keys(value).length === 2 && ['service_fault', 'local_network', 'unknown'].includes(value.reason)) {
+      return { status: value.status, reason: value.reason }
+    }
+  } else if (Object.keys(value).length === 1 && (value.status === 'ready' || value.status === 'connecting')) {
+    return { status: value.status }
+  }
+}
+
 /** Full replacement projection only: never sends intents or microphone commands. */
 export function createSessionSnapshotProjection(sessionId: string) {
   let epoch: string | undefined
   let revision = -1
   let latest: DHOutputMessage[] = []
+  let service: ServiceState | undefined
+  let negotiated = false
+  function acknowledge(expectedEpoch: string) {
+    if (negotiated && epoch === expectedEpoch) return false
+    negotiated = true
+    epoch = expectedEpoch
+    revision = -1
+    service = undefined
+    latest = []
+    return true
+  }
   function ingest(event: any): DHOutputMessage[] {
     if (event?.type !== 'session.snapshot' || event.session_id !== sessionId
         || typeof event.state_epoch !== 'string' || !event.state_epoch
@@ -25,13 +50,17 @@ export function createSessionSnapshotProjection(sessionId: string) {
         || (input.status === 'capturing'
           ? typeof input.capture_turn_id !== 'string' || !input.capture_turn_id || input.source === null
           : input.capture_turn_id !== null)) return []
+    const observed = negotiated ? serviceState(event.state.service) : undefined
+    if (negotiated ? !observed : Object.prototype.hasOwnProperty.call(event.state, 'service')) return []
     epoch = event.state_epoch
     revision = event.revision
+    service = observed
     const status = conversation.state === 'ended' ? 'sleeping'
       : input.status === 'capturing' ? 'listening'
       : ['responding', 'waiting_playback'].includes(conversation.phase) ? 'talking' : 'sleeping'
     latest = [{ type: 'status_change', status }]
     return latest.map(message => ({ ...message }))
   }
-  return { ingest, replay: () => latest.map(message => ({ ...message })) }
+  return { ingest, acknowledge, negotiated: () => negotiated,
+    service: () => service && { ...service }, replay: () => latest.map(message => ({ ...message })) }
 }

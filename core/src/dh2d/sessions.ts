@@ -57,21 +57,33 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         }
         return unsubscribe
     }
-    const messageBuffer: DHInputMessage[] = []
+    const messageBuffer: { message: DHInputMessage, resolve?: () => void, reject?: (error: Error) => void }[] = []
+    const rejectBuffered = (error: Error) => {
+        for (const entry of messageBuffer.splice(0)) entry.reject?.(error)
+    }
     const enqueueMessage = async (message: DHInputMessage) => {
-        // Voice config has no protocol equivalent and may contain credentials.
-        // Discard it before retaining or logging the original legacy payload.
-        if (realConfig.voiceClient != null && message.type === 'config') return
-        messageBuffer.push(message)
+        if (realConfig.voiceClient != null) {
+            if (message.type === 'config' || message.type === 'ping') return
+            // Wait for negotiation before deciding whether legacy replay is allowed.
+            // Never report acceptance for an intent that may have to be refused.
+            if (aborted) throw new Error('Voice connection closed before submission.')
+            return new Promise<void>((resolve, reject) => messageBuffer.push({ message, resolve, reject }))
+        }
+        messageBuffer.push({ message })
         rootLogger.log(`connection not established, message is enqueued and will be sent ASAP: ${JSON.stringify(message)}`)
     }
     const notConnected = () => {
         throw new Error("Trying to send message after session is closed")
     }
     const drainMessage = (connection: DH2DConnection) => {
-        const sending = [...messageBuffer]
-        messageBuffer.length = 0
-        sending.forEach(message => void sendMessageOn(connection, message))
+        const voice = (connection as Partial<VoiceClientConnection>).voice
+        if (voice?.serviceNegotiated?.()) {
+            rejectBuffered(new Error('Voice text or control was not submitted before readiness.'))
+            return
+        }
+        for (const { message, resolve, reject } of messageBuffer.splice(0)) {
+            void sendMessageOn(connection, message).then(resolve, reject ?? (error => rootLogger.error(error)))
+        }
     }
     const sendMessage = async (ws: WebSocket, message: DHInputMessage) => {
         ws.send(JSON.stringify(message))
@@ -79,8 +91,10 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
     // In voice-client mode SDK input messages are translated into the client
     // voice protocol; the legacy DH2D JSON protocol is used otherwise.
     const sendMessageOn = async (connection: DH2DConnection, message: DHInputMessage) => {
-        const voice = (connection as Partial<VoiceClientConnection>).voice
-        if (voice) {
+        const { voice, sendVoice } = connection as Partial<VoiceClientConnection>
+        if (sendVoice) {
+            await sendVoice(message)
+        } else if (voice) {
             await sendVoiceClientMessage(connection.ws, voice, message)
         } else {
             await sendMessage(connection.ws, message)
@@ -107,6 +121,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 return
             }
             closed = true
+            rejectBuffered(new Error('Voice connection closed before submission.'))
             rootAbortable.abort()
             player.dispose?.()
             try {
@@ -250,7 +265,10 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             emitStatus(terminalStatus)
             await disconnectOwned()
         }
-    })().finally(() => hooks.dh2d.afterClosingSession(session))
+    })().finally(() => {
+        rejectBuffered(new Error('Voice connection closed before submission.'))
+        return hooks.dh2d.afterClosingSession(session)
+    })
     // The operation can fail before a caller closes the session. Observe it
     // without changing the rejection seen by close's existing wait.
     void completed.catch(() => {})

@@ -301,7 +301,7 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar', cover?: any, container?: HTMLElement) {
+async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar', cover?: any, container?: HTMLElement, serviceEpoch?: string) {
   const scope = abortable()
   const connecting = withChild(scope, child => connectVoiceClient(logger, { video, cover, container } as any, config, child))
   await flushMicrotasks()
@@ -310,7 +310,8 @@ async function connectReady(config: any, video: any, canonicalSessionId = 'canon
   await flushMicrotasks()
   ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: canonicalSessionId }))
   ws.receive(JSON.stringify({ type: 'session.state', session_id: config.voiceClient.sessionId || 'avatar-channel-session',
-    state: 'connected', protocol_version: 3 }))
+    state: 'connected', protocol_version: 3,
+    ...(serviceEpoch ? { service_snapshot: 'v1', state_epoch: serviceEpoch, generation: 0 } : {}) }))
   await flushMicrotasks()
   const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1]
   pc.dispatch('track', { track: { kind: 'video' }, streams: [{ id: 's' }] })
@@ -346,12 +347,13 @@ function setupRealSession(voice: boolean, video: any, audioInput: any = false) {
   return () => { Object.assign(hooks.dh2d, original); globalDH2DSessions.value = [] }
 }
 
-async function readyRealSession(video: any) {
+async function readyRealSession(video: any, serviceEpoch?: string) {
   await jest.advanceTimersByTimeAsync(0)
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
   ws.open()
   ws.receive(JSON.stringify({ type: 'dh_2d_session_ready', session_id: 'real' }))
-  ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3 }))
+  ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3,
+    ...(serviceEpoch ? { service_snapshot: 'v1', state_epoch: serviceEpoch, generation: 1 } : {}) }))
   await jest.advanceTimersByTimeAsync(0)
   const pc = FakeRTCPeerConnection.instances.find(peer => peer.transceivers.some(track => track.kind === 'video'))!
   const stream = { id: 'real' }
@@ -361,6 +363,94 @@ async function readyRealSession(video: any) {
   await jest.advanceTimersByTimeAsync(0)
   return { ws, pc }
 }
+test('public session send refuses pre-ack text and settles only its own client receipt', async () => {
+  const globals = setupGlobals()
+  jest.useFakeTimers()
+  const video = fakeVideo()
+  const restore = setupRealSession(true, video)
+  const session = createDH2DSession({} as HTMLElement)
+  try {
+    const early = expect(session.send({ type: 'input', text: 'before ack' })).rejects.toThrow('not submitted')
+    const { ws } = await readyRealSession(video, 'e')
+    await early
+    const receive = (value: object) => ws.receive(JSON.stringify({ session_id: 'voice-1', ...value }))
+    receive({ type: 'session.snapshot', state_epoch: 'e', revision: 1, state: {
+      service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+      audio_input: { source: null, status: 'unavailable', source_revision: 0, capture_turn_id: null },
+    } })
+    const textFrames = () => ws.sent.map((item: string) => JSON.parse(item)).filter(frame => frame.type === 'text.input')
+    expect(textFrames()).toEqual([])
+    const refused = expect(session.send({ type: 'input', text: 'try now' })).rejects.toThrow('busy')
+    receive({ type: 'error', request_id: textFrames()[0].request_id, message: 'busy' })
+    await refused
+    const accepted = expect(session.send({ type: 'input', text: 'fresh' })).resolves.toBeUndefined()
+    receive({ type: 'text.accepted', turn_id: '01', request_id: textFrames()[1].request_id })
+    await accepted
+    expect(textFrames().map(frame => frame.text)).toEqual(['try now', 'fresh'])
+  } finally {
+    const cleanup = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await cleanup
+    restore()
+    jest.useRealTimers()
+    globals.restore()
+  }
+})
+
+test('negotiated service loss keeps the attached peer and rejects unaccepted text', async () => {
+  const globals = setupGlobals()
+  try {
+    const video = fakeVideo()
+    const container = document.createElement('div')
+    const { connection, ws, pc, scope } = await connectReady(createConfig(), video, 'canonical-avatar', undefined, container, 'e')
+    try {
+      const receive = (value: object) => ws.receive(JSON.stringify({ session_id: 'voice-1', ...value }))
+      const snapshot = (revision: number, service: object, epoch = 'e') => receive({
+        type: 'session.snapshot', state_epoch: epoch, revision,
+        state: { service, conversation: { state: 'ended', phase: 'idle' },
+          audio_input: { source: null, status: 'unavailable', source_revision: 0, capture_turn_id: null } },
+      })
+      const send = (text: string) => connection.sendVoice!({ type: 'input', text })
+      await expect(send('before readiness')).rejects.toThrow('Service unavailable')
+      snapshot(1, { status: 'ready' })
+      const racing = send('racing refusal')
+      const rejection = expect(racing).rejects.toThrow('not accepted')
+      const first = JSON.parse(ws.sent[ws.sent.length - 1] as string)
+      receive({ type: 'error', request_id: first.request_id, message: 'not accepted' })
+      await rejection
+      snapshot(2, { status: 'unavailable', reason: 'service_fault' })
+      expect(container.textContent).toContain('服务暂不可用，正在加紧修复')
+      snapshot(1, { status: 'ready' })
+      snapshot(3, { status: 'ready' }, 'stale')
+      expect(container.textContent).toContain('服务暂不可用，正在加紧修复')
+      expect(connection.pc).toBe(pc)
+      expect(ws.readyState).toBe(FakeWebSocket.OPEN)
+      receive({ type: 'session.state', state: 'connected', protocol_version: 3, service_snapshot: 'v1', state_epoch: 'e', generation: 0 })
+      snapshot(1, { status: 'ready' })
+      expect(container.textContent).toContain('服务暂不可用，正在加紧修复')
+      receive({ type: 'session.state', state: 'connected', protocol_version: 3, service_snapshot: 'v1', state_epoch: 'next', generation: 1 })
+      snapshot(1, { status: 'ready' }, 'next')
+      receive({ type: 'session.state', state: 'connected', protocol_version: 3, service_snapshot: 'v1', state_epoch: 'e', generation: 0 })
+      snapshot(4, { status: 'unavailable', reason: 'service_fault' })
+      expect(container.textContent).not.toContain('服务暂不可用，正在加紧修复')
+      const accepted = send('fresh request')
+      const second = JSON.parse(ws.sent[ws.sent.length - 1] as string)
+      receive({ type: 'text.accepted', request_id: second.request_id, turn_id: '01' })
+      await expect(accepted).resolves.toBeUndefined()
+      expect(ws.sent.map(value => typeof value === 'string' && JSON.parse(value))
+        .filter(frame => frame && frame.type === 'text.input').map(frame => frame.text)).toEqual(['racing refusal', 'fresh request'])
+      snapshot(2, { status: 'unavailable', reason: 'local_network' }, 'next')
+      expect(container.textContent).toContain('本地网络异常，请检查网络连接')
+    } finally {
+      scope.abort()
+      await connection.dispose()
+      expect(container.textContent).not.toContain('本地网络异常，请检查网络连接')
+    }
+  } finally {
+    globals.restore()
+  }
+})
+
 describe('version-only handshake', () => {
   test('native/media readiness still waits for a matching client acknowledgement on every connection', async () => {
     const globals = setupGlobals()
@@ -1307,7 +1397,7 @@ describe('connectVoiceClient', () => {
     try {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig(), video)
-      expect(ws.url).toBe('ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai')
+      expect(ws.url).toBe('ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai&service_snapshot=v1')
     } finally {
       globals.restore()
     }
@@ -1332,7 +1422,7 @@ describe('connectVoiceClient', () => {
     try {
       const video = fakeVideo()
       const { ws } = await connectReady(createConfig({ voiceClient: { interaction_endpoint: 'ws://client:8300/voice', sessionId: 'voice-1' } }), video)
-      expect(ws.url).toBe('ws://client:8300/voice/voice-1?mode=avatar&video_id=xiaomai')
+      expect(ws.url).toBe('ws://client:8300/voice/voice-1?mode=avatar&video_id=xiaomai&service_snapshot=v1')
     } finally {
       globals.restore()
     }
@@ -1513,7 +1603,7 @@ describe('connectVoiceClient', () => {
         type: 'session.start', session_id: 'voice-1', protocol_version: 3,
       })
       expect(FakeWebSocket.instances.map(_ => _.url)).toEqual([
-        'ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai',
+        'ws://client:8300/ws/voice-1?mode=avatar&video_id=xiaomai&service_snapshot=v1',
       ])
     } finally {
       globals.restore()
@@ -2123,6 +2213,73 @@ describe('connectVoiceClient', () => {
       expect(playbackFrames).toEqual([
         { type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0' },
       ])
+    } finally {
+      globals.restore()
+    }
+  })
+
+  test('after outage, a fresh stripe receipts only the old complete turn; retirement is silent', async () => {
+    const globals = setupGlobals()
+    try {
+      const { ws, scope, connection } = await connectReady(createConfig(), fakeVideo(), 'canonical-avatar', undefined, undefined, 'e')
+      try {
+        const receive = (value: object) => ws.receive(JSON.stringify({ session_id: 'voice-1', ...value }))
+        const receipts = () => ws.sent.map((d: string) => JSON.parse(d)).filter((m: any) => m.type === 'playback.ended')
+        const start = (turn_id: string) => receive({ type: 'audio.output.start', turn_id })
+        const messages: any[] = []
+        connection.on('message', frame => messages.push(frame))
+        receive({ type: 'session.snapshot', state_epoch: 'e', revision: 1, state: {
+          service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+          audio_input: { source: null, status: 'unavailable', source_revision: 0, capture_turn_id: null },
+        } })
+        const sleeping = connection.sendVoice!({ type: 'sleep', text: 'old response' })
+        const sent = JSON.parse(ws.sent[ws.sent.length - 1])
+        receive({ type: 'text.accepted', turn_id: 'A0', request_id: sent.request_id })
+        await sleeping
+        start('A0')
+        receive({ type: 'text.output.delta', turn_id: 'A0', text: 'old' })
+        globals.setSample('A0'); globals.emitFrame()
+        receive({ type: 'turn.end', turn_id: 'A0' })
+        receive({ type: 'session.snapshot', state_epoch: 'e', revision: 2, state: {
+          service: { status: 'unavailable', reason: 'unknown' }, conversation: { state: 'ended', phase: 'waiting_playback' },
+          audio_input: { source: null, status: 'unavailable', source_revision: 0, capture_turn_id: null },
+        } })
+        globals.setSample(null); globals.emitFrame()
+        expect(receipts()).toEqual([])
+        receive({ type: 'session.state', protocol_version: 3, state: 'connected', service_snapshot: 'v1', state_epoch: 'f', generation: 1 })
+        receive({ type: 'session.snapshot', state_epoch: 'f', revision: 1, state: {
+          service: { status: 'ready' }, conversation: { state: 'ended', phase: 'waiting_playback' },
+          audio_input: { source: null, status: 'unavailable', source_revision: 0, capture_turn_id: null },
+        } })
+        start('A1')
+        globals.setSample('A1'); globals.emitFrame()
+        expect(receipts()).toEqual([{ type: 'playback.ended', session_id: 'voice-1', turn_id: 'A0', disposition: 'played' }])
+        receive({ type: 'playback.stop', turn_id: 'A1', disposition: 'retire' })
+        start('A2')
+        globals.setSample('A2'); globals.emitFrame()
+        expect(receipts()).toHaveLength(1)
+        globals.setSample('A0'); globals.emitFrame() // A stale stripe alone cannot re-open A0.
+        expect(receipts()).toHaveLength(1)
+        start('A0') // Fresh audio reuses the settled ID on execution f.
+        receive({ type: 'text.output.delta', turn_id: 'A0', text: 'new' })
+        receive({ type: 'audio.output.delta', turn_id: 'A0', subtitles: [{ source: 'main', text: 'new subtitle' }] })
+        receive({ type: 'turn.end', turn_id: 'A0' })
+        expect(messages).toContainEqual({ type: 'bot_output', text: 'new' })
+        expect(messages).toContainEqual({ type: 'audio_text', text: 'new subtitle' })
+        expect(messages).toContainEqual({ type: 'message_record', message: { role: 'assistant', content: 'new' } })
+        expect(ws.sent.map((wire: string) => JSON.parse(wire)).filter(frame => frame.type === 'conversation.stop')).toEqual([])
+        globals.setSample('A0'); globals.emitFrame()
+        expect(receipts().map(frame => frame.turn_id)).toEqual(['A0', 'A2'])
+        start('A3')
+        globals.setSample('A3'); globals.emitFrame()
+        expect(receipts().map(frame => frame.turn_id)).toEqual(['A0', 'A2', 'A0'])
+        start('A0') // A duplicate start in f must not re-arm its settled ID again.
+        globals.setSample('A0'); globals.emitFrame()
+        expect(receipts().map(frame => frame.turn_id)).toEqual(['A0', 'A2', 'A0'])
+      } finally {
+        scope.abort()
+        await connection.dispose()
+      }
     } finally {
       globals.restore()
     }

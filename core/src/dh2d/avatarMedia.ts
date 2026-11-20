@@ -247,6 +247,10 @@ export function createAvatarPlayback(options: AvatarPlaybackOptions) {
         + ` null_samples=${nullSamples} sampled_frames=${sampledFrames} valid_frames=${validFrames}`
         + ` invalid_frames=${invalidFrames} observation_failures=${observationFailures}`)
     },
+    /** A fenced new output start can reuse a single settled stripe ID. */
+    readmitOutput(turnId: string) {
+      if (tracker.readmitOutput(turnId)) startedTurns.delete(turnId)
+    },
     /** Ordinary ends retire only their intended/current turn; pending new turns remain observable. */
     notifyMediaEnded(turnId?: string, acceptedOutput = false) {
       if (turnId !== undefined && tracker.currentTurn() !== turnId && !acceptedOutput) return
