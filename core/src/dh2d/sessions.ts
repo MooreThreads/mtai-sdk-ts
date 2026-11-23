@@ -7,6 +7,7 @@ import { Abortable, Box, DHInputMessage, DHOutputMessage } from "../types"
 import { DH2DConnection, DH2DSession, DH2DSessionEvents, DH2DSessionEventTypes, DH2DSessionStatus } from "./types"
 import { DH2DSessionConfig, DH2DPlayerElements } from "./types"
 import { sendVoiceClientMessage, VoiceClientConnection, VoiceProtocolError } from "./voiceConnections"
+import { createSnapshotObservation, type VoiceSessionSnapshot } from '../voice/sessionSnapshot'
 
 
 /**
@@ -50,12 +51,19 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
     })
     const evt = events<DH2DSessionEvents>()
     let latestVoiceStatus: DHOutputMessage | undefined
+    const snapshots = createSnapshotObservation()
     const on: typeof evt.on = (event, handler) => {
+        if (event === 'snapshot') return snapshots.subscribe(handler as (value: VoiceSessionSnapshot | undefined) => void)
         const unsubscribe = evt.on(event, handler)
         if (event === 'message' && latestVoiceStatus && !closed && status === 'connected') {
             (handler as (_: DHOutputMessage) => void)({ ...latestVoiceStatus })
         }
         return unsubscribe
+    }
+    const off = <K extends keyof DH2DSessionEvents>(event: K, handler?: (_: DH2DSessionEvents[K]) => void) => {
+        if (event === 'snapshot') snapshots.unsubscribe(handler as ((value: VoiceSessionSnapshot | undefined) => void) | undefined)
+        else if (handler) evt.off(event, handler)
+        else evt.off(event)
     }
     const messageBuffer: { message: DHInputMessage, resolve?: () => void, reject?: (error: Error) => void }[] = []
     const rejectBuffered = (error: Error) => {
@@ -114,6 +122,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         get sessionId() { return realConfig.sessionId },
         get videoId() { return realConfig.videoId },
         get status() { return status },
+        get snapshot() { return snapshots.value },
         get send() { return send },
         get config() { return sendConfig },
         close: async () => {
@@ -121,6 +130,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 return
             }
             closed = true
+            snapshots.publish(undefined)
             rejectBuffered(new Error('Voice connection closed before submission.'))
             rootAbortable.abort()
             player.dispose?.()
@@ -136,18 +146,19 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             }
         },
         on,
-        off: evt.off,
+        off,
     }
 
     evt.on("statuschange", _ => {
         if (_ === "failed" || _ === "closed") {
             for (const ev of DH2DSessionEventTypes) {
-                evt.off(ev)
+                off(ev)
             }
         }
     })
 
     function onMessage(message: DHOutputMessage) {
+        if (closed || aborted) return
         if (message.type === "session_ended") {
             // close already logs failures; only explicit callers receive its
             // rejection. Server events have no caller to observe that promise.
@@ -163,7 +174,10 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         function emitStatus(_status: typeof DH2DSessionStatus[number]) {
             sessionLogger.log(`status changing from ${status} to ${_status}`)
             status = _status
-            if (_status !== 'connected') latestVoiceStatus = undefined
+            if (_status !== 'connected') {
+                latestVoiceStatus = undefined
+                snapshots.publish(undefined)
+            }
             evt.emit("statuschange", _status)
         }
         await withChild(rootAbortable, _ => hooks.dh2d.beforeConnectingSession(session, _))
@@ -190,9 +204,18 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         let connection!: DH2DConnection
         let terminalStatus: 'closed' | 'failed' = 'closed'
         let ownsConnection = false
+        let unsubscribeSnapshot: (() => void) | undefined
+        const observeSnapshot = (owner: DH2DConnection) => {
+            if (!voiceClientMode) return
+            unsubscribeSnapshot = (owner as Partial<VoiceClientConnection>).onSnapshot?.(value => {
+                if (!aborted && !closed && ownsConnection && connection === owner) snapshots.publish(value)
+            })
+        }
         const disconnectOwned = async () => {
             if (!ownsConnection) return
             ownsConnection = false
+            unsubscribeSnapshot?.()
+            unsubscribeSnapshot = undefined
             await disconnectHook(sessionLogger, connection, player, abortable())
         }
         try {
@@ -207,6 +230,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
             sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
             send = _ => sendMessageOn(connection, _)
             drainMessage(connection)
+            observeSnapshot(connection)
             connection.on("message", onMessage)
             connection.on("audio", _ => evt.emit("audio", _))
             if (configMsg) {
@@ -248,6 +272,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
                 ownsConnection = true
                 realConfig.sessionId = connection.sessionId
                 sessionLogger = rootLogger.push((_, ...args) => _(`[s:${connection.sessionId}]`, ...args))
+                observeSnapshot(connection)
                 connection.on("message", onMessage)
                 connection.on("audio", _ => evt.emit("audio", _))
                 emitStatus("connected")

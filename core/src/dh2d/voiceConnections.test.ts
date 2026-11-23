@@ -451,6 +451,198 @@ test('negotiated service loss keeps the attached peer and rejects unaccepted tex
   }
 })
 
+test('public session observes accepted snapshots, replays current state, and clears it on a new execution', async () => {
+  const globals = setupGlobals()
+  jest.useFakeTimers()
+  const video = fakeVideo()
+  const restore = setupRealSession(true, video)
+  const session = createDH2DSession({} as HTMLElement)
+  const observed = jest.fn()
+  session.on('snapshot', observed)
+  try {
+    const { ws } = await readyRealSession(video, 'e')
+    const receive = (value: object) => ws.receive(JSON.stringify({ session_id: 'voice-1', ...value }))
+    const snapshot = (revision: number, source: 'frontend' | 'xunfei', epoch = 'e') => ({
+      type: 'session.snapshot', state_epoch: epoch, revision, state: {
+        conversation: { state: 'ended', phase: 'idle' }, service: { status: 'ready' },
+        audio_input: { source, status: 'ready', source_revision: revision, capture_turn_id: null },
+      },
+    })
+    expect(observed.mock.calls).toEqual([[undefined]])
+    const first = snapshot(1, 'frontend')
+    receive(first)
+    expect(session.snapshot).toEqual({ session_id: 'voice-1', ...first })
+    expect(Object.isFrozen(session.snapshot?.state.audio_input)).toBe(true)
+    const late = jest.fn()
+    const unsubscribe = session.on('snapshot', late)
+    expect(late).toHaveBeenCalledWith(session.snapshot)
+    receive(snapshot(1, 'xunfei'))
+    receive(snapshot(2, 'xunfei', 'foreign'))
+    receive({ ...snapshot(2, 'xunfei'), session_id: 'foreign' })
+    expect(late).toHaveBeenCalledTimes(1)
+    receive(snapshot(2, 'xunfei'))
+    expect(late).toHaveBeenLastCalledWith(session.snapshot)
+    expect(session.snapshot?.state.audio_input.source).toBe('xunfei')
+    unsubscribe()
+    receive({ type: 'session.state', state: 'connected', protocol_version: 3,
+      service_snapshot: 'v1', state_epoch: 'next', generation: 2 })
+    expect(session.snapshot).toBeUndefined()
+    expect(observed).toHaveBeenLastCalledWith(undefined)
+    receive(snapshot(3, 'xunfei'))
+    expect(session.snapshot).toBeUndefined()
+    receive(snapshot(1, 'frontend', 'next'))
+    expect(observed).toHaveBeenLastCalledWith(session.snapshot)
+    expect(session.snapshot?.state_epoch).toBe('next')
+    expect(late).toHaveBeenCalledTimes(2)
+  } finally {
+    const cleanup = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await cleanup
+    restore()
+    jest.useRealTimers()
+    globals.restore()
+  }
+  expect(session.snapshot).toBeUndefined()
+  expect(observed).toHaveBeenLastCalledWith(undefined)
+})
+
+test('a throwing snapshot listener cannot prevent invalidation or session cleanup', async () => {
+  const globals = setupGlobals()
+  jest.useFakeTimers()
+  const video = fakeVideo()
+  const restore = setupRealSession(true, video)
+  const disposePlayer = jest.fn()
+  const disconnect = jest.spyOn(hooks.dh2d, 'disconnectVoiceClient')
+  hooks.dh2d.getOrCreatePlayer = () => ({ video, dispose: disposePlayer } as any)
+  const session = createDH2DSession({} as HTMLElement)
+  const observed = jest.fn()
+  try {
+    const { ws } = await readyRealSession(video, 'e')
+    ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision: 1,
+      state: {
+        service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+        audio_input: { source: 'frontend', status: 'ready', source_revision: 1, capture_turn_id: null },
+      },
+    }))
+    expect(session.snapshot).toBeDefined()
+    session.on('snapshot', value => { if (!value) throw new Error('consumer failed') })
+    session.on('snapshot', observed)
+    const closing = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await closing
+    await session.close()
+    expect(observed).toHaveBeenLastCalledWith(undefined)
+    expect(session.snapshot).toBeUndefined()
+    expect(ws.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(disconnect).toHaveBeenCalledTimes(1)
+    expect(disposePlayer).toHaveBeenCalledTimes(1)
+  } finally {
+    const cleanup = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await cleanup
+    disconnect.mockRestore()
+    restore()
+    jest.useRealTimers()
+    globals.restore()
+  }
+})
+
+test('closing from a snapshot listener does not deliver retired status to the app', async () => {
+  const globals = setupGlobals()
+  jest.useFakeTimers()
+  const video = fakeVideo()
+  const restore = setupRealSession(true, video)
+  const session = createDH2DSession({} as HTMLElement)
+  const message = jest.fn()
+  const observed = jest.fn()
+  let closing: Promise<void> | undefined
+  try {
+    const { ws } = await readyRealSession(video, 'e')
+    session.on('message', message)
+    session.on('snapshot', value => { if (value) closing = session.close() })
+    session.on('snapshot', observed)
+    ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision: 1,
+      state: {
+        service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+        audio_input: { source: 'frontend', status: 'ready', source_revision: 1, capture_turn_id: null },
+      },
+    }))
+    expect(closing).toBeDefined()
+    expect(session.snapshot).toBeUndefined()
+    expect(observed.mock.calls).toEqual([[undefined], [undefined]])
+    expect(message).not.toHaveBeenCalled()
+    await jest.advanceTimersByTimeAsync(0)
+    await closing
+    expect(ws.readyState).toBe(FakeWebSocket.CLOSED)
+  } finally {
+    const cleanup = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await cleanup
+    restore()
+    jest.useRealTimers()
+    globals.restore()
+  }
+})
+
+test.each([false, true])('shows and clears a nonfatal microphone warning (service snapshots: %s)', async (negotiated) => {
+  const globals = setupGlobals()
+  try {
+    const container = document.createElement('div')
+    const { connection, ws, pc, scope } = await connectReady(createConfig({ audioInput: true }), fakeVideo(),
+      'canonical-avatar', undefined, container, negotiated ? 'e' : undefined)
+    const warning = '麦克风初始化失败，请检查系统输入设备和麦克风权限'
+    const snapshot = (revision: number, status: string, options: { epoch?: string, session?: string,
+      code?: string, service?: object } = {}) => ws.receive(JSON.stringify({
+      type: 'session.snapshot', session_id: options.session ?? 'voice-1', state_epoch: options.epoch ?? 'e', revision,
+      state: {
+        ...(negotiated ? { service: options.service ?? { status: 'ready' } } : {}),
+        conversation: { state: 'ended', phase: 'idle' },
+        audio_input: { source: 'frontend', status, source_revision: 1, capture_turn_id: null,
+          ...(options.code ? { error_code: options.code } : {}) },
+      },
+    }))
+    try {
+      snapshot(1, 'preparing')
+      expect(container.textContent).not.toContain(warning)
+      snapshot(2, 'error', { code: 'initialization_failed' })
+      expect(container.querySelector('[role="status"]')?.textContent).toContain(warning)
+      snapshot(1, 'ready')
+      snapshot(3, 'ready', { epoch: 'stale' })
+      snapshot(3, 'ready', { session: 'foreign' })
+      expect(container.querySelector('[role="status"]')?.textContent).toContain(warning)
+      expect(connection.pc).toBe(pc)
+      expect(ws.readyState).toBe(FakeWebSocket.OPEN)
+      const sent = connection.sendVoice!({ type: 'input', text: 'still usable' })
+      const frame = JSON.parse(ws.sent[ws.sent.length - 1] as string)
+      expect(frame.type).toBe('text.input')
+      if (negotiated) ws.receive(JSON.stringify({ type: 'text.accepted', session_id: 'voice-1',
+        request_id: frame.request_id, turn_id: '01' }))
+      await sent
+      snapshot(3, 'ready')
+      expect(container.textContent).not.toContain(warning)
+      snapshot(4, 'error', { code: 'initialization_failed' })
+      if (negotiated) {
+        snapshot(5, 'error', { code: 'initialization_failed', service: { status: 'unavailable', reason: 'service_fault' } })
+        expect(container.textContent).toContain('服务暂不可用，正在加紧修复')
+        expect(container.textContent).not.toContain(warning)
+        snapshot(6, 'error', { code: 'initialization_failed' })
+        expect(container.querySelector('[role="status"]')?.textContent).toContain(warning)
+        ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected',
+          protocol_version: 3, service_snapshot: 'v1', state_epoch: 'next', generation: 1 }))
+        expect(container.textContent).not.toContain(warning)
+        snapshot(1, 'error', { epoch: 'next', code: 'initialization_failed' })
+      }
+      expect(container.querySelector('[role="status"]')?.textContent).toContain(warning)
+    } finally {
+      scope.abort()
+      await connection.dispose()
+    }
+    expect(container.textContent).not.toContain(warning)
+  } finally {
+    globals.restore()
+  }
+})
+
 describe('version-only handshake', () => {
   test('native/media readiness still waits for a matching client acknowledgement on every connection', async () => {
     const globals = setupGlobals()

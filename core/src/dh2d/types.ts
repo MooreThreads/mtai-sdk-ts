@@ -1,4 +1,5 @@
 import { DHConnectionEvents, DHConnectionEventTypes, DHInputMessage, EventSource, UnionEqual } from "../types";
+import type { VoiceSessionSnapshot } from '../voice/sessionSnapshot';
 import type { VoiceClientToolHandler } from "../voice/channelBinding";
 
 /**
@@ -153,10 +154,13 @@ export type ResolvedDH2DSessionConfig = Required<Omit<DH2DSessionConfig, 'voiceC
 
 export type DH2DSessionEvents = DHConnectionEvents & {
   statuschange: typeof DH2DSessionStatus[number]
+  /** Replays the current snapshot on subscribe; undefined means no current snapshot. */
+  snapshot: VoiceSessionSnapshot | undefined
 }
 export const DH2DSessionEventTypes = [
   ...DHConnectionEventTypes,
   "statuschange",
+  "snapshot",
 ] as const;
 /**
  * Represents a session with the server.
@@ -174,6 +178,8 @@ export type DH2DSession = EventSource<DH2DSessionEvents> & {
    * The current status of the session.
    */
   readonly status: typeof DH2DSessionStatus[number]
+  /** Latest accepted immutable voice-client snapshot, absent in legacy sessions or during retirement. */
+  readonly snapshot: VoiceSessionSnapshot | undefined
 
   /**
    * Sends a configuration message to the server.

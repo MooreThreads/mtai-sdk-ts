@@ -1,7 +1,17 @@
+import type { AudioInputErrorCode } from '../voice/sessionSnapshot'
+
 const svgNamespace = 'http://www.w3.org/2000/svg'
 
+const microphoneErrorMessages: Record<AudioInputErrorCode, string> = {
+    unavailable: '麦克风不可用，请检查系统输入设备',
+    permission_denied: '无法访问麦克风，请检查麦克风权限',
+    device_lost: '麦克风已断开，请重新连接或选择其他输入设备',
+    format_mismatch: '麦克风格式不受支持，请选择其他输入设备',
+    initialization_failed: '麦克风初始化失败，请检查系统输入设备和麦克风权限',
+}
+
 const badgeStyles = `
-[data-mtai-service-unavailable] {
+[data-mtai-service-unavailable], [data-mtai-microphone-error] {
     position: absolute;
     top: 28px;
     right: 32px;
@@ -58,6 +68,18 @@ const badgeStyles = `
     [data-mtai-service-unavailable] svg [class] { animation: none; }
 }
 `
+
+export function createMicrophoneErrorBadge(doc: Document, code: AudioInputErrorCode): HTMLDivElement {
+    const badge = doc.createElement('div')
+    badge.setAttribute('data-mtai-microphone-error', '')
+    badge.setAttribute('role', 'status')
+    const style = doc.createElement('style')
+    style.textContent = badgeStyles
+    const text = doc.createElement('span')
+    text.textContent = microphoneErrorMessages[code]
+    badge.append(style, text)
+    return badge
+}
 
 /** Build the approved overlay for a positioned player container. The player owns its lifetime. */
 export function createServiceUnavailableBadge(doc: Document,

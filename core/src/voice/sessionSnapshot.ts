@@ -1,7 +1,64 @@
 import { DHOutputMessage } from '../types'
 
+const audioInputErrorCodes = ['unavailable', 'permission_denied', 'device_lost', 'format_mismatch', 'initialization_failed'] as const
+export type AudioInputErrorCode = typeof audioInputErrorCodes[number]
+
 export type ServiceState = { status: 'connecting' | 'ready' }
   | { status: 'unavailable'; reason: 'service_fault' | 'local_network' | 'unknown' }
+
+/** The latest validated client snapshot; opaque epochs scope revisions to one execution. */
+export type VoiceSessionSnapshot = Readonly<{
+  type: 'session.snapshot',
+  session_id: string,
+  state_epoch: string,
+  revision: number,
+  state: Readonly<{
+    conversation: Readonly<{
+      state: 'ended' | 'voice' | 'text',
+      phase: 'idle' | 'starting' | 'waiting_playback' | 'capturing' | 'responding' | 'stopping',
+    }>,
+    audio_input: Readonly<{
+      source: 'frontend' | 'xunfei' | null,
+      status: 'unavailable' | 'preparing' | 'ready' | 'capturing' | 'error',
+      source_revision: number,
+      capture_turn_id: string | null,
+      error_code?: AudioInputErrorCode,
+    }>,
+    service?: Readonly<ServiceState>,
+  }>,
+}>
+
+type SnapshotListener = (value: VoiceSessionSnapshot | undefined) => void
+
+/** Snapshot observers cannot interrupt protocol handling or session cleanup. */
+export function createSnapshotObservation() {
+  let value: VoiceSessionSnapshot | undefined
+  const listeners = new Set<SnapshotListener>()
+  const notify = (listener: SnapshotListener) => {
+    try { listener(value) } catch { /* consumer exceptions must not affect the session */ }
+  }
+  const unsubscribe = (listener?: SnapshotListener) => {
+    if (listener) listeners.delete(listener)
+    else listeners.clear()
+  }
+  return {
+    get value() { return value },
+    publish(next: VoiceSessionSnapshot | undefined) {
+      if (next === value) return
+      value = next
+      for (const listener of [...listeners]) {
+        if (value !== next) break // A listener may close the session while being notified.
+        if (listeners.has(listener)) notify(listener)
+      }
+    },
+    subscribe(listener: SnapshotListener) {
+      listeners.add(listener)
+      notify(listener)
+      return () => unsubscribe(listener)
+    },
+    unsubscribe,
+  }
+}
 
 function serviceState(value: any): ServiceState | undefined {
   if (!value || typeof value !== 'object') return
@@ -19,14 +76,14 @@ export function createSessionSnapshotProjection(sessionId: string) {
   let epoch: string | undefined
   let revision = -1
   let latest: DHOutputMessage[] = []
-  let service: ServiceState | undefined
+  let current: VoiceSessionSnapshot | undefined
   let negotiated = false
   function acknowledge(expectedEpoch: string) {
     if (negotiated && epoch === expectedEpoch) return false
     negotiated = true
     epoch = expectedEpoch
     revision = -1
-    service = undefined
+    current = undefined
     latest = []
     return true
   }
@@ -46,7 +103,7 @@ export function createSessionSnapshotProjection(sessionId: string) {
         || (input.status === 'capturing' && conversation.state !== 'voice')
         || (input.source === null && !['unavailable', 'error'].includes(input.status))
         || (input.error_code !== undefined && (input.status !== 'error'
-          || !['unavailable', 'permission_denied', 'device_lost', 'format_mismatch', 'initialization_failed'].includes(input.error_code)))
+          || !audioInputErrorCodes.includes(input.error_code)))
         || (input.status === 'capturing'
           ? typeof input.capture_turn_id !== 'string' || !input.capture_turn_id || input.source === null
           : input.capture_turn_id !== null)) return []
@@ -54,13 +111,27 @@ export function createSessionSnapshotProjection(sessionId: string) {
     if (negotiated ? !observed : Object.prototype.hasOwnProperty.call(event.state, 'service')) return []
     epoch = event.state_epoch
     revision = event.revision
-    service = observed
+    current = Object.freeze({
+      type: 'session.snapshot', session_id: sessionId, state_epoch: event.state_epoch, revision,
+      state: Object.freeze({
+        conversation: Object.freeze({ state: conversation.state, phase: conversation.phase }),
+        audio_input: Object.freeze({
+          source: input.source, status: input.status, source_revision: input.source_revision,
+          capture_turn_id: input.capture_turn_id,
+          ...(input.error_code !== undefined ? { error_code: input.error_code } : {}),
+        }),
+        ...(observed ? { service: Object.freeze(observed) } : {}),
+      }),
+    })
     const status = conversation.state === 'ended' ? 'sleeping'
       : input.status === 'capturing' ? 'listening'
       : ['responding', 'waiting_playback'].includes(conversation.phase) ? 'talking' : 'sleeping'
     latest = [{ type: 'status_change', status }]
     return latest.map(message => ({ ...message }))
   }
-  return { ingest, acknowledge, negotiated: () => negotiated,
-    service: () => service && { ...service }, replay: () => latest.map(message => ({ ...message })) }
+  return { ingest, acknowledge, negotiated: () => negotiated, snapshot: () => current,
+    service: () => current?.state.service,
+    inputError: () => current?.state.audio_input.status === 'error'
+      ? current.state.audio_input.error_code ?? 'unavailable' : undefined,
+    replay: () => latest.map(message => ({ ...message })) }
 }

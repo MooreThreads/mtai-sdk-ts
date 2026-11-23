@@ -469,7 +469,9 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
     reset,
     invalidatePendingSequence,
     serviceNegotiated: () => snapshots.negotiated(),
+    snapshot: () => snapshots.snapshot(),
     serviceState: () => snapshots.service(),
+    audioInputError: () => snapshots.inputError(),
     replaySnapshot: () => snapshots.replay(),
   }
 }

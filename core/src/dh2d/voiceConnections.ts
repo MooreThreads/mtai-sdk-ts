@@ -17,7 +17,8 @@ import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from ".
 import { avatarTimingNow, createAvatarPlayback, AvatarFrameContext } from "./avatarMedia"
 import { createReceiverStats } from "./receiverStats"
 import { createChannelBindingUI } from '../voice/channelBindingUI'
-import { createServiceUnavailableBadge } from './serviceUnavailableBadge'
+import { createMicrophoneErrorBadge, createServiceUnavailableBadge } from './serviceUnavailableBadge'
+import { createSnapshotObservation, type VoiceSessionSnapshot } from '../voice/sessionSnapshot'
 
 /**
  * A DH2D connection whose voice-protocol traffic is carried by the voice
@@ -29,6 +30,8 @@ import { createServiceUnavailableBadge } from './serviceUnavailableBadge'
 export type VoiceClientConnection = DH2DConnection & {
   /** The voice protocol adapter owning this connection's session identity. */
   readonly voice: VoiceMessageAdapter,
+  /** Observe the accepted client snapshot and its invalidation on epoch change or shutdown. */
+  readonly onSnapshot: (handler: (snapshot: VoiceSessionSnapshot | undefined) => void) => () => void,
   /** Submit text on the negotiated connection and await client admission. */
   readonly sendVoice?: (message: DHInputMessage) => Promise<void>,
   /** Connection failure, observed during setup and by the active session. */
@@ -256,6 +259,7 @@ async function connectOnce(
     pc.close()
   })
   const evt = events<DHConnectionEvents>()
+  const snapshots = createSnapshotObservation()
   const subscribeEvent = evt.on
   evt.on = (event, handler) => {
     const unsubscribe = subscribeEvent(event, handler)
@@ -290,19 +294,22 @@ async function connectOnce(
       catch (error) { pendingText.delete(frame.request_id); reject(error) }
     })
   })
-  let serviceBadge: HTMLElement | undefined
-  let badgeReason: string | undefined
-  const refreshServiceBadge = () => {
+  let voiceBadge: HTMLElement | undefined
+  let badgeKey: string | undefined
+  const refreshVoiceBadge = () => {
     const state = adapter.serviceState()
-    const reason = state?.status === 'unavailable' ? state.reason : undefined
-    if (reason === badgeReason) return
-    serviceBadge?.remove()
-    serviceBadge = undefined
-    badgeReason = reason
-    if (reason && elements.container?.ownerDocument) {
-      serviceBadge = createServiceUnavailableBadge(elements.container.ownerDocument, reason)
-      elements.container.append(serviceBadge)
-    }
+    const serviceError = state?.status === 'unavailable' ? state.reason : undefined
+    const inputError = adapter.audioInputError()
+    const key = serviceError ? `service:${serviceError}` : inputError ? `input:${inputError}` : undefined
+    if (key === badgeKey) return
+    voiceBadge?.remove()
+    voiceBadge = undefined
+    badgeKey = key
+    const container = elements.container
+    if (!container) return
+    if (serviceError) voiceBadge = createServiceUnavailableBadge(container.ownerDocument, serviceError)
+    else if (inputError) voiceBadge = createMicrophoneErrorBadge(container.ownerDocument, inputError)
+    if (voiceBadge) container.append(voiceBadge)
   }
   function diagnostic(line: () => string) {
     try {
@@ -652,6 +659,8 @@ async function connectOnce(
           acknowledgedGeneration = message.generation
         }
         adapter.ingest(message)
+        refreshVoiceBadge()
+        snapshots.publish(adapter.snapshot())
         const early = outbound.splice(0)
         if (!adapter.serviceNegotiated()) for (const data of early) ws.send(data)
         acknowledgeProtocol()
@@ -661,9 +670,12 @@ async function connectOnce(
         failProtocol('expected versioned session.state acknowledgement')
         return
       }
-      if (message.type === 'session.snapshot' && adapter.serviceNegotiated()) {
+      if (message.type === 'session.snapshot') {
         const changes = adapter.ingest(message)
-        if (changes.length) refreshServiceBadge()
+        if (changes.length) {
+          refreshVoiceBadge()
+          snapshots.publish(adapter.snapshot())
+        }
         for (const change of changes) evt.emit('message', change)
         return
       }
@@ -758,8 +770,8 @@ async function connectOnce(
     running = false
     configuredBinding?.workflow.dispose()
     bindingUI?.dispose()
-    serviceBadge?.remove()
-    serviceBadge = undefined
+    voiceBadge?.remove()
+    voiceBadge = undefined
     receiverStats.stop()
     avatarPlayback?.stop()
     ws.onopen = null
@@ -767,6 +779,8 @@ async function connectOnce(
     ws.onmessage = null
     if (ownsVideo()) elements.video.srcObject = null
     innerAbortable.abort()
+    snapshots.publish(undefined)
+    snapshots.unsubscribe()
     return retirement
   }
   innerAbortable.onabort(dispose)
@@ -823,14 +837,14 @@ async function connectOnce(
     }
     return {
       ...connectionBase(ws, pc, canonicalSessionId, adapter, stopPlayback, dispose, failure),
-      sendVoice,
+      sendVoice, onSnapshot: snapshots.subscribe,
       ...(({ on, off }) => ({ on, off }))(evt),
     }
   }
   sessionLogger.warn('requestVideoFrameCallback unavailable; avatar turn decoding disabled')
   return {
     ...connectionBase(ws, pc, canonicalSessionId, adapter, () => receiverStats.stop(), dispose, failure),
-    sendVoice,
+    sendVoice, onSnapshot: snapshots.subscribe,
     ...(({ on, off }) => ({ on, off }))(evt),
   }
 }
@@ -843,7 +857,7 @@ function connectionBase(
   stopPlayback: () => void,
   dispose: () => void | Promise<void>,
   failure: Promise<never>,
-): Diff<VoiceClientConnection, { on: unknown, off: unknown }> {
+): Diff<VoiceClientConnection, { on: unknown, off: unknown, onSnapshot: unknown }> {
   return {
     get ws() { return ws },
     get pc() { return pc },
