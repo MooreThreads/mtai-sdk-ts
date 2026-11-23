@@ -327,8 +327,9 @@ async function connectOnce(
   const refreshVoiceBadge = () => {
     const state = adapter.serviceState()
     const serviceError = state?.status === 'unavailable' ? state.reason : undefined
-    const wakeHint = adapter.snapshot()?.state.audio_input.wake_hint
-    const message = voiceNoticeMessage(serviceError, adapter.audioInputError(), Boolean(wakeHint))
+    const snapshot = adapter.snapshot()?.state
+    const message = voiceNoticeMessage(serviceError, adapter.audioInputError(),
+      Boolean(snapshot?.audio_input.wake_hint), snapshot?.asr_error === 'provider_failure')
     if (message === voiceNotice) return
     voiceNotice = message
     if (showVoiceNotice) {

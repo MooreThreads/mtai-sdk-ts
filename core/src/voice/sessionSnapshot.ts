@@ -29,6 +29,7 @@ export type VoiceSessionSnapshot = Readonly<{
       wake_hint?: WakeHintCode,
     }>,
     service?: Readonly<ServiceState>,
+    asr_error?: 'provider_failure',
   }>,
 }>
 
@@ -127,6 +128,7 @@ export function createSessionSnapshotProjection(sessionId: string) {
           ...(wakeHint !== undefined ? { wake_hint: wakeHint } : {}),
         }),
         ...(observed ? { service: Object.freeze(observed) } : {}),
+        ...(event.state.asr_error === 'provider_failure' ? { asr_error: 'provider_failure' } as const : {}),
       }),
     })
     const status = conversation.state === 'ended' ? 'sleeping'

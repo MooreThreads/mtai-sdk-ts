@@ -783,6 +783,55 @@ test.each([false, true])('shows and clears a nonfatal microphone warning (servic
   }
 })
 
+test('shows an ASR outage in the shared badge without changing voice readiness', async () => {
+  const globals = setupGlobals()
+  try {
+    const container = document.createElement('div')
+    const { connection, ws, scope } = await connectReady(createConfig({ audioInput: true }), fakeVideo(),
+      'canonical-avatar', undefined, container, 'e')
+    const warning = '语音识别服务暂不可用，请稍后重试。'
+    const receive = (event: object) => ws.receive(JSON.stringify({ session_id: 'voice-1', ...event }))
+    const badge = () => container.querySelector('[data-mtai-player-error]')
+    const snapshot = (revision: number, extra: object = {}) => receive({
+      type: 'session.snapshot', state_epoch: 'e', revision, state: {
+        service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+        audio_input: { source: 'xunfei', status: 'ready', source_revision: 1, capture_turn_id: null,
+          wake_hint: 'wake_event_not_observed' },
+        ...extra,
+      },
+    })
+    try {
+      const outage = { asr_error: 'provider_failure' }
+      snapshot(1, { asr_error: 'untrusted raw message' })
+      expect(badge()?.textContent).toContain('无法收到唤醒事件，请重启设备。')
+      snapshot(2, outage)
+      expect(container.querySelectorAll('[data-mtai-player-error]')).toHaveLength(1)
+      expect(badge()?.getAttribute('role')).toBe('status')
+      expect(badge()?.textContent).toContain(warning)
+      receive({ type: 'turn.end', turn_id: '00', output_byte_total: 0 })
+      snapshot(1) // A stale snapshot cannot clear the outage.
+      expect(badge()?.textContent).toContain(warning)
+      const typed = connection.sendVoice!({ type: 'input', text: 'still usable' })
+      const frame = JSON.parse(ws.sent[ws.sent.length - 1] as string)
+      expect(frame.type).toBe('text.input')
+      receive({ type: 'text.accepted', request_id: frame.request_id, turn_id: '01' })
+      await typed
+      snapshot(3, { ...outage, service: { status: 'unavailable', reason: 'service_fault' } })
+      expect(badge()?.textContent).toContain('服务暂不可用，正在加紧修复')
+      snapshot(4, outage)
+      expect(badge()?.textContent).toContain(warning)
+      snapshot(5)
+      expect(badge()?.textContent).toContain('无法收到唤醒事件，请重启设备。')
+      expect(badge()?.textContent).not.toContain(warning)
+    } finally {
+      scope.abort()
+      await connection.dispose()
+    }
+  } finally {
+    globals.restore()
+  }
+})
+
 test('a failing notice hook cannot interrupt snapshot delivery or connection teardown', async () => {
   const globals = setupGlobals()
   try {
