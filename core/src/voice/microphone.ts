@@ -102,6 +102,7 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
   }
 
   const ready = (async () => {
+    let stage = 'prerequisites'
     try {
       const AudioContextCtor = (globalThis as any).AudioContext
         ?? (globalThis as any).webkitAudioContext
@@ -109,6 +110,7 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
         throw new Error('voice microphone input requires an AudioContext')
       }
       if (audioInput === false) throw new Error('microphone input disabled')
+      stage = 'get_user_media'
       const stream = typeof audioInput === 'boolean'
         ? await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true }, video: false })
         : audioInput
@@ -130,6 +132,7 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
         track.addEventListener?.('ended', ended)
         trackCleanup.push(() => track.removeEventListener?.('ended', ended))
       }
+      stage = 'audio_graph'
       const context = new AudioContextCtor() as AudioContext
       audioContext = context
       const source = context.createMediaStreamSource(stream)
@@ -142,9 +145,19 @@ export function createVoiceMicrophone(options: VoiceMicrophoneOptions): VoiceMic
       source.connect(processor)
       processor.connect(sink)
       sink.connect(context.destination)
+      stage = 'resume_audio_context'
       await context.resume()
       if (stopped) release()
     } catch (error) {
+      if (!stopped) {
+        // Do not log arbitrary exception messages, which can include device data.
+        try {
+          const name = (error as { name?: string } | null)?.name
+          const reason = name && ['NotAllowedError', 'NotReadableError', 'NotFoundError', 'AbortError',
+            'NotSupportedError', 'InvalidStateError', 'OverconstrainedError'].includes(name) ? name : 'unknown'
+          logger?.warn(`voice microphone setup failed stage=${stage} reason=${reason}`)
+        } catch { /* Diagnostics must not change capture cleanup. */ }
+      }
       release()
       throw error
     }

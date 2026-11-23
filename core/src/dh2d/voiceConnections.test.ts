@@ -302,9 +302,11 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar', cover?: any, container?: HTMLElement, serviceEpoch?: string) {
+async function connectReady(config: any, video: any, canonicalSessionId = 'canonical-avatar', cover?: any,
+  container?: HTMLElement, serviceEpoch?: string, showVoiceNotice?: (message?: string) => void) {
   const scope = abortable()
-  const connecting = withChild(scope, child => connectVoiceClient(logger, { video, cover, container } as any, config, child))
+  const connecting = withChild(scope, child => connectVoiceClient(logger,
+    { video, cover, container, showVoiceNotice } as any, config, child))
   await flushMicrotasks()
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
   ws.open()
@@ -723,6 +725,7 @@ test.each([false, true])('shows and clears a nonfatal microphone warning (servic
     const { connection, ws, pc, scope } = await connectReady(createConfig({ audioInput: true }), fakeVideo(),
       'canonical-avatar', undefined, container, negotiated ? 'e' : undefined)
     const warning = '麦克风初始化失败，请检查系统输入设备和麦克风权限'
+    const badges = () => container.querySelectorAll('[role="status"], [role="alert"]')
     const snapshot = (revision: number, status: string, options: { epoch?: string, session?: string,
       code?: string, service?: object } = {}) => ws.receive(JSON.stringify({
       type: 'session.snapshot', session_id: options.session ?? 'voice-1', state_epoch: options.epoch ?? 'e', revision,
@@ -737,7 +740,10 @@ test.each([false, true])('shows and clears a nonfatal microphone warning (servic
       snapshot(1, 'preparing')
       expect(container.textContent).not.toContain(warning)
       snapshot(2, 'error', { code: 'initialization_failed' })
-      expect(container.querySelector('[role="status"]')?.textContent).toContain(warning)
+      expect(badges()).toHaveLength(1)
+      expect(badges()[0].textContent).toContain(warning)
+      const microphoneIcon = badges()[0].querySelector('svg')
+      expect(microphoneIcon).not.toBeNull()
       snapshot(1, 'ready')
       snapshot(3, 'ready', { epoch: 'stale' })
       snapshot(3, 'ready', { session: 'foreign' })
@@ -755,8 +761,10 @@ test.each([false, true])('shows and clears a nonfatal microphone warning (servic
       snapshot(4, 'error', { code: 'initialization_failed' })
       if (negotiated) {
         snapshot(5, 'error', { code: 'initialization_failed', service: { status: 'unavailable', reason: 'service_fault' } })
+        expect(badges()).toHaveLength(1)
         expect(container.textContent).toContain('服务暂不可用，正在加紧修复')
         expect(container.textContent).not.toContain(warning)
+        expect(microphoneIcon?.isEqualNode(badges()[0].querySelector('svg'))).toBe(true)
         snapshot(6, 'error', { code: 'initialization_failed' })
         expect(container.querySelector('[role="status"]')?.textContent).toContain(warning)
         ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected',
@@ -770,6 +778,38 @@ test.each([false, true])('shows and clears a nonfatal microphone warning (servic
       await connection.dispose()
     }
     expect(container.textContent).not.toContain(warning)
+  } finally {
+    globals.restore()
+  }
+})
+
+test('a failing notice hook cannot interrupt snapshot delivery or connection teardown', async () => {
+  const globals = setupGlobals()
+  try {
+    const video = fakeVideo()
+    const render = jest.fn(() => { throw new Error('custom presentation failed') })
+    const { connection, ws, scope } = await connectReady(createConfig(), video,
+      'canonical-avatar', undefined, undefined, 'e', render)
+    const observe = jest.fn()
+    connection.onSnapshot(observe)
+    try {
+      ws.receive(JSON.stringify({ type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision: 1,
+        state: { service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+          audio_input: { source: 'frontend', status: 'error', source_revision: 1, capture_turn_id: null,
+            error_code: 'initialization_failed' },
+        },
+      }))
+      expect(render).toHaveBeenCalledWith(expect.stringContaining('麦克风初始化失败'))
+      expect(observe).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 1 }))
+      await connection.dispose()
+      expect(render).toHaveBeenLastCalledWith(undefined)
+      expect(observe).toHaveBeenLastCalledWith(undefined)
+      expect(video.srcObject).toBeNull()
+      expect(ws.readyState).toBe(FakeWebSocket.CLOSED)
+    } finally {
+      scope.abort()
+      await connection.dispose()
+    }
   } finally {
     globals.restore()
   }

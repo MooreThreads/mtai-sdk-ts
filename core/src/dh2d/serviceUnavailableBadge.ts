@@ -10,8 +10,17 @@ const microphoneErrorMessages: Record<AudioInputErrorCode, string> = {
     initialization_failed: '麦克风初始化失败，请检查系统输入设备和麦克风权限',
 }
 
+export function voiceNoticeMessage(serviceError: 'service_fault' | 'local_network' | 'unknown' | undefined,
+    inputError: AudioInputErrorCode | undefined, wakeHint: boolean): string | undefined {
+    if (serviceError === 'local_network') return '本地网络异常，请检查网络连接'
+    if (serviceError === 'unknown') return '暂时无法连接服务，请稍后重试'
+    if (serviceError === 'service_fault') return '服务暂不可用，正在加紧修复'
+    if (inputError) return microphoneErrorMessages[inputError]
+    if (wakeHint) return '无法收到唤醒事件，请重启设备。'
+}
+
 const badgeStyles = `
-[data-mtai-service-unavailable], [data-mtai-microphone-error] {
+[data-mtai-player-error] {
     position: absolute;
     top: 28px;
     right: 32px;
@@ -31,7 +40,12 @@ const badgeStyles = `
     letter-spacing: .3px;
     pointer-events: none;
 }
-[data-mtai-service-unavailable] > [aria-hidden] {
+[data-mtai-player-error] > span:not([aria-hidden]) {
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+[data-mtai-player-error] > [aria-hidden] {
     display: grid;
     place-items: center;
     flex: 0 0 auto;
@@ -39,15 +53,15 @@ const badgeStyles = `
     height: 34px;
     color: #ffd18a;
 }
-[data-mtai-service-unavailable] .mtai-service-gear {
+[data-mtai-player-error] .mtai-service-gear {
     transform-origin: 15.8px 15.8px;
     animation: mtaiServiceGear 1.8s infinite ease-in-out;
 }
-[data-mtai-service-unavailable] .mtai-service-wrench {
+[data-mtai-player-error] .mtai-service-wrench {
     transform-origin: 12.4px 12.4px;
     animation: mtaiServiceWrench 1.8s infinite ease-in-out;
 }
-[data-mtai-service-unavailable] .mtai-service-sparks {
+[data-mtai-player-error] .mtai-service-sparks {
     animation: mtaiServiceSparks 1.8s infinite linear;
 }
 @keyframes mtaiServiceGear {
@@ -65,25 +79,12 @@ const badgeStyles = `
     20%, 54%, 87% { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-    [data-mtai-service-unavailable] svg [class] { animation: none; }
+    [data-mtai-player-error] svg [class] { animation: none; }
 }
 `
 
-export function createMicrophoneErrorBadge(doc: Document, code: AudioInputErrorCode): HTMLDivElement {
-    const badge = doc.createElement('div')
-    badge.setAttribute('data-mtai-microphone-error', '')
-    badge.setAttribute('role', 'status')
-    const style = doc.createElement('style')
-    style.textContent = badgeStyles
-    const text = doc.createElement('span')
-    text.textContent = microphoneErrorMessages[code]
-    badge.append(style, text)
-    return badge
-}
-
-/** Shared overlay for service outages and wake-delivery advisories. */
-export function createServiceUnavailableBadge(doc: Document,
-    reason: 'service_fault' | 'local_network' | 'unknown' | 'wake' = 'service_fault'): HTMLDivElement {
+/** One presentation for all SDK-owned avatar errors; terminal errors announce assertively. */
+export function createPlayerErrorBadge(doc: Document, message: string, terminal = false): HTMLDivElement {
     function svgElement<K extends keyof SVGElementTagNameMap>(name: K, attrs: Record<string, string>) {
         const el = doc.createElementNS(svgNamespace, name)
         for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value)
@@ -91,8 +92,8 @@ export function createServiceUnavailableBadge(doc: Document,
     }
 
     const badge = doc.createElement('div')
-    badge.setAttribute('data-mtai-service-unavailable', '')
-    badge.setAttribute('role', 'status')
+    badge.setAttribute('data-mtai-player-error', '')
+    badge.setAttribute('role', terminal ? 'alert' : 'status')
     const style = doc.createElement('style')
     style.textContent = badgeStyles
 
@@ -119,9 +120,7 @@ export function createServiceUnavailableBadge(doc: Document,
     }))
     icon.append(svg)
     const text = doc.createElement('span')
-    text.textContent = reason === 'wake' ? '无法收到唤醒事件，请重启设备。'
-        : reason === 'local_network' ? '本地网络异常，请检查网络连接'
-        : reason === 'unknown' ? '暂时无法连接服务，请稍后重试' : '服务暂不可用，正在加紧修复'
+    text.textContent = message
     badge.append(style, icon, text)
     return badge
 }

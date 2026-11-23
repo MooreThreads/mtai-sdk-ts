@@ -1,3 +1,4 @@
+import { createLogger } from '../log'
 import {
   createVoiceMicrophone,
   encodePcm16Mono,
@@ -235,15 +236,36 @@ describe('createVoiceMicrophone', () => {
     }
   })
 
-  test('ready rejects when getUserMedia fails', async () => {
-    const getUserMedia = jest.fn(async () => {
-      throw new Error('no microphone')
-    })
-    const globals = stubGlobals({ getUserMedia })
+  test('ready rejects when getUserMedia fails and reports only the sanitized acquisition stage', async () => {
+    const error = new Error('private device details')
+    error.name = 'NotReadableError'
+    const globals = stubGlobals({ getUserMedia: jest.fn(async () => { throw error }) })
+    const warn = jest.fn()
+    const logger = createLogger({ ...console, warn })
     try {
-      const microphone = createVoiceMicrophone({ audioInput: true, onPcm: () => undefined })
-      await expect(microphone.ready).rejects.toThrow('no microphone')
+      const microphone = createVoiceMicrophone({ audioInput: true, logger, onPcm: () => undefined })
+      await expect(microphone.ready).rejects.toBe(error)
+      expect(warn.mock.calls).toEqual([['voice microphone setup failed stage=get_user_media reason=NotReadableError']])
     } finally {
+      globals.restore()
+    }
+  })
+
+  test('failed Web Audio resume reports a different stage and releases the acquired stream', async () => {
+    const globals = stubGlobals()
+    const error = new Error('private context details')
+    error.name = 'UnexpectedDeviceSpecificName'
+    const resume = jest.spyOn(FakeAudioContext.prototype, 'resume').mockRejectedValue(error)
+    const warn = jest.fn()
+    const logger = createLogger({ ...console, warn })
+    try {
+      const microphone = createVoiceMicrophone({ audioInput: true, logger, onPcm: () => undefined })
+      await expect(microphone.ready).rejects.toBe(error)
+      expect(warn.mock.calls).toEqual([['voice microphone setup failed stage=resume_audio_context reason=unknown']])
+      expect(FakeMediaStream.instances[0].audioTracks[0].stop).toHaveBeenCalled()
+      expect(FakeAudioContext.instances[0].closed).toBe(true)
+    } finally {
+      resume.mockRestore()
       globals.restore()
     }
   })

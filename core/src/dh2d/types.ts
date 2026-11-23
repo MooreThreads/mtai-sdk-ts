@@ -33,6 +33,8 @@ export type DH2DPlayerElements = {
   dispose?: () => void
   /** Shows a terminal error over the video; omit the message to clear it. */
   showError?: (message?: string) => void
+  /** Shows a nonfatal voice warning in the same slot as terminal errors. */
+  showVoiceNotice?: (message?: string) => void
   /**
    * The video element used to display the video stream.
    */

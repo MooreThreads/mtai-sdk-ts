@@ -17,7 +17,7 @@ import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from ".
 import { avatarTimingNow, createAvatarPlayback, AvatarFrameContext } from "./avatarMedia"
 import { createReceiverStats } from "./receiverStats"
 import { createChannelBindingUI } from '../voice/channelBindingUI'
-import { createMicrophoneErrorBadge, createServiceUnavailableBadge } from './serviceUnavailableBadge'
+import { createPlayerErrorBadge, voiceNoticeMessage } from './serviceUnavailableBadge'
 import { createSnapshotObservation, type VoiceSessionSnapshot } from '../voice/sessionSnapshot'
 
 /**
@@ -319,23 +319,30 @@ async function connectOnce(
     })
   })
   let voiceBadge: HTMLElement | undefined
-  let badgeKey: string | undefined
+  let voiceNotice: string | undefined
+  const showVoiceNotice = elements.showVoiceNotice?.bind(elements)
+  const renderVoiceNotice = (message?: string) => {
+    try { showVoiceNotice?.(message) } catch { /* Presentation must not interrupt connection handling. */ }
+  }
   const refreshVoiceBadge = () => {
     const state = adapter.serviceState()
     const serviceError = state?.status === 'unavailable' ? state.reason : undefined
-    const inputError = adapter.audioInputError()
     const wakeHint = adapter.snapshot()?.state.audio_input.wake_hint
-    const notice = serviceError ?? (!inputError && wakeHint ? 'wake' : undefined)
-    const key = notice ? `notice:${notice}` : inputError ? `input:${inputError}` : undefined
-    if (key === badgeKey) return
-    voiceBadge?.remove()
-    voiceBadge = undefined
-    badgeKey = key
-    const container = elements.container
-    if (!container) return
-    if (notice) voiceBadge = createServiceUnavailableBadge(container.ownerDocument, notice)
-    else if (inputError) voiceBadge = createMicrophoneErrorBadge(container.ownerDocument, inputError)
-    if (voiceBadge) container.append(voiceBadge)
+    const message = voiceNoticeMessage(serviceError, adapter.audioInputError(), Boolean(wakeHint))
+    if (message === voiceNotice) return
+    voiceNotice = message
+    if (showVoiceNotice) {
+      renderVoiceNotice(message)
+    } else {
+      // Custom player hooks may provide only the media and its overlay host.
+      voiceBadge?.remove()
+      voiceBadge = undefined
+      const container = elements.container
+      if (message && container) {
+        voiceBadge = createPlayerErrorBadge(container.ownerDocument, message)
+        container.append(voiceBadge)
+      }
+    }
   }
   function diagnostic(line: () => string) {
     try {
@@ -796,6 +803,7 @@ async function connectOnce(
     running = false
     configuredBinding?.workflow.dispose()
     bindingUI?.dispose()
+    if (voiceNotice) renderVoiceNotice()
     voiceBadge?.remove()
     voiceBadge = undefined
     receiverStats.stop()

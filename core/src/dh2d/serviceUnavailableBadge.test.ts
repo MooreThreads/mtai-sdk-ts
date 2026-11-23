@@ -1,5 +1,5 @@
 /** @jest-environment jsdom */
-import { createServiceUnavailableBadge } from './serviceUnavailableBadge'
+import { createPlayerErrorBadge, voiceNoticeMessage } from './serviceUnavailableBadge'
 
 test('the service badge is a removable, non-interactive status over the existing player', () => {
     const player = document.createElement('div')
@@ -7,7 +7,7 @@ test('the service badge is a removable, non-interactive status over the existing
     player.append(video)
     document.body.append(player)
     try {
-        const badge = createServiceUnavailableBadge(document)
+        const badge = createPlayerErrorBadge(document, voiceNoticeMessage('service_fault', undefined, false)!)
         player.append(badge)
         expect(badge.getAttribute('role')).toBe('status')
         expect(badge.textContent).toContain('服务暂不可用，正在加紧修复')
