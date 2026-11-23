@@ -38,6 +38,7 @@ export type VoiceClientConnection = DH2DConnection & {
   readonly failure: Promise<never>,
   /** Stops avatar playback observation. */
   readonly stopPlayback: () => void,
+  readonly resetAvatarPlayback: (signal: AbortSignal) => Promise<boolean>,
   /**
    * Fences this connection generation: detaches the client websocket
    * callbacks, stops the microphone pipeline, and clears the video source,
@@ -247,6 +248,29 @@ async function connectOnce(
   let ownedStream: MediaStream | undefined
   const ownsVideo = () => ownedStream !== undefined && elements.video.srcObject === ownedStream
   let videoVisible = false
+  let avatarReset: Promise<boolean> | undefined
+  const resetAvatarPlayback = (signal: AbortSignal) => {
+    if (signal.aborted) return Promise.resolve(false)
+    if (avatarReset) return avatarReset
+    const video = elements.video
+    const stream = ownedStream
+    const current = () => !signal.aborted && running && !disposed && videoVisible && ownedStream === stream && ownsVideo()
+    avatarReset = Promise.resolve().then(async () => {
+      if (!stream || !current() || video.ended || !stream.getVideoTracks().some(track => track.readyState === 'live')
+          || !stream.getAudioTracks().some(track => track.readyState === 'live')) return false
+      try {
+        // Reset Chromium's player and audio output, not the WebRTC stream or turn tracker.
+        video.srcObject = null
+        try { video.load() } finally { video.srcObject = stream }
+        await video.play()
+        return current()
+      } catch (error) {
+        if (!current()) return false
+        throw error
+      }
+    }).finally(() => { avatarReset = undefined })
+    return avatarReset
+  }
   const sessionId = voiceConfig.sessionId!
   const interactionUrl = new URL(voiceClientWebSocketUrl(voiceConfig.interaction_endpoint, config.videoId, sessionId))
   interactionUrl.searchParams.set('service_snapshot', 'v1')
@@ -839,14 +863,14 @@ async function connectOnce(
     }
     return {
       ...connectionBase(ws, pc, canonicalSessionId, adapter, stopPlayback, dispose, failure),
-      sendVoice, onSnapshot: snapshots.subscribe,
+      sendVoice, resetAvatarPlayback, onSnapshot: snapshots.subscribe,
       ...(({ on, off }) => ({ on, off }))(evt),
     }
   }
   sessionLogger.warn('requestVideoFrameCallback unavailable; avatar turn decoding disabled')
   return {
     ...connectionBase(ws, pc, canonicalSessionId, adapter, () => receiverStats.stop(), dispose, failure),
-    sendVoice, onSnapshot: snapshots.subscribe,
+    sendVoice, resetAvatarPlayback, onSnapshot: snapshots.subscribe,
     ...(({ on, off }) => ({ on, off }))(evt),
   }
 }
@@ -859,7 +883,7 @@ function connectionBase(
   stopPlayback: () => void,
   dispose: () => void | Promise<void>,
   failure: Promise<never>,
-): Diff<VoiceClientConnection, { on: unknown, off: unknown, onSnapshot: unknown }> {
+): Diff<VoiceClientConnection, { on: unknown, off: unknown, onSnapshot: unknown, resetAvatarPlayback: unknown }> {
   return {
     get ws() { return ws },
     get pc() { return pc },

@@ -180,6 +180,9 @@ export type DH2DSession = EventSource<DH2DSessionEvents> & {
   readonly status: typeof DH2DSessionStatus[number]
   /** Latest accepted immutable voice-client snapshot, absent in legacy sessions or during retirement. */
   readonly snapshot: VoiceSessionSnapshot | undefined
+  /** Rebuilds the current voice avatar player without reconnecting. False if no live player is owned.
+   * A true result confirms play() fulfilled, not that sound or frames reached the user. */
+  readonly resetAvatarPlayback: () => Promise<boolean>
 
   /**
    * Sends a configuration message to the server.

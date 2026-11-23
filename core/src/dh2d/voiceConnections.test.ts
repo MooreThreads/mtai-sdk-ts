@@ -14,6 +14,7 @@ import {
   VoiceProtocolError,
 } from './voiceConnections'
 import { createVoiceMessageAdapter } from '../voice/adapter'
+import type { VoiceSessionSnapshot } from '../voice/sessionSnapshot'
 import * as voiceMicrophone from '../voice/microphone'
 import { crc16 } from './turnStripe'
 
@@ -355,14 +356,145 @@ async function readyRealSession(video: any, serviceEpoch?: string) {
   ws.receive(JSON.stringify({ type: 'session.state', session_id: 'voice-1', state: 'connected', protocol_version: 3,
     ...(serviceEpoch ? { service_snapshot: 'v1', state_epoch: serviceEpoch, generation: 1 } : {}) }))
   await jest.advanceTimersByTimeAsync(0)
-  const pc = FakeRTCPeerConnection.instances.find(peer => peer.transceivers.some(track => track.kind === 'video'))!
-  const stream = { id: 'real' }
+  const peers = FakeRTCPeerConnection.instances.filter(peer => peer.transceivers.some(track => track.kind === 'video'))
+  const pc = peers[peers.length - 1]
+  const videoTrack = { readyState: 'live' }, audioTrack = { readyState: 'live' }
+  const stream = { id: 'real', getVideoTracks: () => [videoTrack], getAudioTracks: () => [audioTrack] }
   pc.dispatch('track', { track: { kind: 'video' }, streams: [stream] })
   pc.dispatch('track', { track: { kind: 'audio' }, streams: [stream] })
   video.dispatch('canplay')
   await jest.advanceTimersByTimeAsync(0)
   return { ws, pc }
 }
+test('public playback reset rebuilds only the owned video and coalesces concurrent callers', async () => {
+  const globals = setupGlobals()
+  jest.useFakeTimers()
+  const video = fakeVideo()
+  const restore = setupRealSession(true, video)
+  const session = createDH2DSession(document.createElement('div'))
+  const release = deferred<void>()
+  try {
+    expect(await session.resetAvatarPlayback()).toBe(false)
+    const { ws, pc } = await readyRealSession(video, 'e')
+    const stream = video.srcObject
+    const load = jest.fn(() => expect(video.srcObject).toBeNull())
+    video.load = load
+    const play = video.play as jest.Mock
+    play.mockImplementationOnce(() => {
+      expect(video.srcObject).toBe(stream)
+      return release.promise
+    })
+    const sent = [...ws.sent]
+    const first = session.resetAvatarPlayback()
+    const second = session.resetAvatarPlayback()
+    await jest.advanceTimersByTimeAsync(0)
+    expect(load).toHaveBeenCalledTimes(1)
+    release.resolve()
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true])
+    expect(video.srcObject).toBe(stream)
+    expect(ws.sent).toEqual(sent)
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN)
+    expect(pc.closed).toBe(false)
+
+    const failure = new Error('output could not play')
+    play.mockRejectedValueOnce(failure)
+    await expect(session.resetAvatarPlayback()).rejects.toThrow(failure)
+    expect(video.srcObject).toBe(stream)
+
+    const delayed = deferred<void>()
+    play.mockReturnValueOnce(delayed.promise)
+    const retired = session.resetAvatarPlayback()
+    await jest.advanceTimersByTimeAsync(0)
+    const closing = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await closing
+    await expect(retired).resolves.toBe(false)
+    delayed.reject(failure) // The orphaned native result is still observed.
+  } finally {
+    const cleanup = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await cleanup
+    restore()
+    jest.useRealTimers()
+    globals.restore()
+  }
+})
+
+test('closing in the same turn as a public reset prevents media mutation', async () => {
+  const globals = setupGlobals()
+  jest.useFakeTimers()
+  const video = fakeVideo()
+  const restore = setupRealSession(true, video)
+  const session = createDH2DSession(document.createElement('div'))
+  try {
+    await readyRealSession(video, 'e')
+    const load = jest.fn()
+    video.load = load
+    const play = video.play as jest.Mock
+    play.mockClear()
+    const reset = session.resetAvatarPlayback()
+    const closing = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await closing
+    expect(await reset).toBe(false)
+    expect(load).not.toHaveBeenCalled()
+    expect(play).not.toHaveBeenCalled()
+  } finally {
+    const cleanup = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await cleanup
+    restore()
+    jest.useRealTimers()
+    globals.restore()
+  }
+})
+
+test('retired avatar snapshots cannot replace the new connection snapshot', async () => {
+  const globals = setupGlobals()
+  jest.useFakeTimers()
+  const video = fakeVideo()
+  const restore = setupRealSession(true, video)
+  const connect = hooks.dh2d.connectVoiceClient
+  const retired = deferred<void>()
+  let deliverOld: ((value: VoiceSessionSnapshot | undefined) => void) | undefined
+  hooks.dh2d.connectVoiceClient = async (...args) => {
+    const result = await connect(...args)
+    return { ...result, onSnapshot(listener) {
+      deliverOld ??= listener
+      return result.onSnapshot(listener)
+    } }
+  }
+  hooks.dh2d.untilFailed = async (_l, _c, _p, _config, scope) =>
+    Promise.race([retired.promise, new Promise<void>(resolve => scope.onabort(resolve))])
+  const session = createDH2DSession(document.createElement('div'))
+  const sendSnapshot = (ws: FakeWebSocket, epoch: string) => ws.receive(JSON.stringify({
+    type: 'session.snapshot', session_id: 'voice-1', state_epoch: epoch, revision: 1,
+    state: { service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+      audio_input: { source: 'xunfei', status: 'ready', source_revision: 1, capture_turn_id: null } },
+  }))
+  try {
+    const first = await readyRealSession(video, 'first')
+    sendSnapshot(first.ws, 'first')
+    const old = session.snapshot
+    expect(old?.state_epoch).toBe('first')
+    // Retire only the first transport, then wait for the replacement normally.
+    hooks.dh2d.untilFailed = async (_l, _c, _p, _config, scope) => new Promise<void>(resolve => scope.onabort(resolve))
+    retired.resolve()
+    const second = await readyRealSession(video, 'second')
+    sendSnapshot(second.ws, 'second')
+    expect(session.snapshot?.state_epoch).toBe('second')
+    deliverOld!(old)
+    expect(session.snapshot?.state_epoch).toBe('second')
+  } finally {
+    const cleanup = session.close()
+    await jest.advanceTimersByTimeAsync(0)
+    await cleanup
+    restore()
+    jest.useRealTimers()
+    globals.restore()
+  }
+})
+
 test('public session send refuses pre-ack text and settles only its own client receipt', async () => {
   const globals = setupGlobals()
   jest.useFakeTimers()

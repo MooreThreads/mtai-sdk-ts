@@ -118,6 +118,7 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
 
     let closed = false
     const player = hooks.dh2d.getOrCreatePlayer(parent)
+    let avatarOwner: { connection: Partial<VoiceClientConnection>, lifetime: AbortController } | undefined
     const session: DH2DSession = {
         get sessionId() { return realConfig.sessionId },
         get videoId() { return realConfig.videoId },
@@ -125,11 +126,33 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         get snapshot() { return snapshots.value },
         get send() { return send },
         get config() { return sendConfig },
+        resetAvatarPlayback: async () => {
+            if (closed || aborted || status !== 'connected') return false
+            const owner = avatarOwner
+            if (!owner) return false
+            const signal = owner.lifetime.signal
+            const current = () => !signal.aborted && avatarOwner === owner && status === 'connected'
+            let retire!: () => void
+            const retirement = new Promise<false>(resolve => {
+                retire = () => resolve(false)
+                signal.addEventListener('abort', retire, { once: true })
+            })
+            try {
+                // Retirement must not wait for Chromium's native play promise.
+                return await Promise.race([retirement, owner.connection.resetAvatarPlayback?.(signal)]) === true && current()
+            } catch (error) {
+                if (!current()) return false
+                throw error
+            } finally {
+                signal.removeEventListener('abort', retire)
+            }
+        },
         close: async () => {
             if (closed) {
                 return
             }
             closed = true
+            avatarOwner?.lifetime.abort()
             snapshots.publish(undefined)
             rejectBuffered(new Error('Voice connection closed before submission.'))
             rootAbortable.abort()
@@ -207,13 +230,17 @@ export function createDH2DSession(parent: HTMLElement, config?: DH2DSessionConfi
         let unsubscribeSnapshot: (() => void) | undefined
         const observeSnapshot = (owner: DH2DConnection) => {
             if (!voiceClientMode) return
-            unsubscribeSnapshot = (owner as Partial<VoiceClientConnection>).onSnapshot?.(value => {
+            const voiceConnection = owner as Partial<VoiceClientConnection>
+            avatarOwner = { connection: voiceConnection, lifetime: new AbortController() }
+            unsubscribeSnapshot = voiceConnection.onSnapshot?.(value => {
                 if (!aborted && !closed && ownsConnection && connection === owner) snapshots.publish(value)
             })
         }
         const disconnectOwned = async () => {
             if (!ownsConnection) return
             ownsConnection = false
+            avatarOwner?.lifetime.abort()
+            avatarOwner = undefined
             unsubscribeSnapshot?.()
             unsubscribeSnapshot = undefined
             await disconnectHook(sessionLogger, connection, player, abortable())
