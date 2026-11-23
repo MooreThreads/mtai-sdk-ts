@@ -17,7 +17,7 @@ import { DH2DConnection, DH2DPlayerElements, ResolvedDH2DSessionConfig } from ".
 import { avatarTimingNow, createAvatarPlayback, AvatarFrameContext } from "./avatarMedia"
 import { createReceiverStats } from "./receiverStats"
 import { createChannelBindingUI } from '../voice/channelBindingUI'
-import { createMicrophoneErrorBadge, createServiceUnavailableBadge } from './serviceUnavailableBadge'
+import { createMicrophoneErrorBadge, createServiceUnavailableBadge, createWakeHintBadge } from './serviceUnavailableBadge'
 import { createSnapshotObservation, type VoiceSessionSnapshot } from '../voice/sessionSnapshot'
 
 /**
@@ -300,7 +300,9 @@ async function connectOnce(
     const state = adapter.serviceState()
     const serviceError = state?.status === 'unavailable' ? state.reason : undefined
     const inputError = adapter.audioInputError()
-    const key = serviceError ? `service:${serviceError}` : inputError ? `input:${inputError}` : undefined
+    const wakeHint = adapter.snapshot()?.state.audio_input.wake_hint
+    const key = serviceError ? `service:${serviceError}` : inputError ? `input:${inputError}`
+      : wakeHint ? `wake:${wakeHint}` : undefined
     if (key === badgeKey) return
     voiceBadge?.remove()
     voiceBadge = undefined
@@ -309,6 +311,7 @@ async function connectOnce(
     if (!container) return
     if (serviceError) voiceBadge = createServiceUnavailableBadge(container.ownerDocument, serviceError)
     else if (inputError) voiceBadge = createMicrophoneErrorBadge(container.ownerDocument, inputError)
+    else if (wakeHint) voiceBadge = createWakeHintBadge(container.ownerDocument, wakeHint)
     if (voiceBadge) container.append(voiceBadge)
   }
   function diagnostic(line: () => string) {

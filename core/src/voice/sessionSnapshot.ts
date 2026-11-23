@@ -3,6 +3,9 @@ import { DHOutputMessage } from '../types'
 const audioInputErrorCodes = ['unavailable', 'permission_denied', 'device_lost', 'format_mismatch', 'initialization_failed'] as const
 export type AudioInputErrorCode = typeof audioInputErrorCodes[number]
 
+const wakeHintCodes = ['wake_event_not_observed', 'wake_publisher_unavailable'] as const
+export type WakeHintCode = typeof wakeHintCodes[number]
+
 export type ServiceState = { status: 'connecting' | 'ready' }
   | { status: 'unavailable'; reason: 'service_fault' | 'local_network' | 'unknown' }
 
@@ -23,6 +26,7 @@ export type VoiceSessionSnapshot = Readonly<{
       source_revision: number,
       capture_turn_id: string | null,
       error_code?: AudioInputErrorCode,
+      wake_hint?: WakeHintCode,
     }>,
     service?: Readonly<ServiceState>,
   }>,
@@ -109,6 +113,7 @@ export function createSessionSnapshotProjection(sessionId: string) {
           : input.capture_turn_id !== null)) return []
     const observed = negotiated ? serviceState(event.state.service) : undefined
     if (negotiated ? !observed : Object.prototype.hasOwnProperty.call(event.state, 'service')) return []
+    const wakeHint = input.source === 'xunfei' && wakeHintCodes.includes(input.wake_hint) ? input.wake_hint : undefined
     epoch = event.state_epoch
     revision = event.revision
     current = Object.freeze({
@@ -119,6 +124,7 @@ export function createSessionSnapshotProjection(sessionId: string) {
           source: input.source, status: input.status, source_revision: input.source_revision,
           capture_turn_id: input.capture_turn_id,
           ...(input.error_code !== undefined ? { error_code: input.error_code } : {}),
+          ...(wakeHint !== undefined ? { wake_hint: wakeHint } : {}),
         }),
         ...(observed ? { service: Object.freeze(observed) } : {}),
       }),
