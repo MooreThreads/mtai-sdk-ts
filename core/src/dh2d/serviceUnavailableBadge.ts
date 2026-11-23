@@ -1,4 +1,4 @@
-import type { AudioInputErrorCode, WakeHintCode } from '../voice/sessionSnapshot'
+import type { AudioInputErrorCode } from '../voice/sessionSnapshot'
 
 const svgNamespace = 'http://www.w3.org/2000/svg'
 
@@ -10,13 +10,8 @@ const microphoneErrorMessages: Record<AudioInputErrorCode, string> = {
     initialization_failed: '麦克风初始化失败，请检查系统输入设备和麦克风权限',
 }
 
-const wakeHintMessages: Record<WakeHintCode, string> = {
-    wake_event_not_observed: '已识别唤醒词，尚未收到系统唤醒事件',
-    wake_publisher_unavailable: '系统报告语音唤醒异常，可尝试重启系统音频服务',
-}
-
 const badgeStyles = `
-[data-mtai-service-unavailable], [data-mtai-microphone-error], [data-mtai-wake-hint] {
+[data-mtai-service-unavailable], [data-mtai-microphone-error] {
     position: absolute;
     top: 28px;
     right: 32px;
@@ -75,28 +70,20 @@ const badgeStyles = `
 `
 
 export function createMicrophoneErrorBadge(doc: Document, code: AudioInputErrorCode): HTMLDivElement {
-    return createInputBadge(doc, 'data-mtai-microphone-error', microphoneErrorMessages[code])
-}
-
-export function createWakeHintBadge(doc: Document, code: WakeHintCode): HTMLDivElement {
-    return createInputBadge(doc, 'data-mtai-wake-hint', wakeHintMessages[code])
-}
-
-function createInputBadge(doc: Document, attribute: string, message: string): HTMLDivElement {
     const badge = doc.createElement('div')
-    badge.setAttribute(attribute, '')
+    badge.setAttribute('data-mtai-microphone-error', '')
     badge.setAttribute('role', 'status')
     const style = doc.createElement('style')
     style.textContent = badgeStyles
     const text = doc.createElement('span')
-    text.textContent = message
+    text.textContent = microphoneErrorMessages[code]
     badge.append(style, text)
     return badge
 }
 
-/** Build the approved overlay for a positioned player container. The player owns its lifetime. */
+/** Shared overlay for service outages and wake-delivery advisories. */
 export function createServiceUnavailableBadge(doc: Document,
-    reason: 'service_fault' | 'local_network' | 'unknown' = 'service_fault'): HTMLDivElement {
+    reason: 'service_fault' | 'local_network' | 'unknown' | 'wake' = 'service_fault'): HTMLDivElement {
     function svgElement<K extends keyof SVGElementTagNameMap>(name: K, attrs: Record<string, string>) {
         const el = doc.createElementNS(svgNamespace, name)
         for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value)
@@ -132,7 +119,8 @@ export function createServiceUnavailableBadge(doc: Document,
     }))
     icon.append(svg)
     const text = doc.createElement('span')
-    text.textContent = reason === 'local_network' ? '本地网络异常，请检查网络连接'
+    text.textContent = reason === 'wake' ? '无法收到唤醒事件，请重启设备。'
+        : reason === 'local_network' ? '本地网络异常，请检查网络连接'
         : reason === 'unknown' ? '暂时无法连接服务，请稍后重试' : '服务暂不可用，正在加紧修复'
     badge.append(style, icon, text)
     return badge

@@ -643,38 +643,51 @@ test.each([false, true])('shows and clears a nonfatal microphone warning (servic
   }
 })
 
-test('Xunfei snapshot hints show and clear without changing input readiness', async () => {
+test('Xunfei hints and outages use one badge without changing input readiness', async () => {
   const globals = setupGlobals()
   try {
     const container = document.createElement('div')
     const { connection, ws, scope } = await connectReady(createConfig({ audioInput: true }), fakeVideo(),
       'canonical-avatar', undefined, container, 'e')
-    const project = (revision: number, hint?: string, source = 'xunfei') => ws.receive(JSON.stringify({
+    const project = (revision: number, hint?: string, source = 'xunfei', service = { status: 'ready' } as object) => ws.receive(JSON.stringify({
       type: 'session.snapshot', session_id: 'voice-1', state_epoch: 'e', revision,
-      state: { service: { status: 'ready' }, conversation: { state: 'ended', phase: 'idle' },
+      state: { service, conversation: { state: 'ended', phase: 'idle' },
         audio_input: { source, status: 'ready', source_revision: 1, capture_turn_id: null, wake_hint: hint },
       },
     }))
-    const badge = () => container.querySelector('[data-mtai-wake-hint]')
+    const badges = () => container.querySelectorAll('[role="status"]')
+    const badge = () => badges()[0] ?? null
+    const message = '无法收到唤醒事件，请重启设备。'
     const before = ws.sent.length
     try {
       project(1, 'wake_event_not_observed')
-      expect(badge()?.textContent).toContain('已识别唤醒词，尚未收到系统唤醒事件')
+      expect(badges()).toHaveLength(1)
+      expect(badge()?.textContent).toContain(message)
+      const wakeIcon = badge()?.querySelector('svg')
+      expect(wakeIcon).toBeTruthy()
       const late = jest.fn()
       const unobserve = connection.onSnapshot(late)
       expect(late).toHaveBeenLastCalledWith(expect.objectContaining({ state: expect.objectContaining({
         audio_input: expect.objectContaining({ status: 'ready', wake_hint: 'wake_event_not_observed' }),
       }) }))
       project(2, 'wake_publisher_unavailable')
-      expect(badge()?.textContent).toContain('系统报告语音唤醒异常')
+      expect(badge()?.textContent).toContain(message)
       project(1)
-      expect(badge()).not.toBeNull()
-      project(3)
+      expect(badge()?.textContent).toContain(message)
+      project(3, 'wake_publisher_unavailable', 'xunfei', { status: 'unavailable', reason: 'service_fault' })
+      expect(badges()).toHaveLength(1)
+      expect(badge()?.textContent).toContain('服务暂不可用，正在加紧修复')
+      expect(badge()?.textContent).not.toContain(message)
+      expect(wakeIcon?.isEqualNode(badge()?.querySelector('svg') ?? null)).toBe(true)
+      project(4, 'wake_publisher_unavailable')
+      expect(badges()).toHaveLength(1)
+      expect(badge()?.textContent).toContain(message)
+      project(5)
       expect(badge()).toBeNull()
-      project(4, 'future_hint')
+      project(6, 'future_hint')
       expect(badge()).toBeNull()
-      expect(late).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 4 }))
-      project(5, 'wake_event_not_observed', 'frontend')
+      expect(late).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 6 }))
+      project(7, 'wake_event_not_observed', 'frontend')
       expect(badge()).toBeNull()
       expect(ws.sent).toHaveLength(before)
       expect(ws.readyState).toBe(FakeWebSocket.OPEN)
