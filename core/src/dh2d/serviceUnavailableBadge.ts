@@ -11,12 +11,14 @@ const microphoneErrorMessages: Record<AudioInputErrorCode, string> = {
 }
 
 export function voiceNoticeMessage(serviceError: 'service_fault' | 'local_network' | 'unknown' | undefined,
-    inputError: AudioInputErrorCode | undefined, wakeHint: boolean, asrUnavailable = false): string | undefined {
+    inputError: AudioInputErrorCode | undefined, wakeHint: boolean, asrUnavailable = false,
+    ttsUnavailable = false): string | undefined {
     if (serviceError === 'local_network') return '本地网络异常，请检查网络连接'
     if (serviceError === 'unknown') return '暂时无法连接服务，请稍后重试'
     if (serviceError === 'service_fault') return '服务暂不可用，正在加紧修复'
     if (inputError) return microphoneErrorMessages[inputError]
     if (asrUnavailable) return '语音识别服务暂不可用，请稍后重试。'
+    if (ttsUnavailable) return '语音合成服务暂不可用，请稍后重试。'
     if (wakeHint) return '无法收到唤醒事件，请重启设备。'
 }
 

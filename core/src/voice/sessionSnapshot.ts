@@ -30,6 +30,7 @@ export type VoiceSessionSnapshot = Readonly<{
     }>,
     service?: Readonly<ServiceState>,
     asr_error?: 'provider_failure',
+    tts_error?: 'provider_failure',
   }>,
 }>
 
@@ -129,6 +130,7 @@ export function createSessionSnapshotProjection(sessionId: string) {
         }),
         ...(observed ? { service: Object.freeze(observed) } : {}),
         ...(event.state.asr_error === 'provider_failure' ? { asr_error: 'provider_failure' } as const : {}),
+        ...(event.state.tts_error === 'provider_failure' ? { tts_error: 'provider_failure' } as const : {}),
       }),
     })
     const status = conversation.state === 'ended' ? 'sleeping'

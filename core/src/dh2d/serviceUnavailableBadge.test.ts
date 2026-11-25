@@ -21,3 +21,11 @@ test('the service badge is a removable, non-interactive status over the existing
         player.remove()
     }
 })
+
+test('voiceNoticeMessage maps ttsUnavailable and respects precedence', () => {
+    expect(voiceNoticeMessage(undefined, undefined, false, false, true)).toBe('语音合成服务暂不可用，请稍后重试。')
+    expect(voiceNoticeMessage(undefined, undefined, true, false, true)).toBe('语音合成服务暂不可用，请稍后重试。')
+    expect(voiceNoticeMessage(undefined, undefined, false, true, true)).toBe('语音识别服务暂不可用，请稍后重试。')
+    expect(voiceNoticeMessage(undefined, 'permission_denied', false, false, true)).toBe('无法访问麦克风，请检查麦克风权限')
+    expect(voiceNoticeMessage('service_fault', undefined, false, false, true)).toBe('服务暂不可用，正在加紧修复')
+})

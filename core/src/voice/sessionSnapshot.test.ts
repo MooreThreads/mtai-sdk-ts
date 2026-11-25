@@ -16,3 +16,22 @@ test('source-independent capture indicator, revision fencing, and replay are pur
   waiting.state.audio_input.capture_turn_id = null
   expect(projection.ingest(waiting)).toEqual([{ type: 'status_change', status: 'talking' }])
 })
+
+test('projects trusted tts_error provider_failure and ignores untrusted values', () => {
+  const projection = createSessionSnapshotProjection('s')
+  const base = {
+    type: 'session.snapshot',
+    session_id: 's',
+    state_epoch: 'e',
+    state: {
+      conversation: { state: 'ended', phase: 'idle' },
+      audio_input: { source: 'xunfei', status: 'ready', source_revision: 1, capture_turn_id: null },
+    },
+  }
+  projection.ingest({ ...base, revision: 1, state: { ...base.state, tts_error: 'raw_error' } })
+  expect(projection.snapshot()?.state.tts_error).toBeUndefined()
+  projection.ingest({ ...base, revision: 2, state: { ...base.state, tts_error: 'provider_failure' } })
+  expect(projection.snapshot()?.state.tts_error).toBe('provider_failure')
+  projection.ingest({ ...base, revision: 3 })
+  expect(projection.snapshot()?.state.tts_error).toBeUndefined()
+})
