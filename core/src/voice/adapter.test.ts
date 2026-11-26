@@ -218,6 +218,45 @@ describe('audio.output.delta subtitles become audio_text in segment order', () =
       { type: 'audio_text', text: 'hi' },
     ])
   })
+
+  test('wake acknowledgement audio.output.delta emits no audio_text while normal subtitles on the same turn still emit', () => {
+    const adapter = createAdapter()
+    expect(adapter.ingest(event({
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
+      stream_id: 't1:wake', segment_end: true,
+      subtitles: [{ source: 'main', text: '在呢' }],
+    }))).toEqual([])
+    expect(adapter.ingest(event({
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
+      stream_id: 't1:wake', segment_end: true,
+      subtitles: [{ source: 'main', text: '哎' }],
+    }))).toEqual([])
+    expect(adapter.ingest(event({
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
+      stream_id: 'main-1',
+      subtitles: [{ source: 'main', text: '你好' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '你好' },
+    ])
+  })
+
+  test('only exact <turn_id>:wake stream_id is ignored as a wake acknowledgement', () => {
+    const adapter = createAdapter()
+    expect(adapter.ingest(event({
+      type: 'audio.output.delta', session_id: sessionId, turn_id: 't1',
+      stream_id: 't2:wake',
+      subtitles: [{ source: 'main', text: '保留' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '保留' },
+    ])
+    expect(adapter.ingest(event({
+      type: 'audio.output.delta', session_id: sessionId,
+      stream_id: ':wake',
+      subtitles: [{ source: 'main', text: '也保留' }],
+    }))).toEqual([
+      { type: 'audio_text', text: '也保留' },
+    ])
+  })
 })
 
 describe('incremental audio_text is fenced by session, turn, and lifecycle', () => {

@@ -28,6 +28,7 @@ export type VoiceClientEvent = {
   type: string,
   session_id?: string,
   turn_id?: string,
+  stream_id?: string,
   text?: string,
   state?: string | Record<string, unknown>,
   subtitles?: VoiceSubtitleSegment[],
@@ -229,6 +230,10 @@ export function createVoiceMessageAdapter(options: VoiceMessageAdapterOptions) {
         if (event.session_id !== sessionId) return []
         if (typeof event.turn_id === 'string' && finalizedTurns.has(turnKey(event.turn_id))) {
           // The turn is retired; late subtitles must never reach the app.
+          return []
+        }
+        if (typeof event.turn_id === 'string' && event.turn_id && event.stream_id === `${event.turn_id}:wake`) {
+          // Wake acknowledgements are local audio cues, not assistant reply text.
           return []
         }
         const subtitles = Array.isArray(event.subtitles) ? event.subtitles : []
