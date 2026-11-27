@@ -2,6 +2,7 @@ import { withChild } from "../abortable"
 import { config as rootConfig } from "../config"
 import { events } from "../events"
 import { hooks } from "../hooks"
+import { createLogger } from "../log"
 import { connectPc } from "../pc"
 import { Abortable, DHConnectionEventTypes, DHConnectionEvents, DHInputMessage, Diff, Logger } from "../types"
 import { createVoiceMessageAdapter, PROTOCOL_VERSION, VoiceClientFrame, VoiceMessageAdapter } from "../voice/adapter"
@@ -423,18 +424,27 @@ async function connectOnce(
   }
 
   let bindingUI: ReturnType<typeof createChannelBindingUI> | undefined
+  // Delegates lazily so binding diagnostics inherit the live session logger
+  // prefix once `dh_2d_session_ready` attaches `[s:<sessionId>]`.
+  const bindingLogger: Logger = createLogger({
+    debug: (...args) => sessionLogger.debug(...args),
+    log: (...args) => sessionLogger.log(...args),
+    warn: (...args) => sessionLogger.warn(...args),
+    error: (...args) => sessionLogger.error(...args),
+  })
   const configuredBinding = voiceConfig.wechatPluginEndpoint
     ? createChannelBindingToolHandler({
       endpoint: voiceConfig.wechatPluginEndpoint,
       onSnapshot: snapshot => bindingUI?.update(snapshot),
       onError: error => bindingUI?.error(error),
+      logger: bindingLogger,
     })
     : undefined
   const frontendToolHandler: VoiceClientToolHandler | undefined =
     voiceConfig.frontendToolHandler ?? configuredBinding?.handler
   const bindingContainer = elements.container ?? elements.video.parentElement
   if (configuredBinding && bindingContainer) {
-    bindingUI = createChannelBindingUI(bindingContainer, configuredBinding.workflow)
+    bindingUI = createChannelBindingUI(bindingContainer, configuredBinding.workflow, bindingLogger)
   }
 
   const handleFrontendToolCall = async (call: VoiceClientToolCall) => {

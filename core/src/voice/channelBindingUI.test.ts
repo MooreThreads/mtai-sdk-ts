@@ -1,6 +1,7 @@
 /** @jest-environment jsdom */
 import { createChannelBindingUI } from './channelBindingUI'
 import { ChannelBindingSnapshot, ChannelBindingWorkflow } from './channelBinding'
+import type { Logger } from '../types'
 
 const snapshot = (extra: Partial<ChannelBindingSnapshot> = {}): ChannelBindingSnapshot => ({
   operation_id: 'one', state: 'qr', revision: 1, qr_url: 'https://wechat.example/login?token=secret', verification: null, ...extra,
@@ -14,6 +15,30 @@ beforeEach(() => {
   workflow = { verify: jest.fn(async () => ({ accepted: true })), cancel: jest.fn(() => true), dispose: jest.fn(), handleToolCall: jest.fn(), snapshot: undefined }
 })
 afterEach(() => { jest.useRealTimers(); document.body.replaceChildren() })
+
+function captureLogger() {
+  const log = jest.fn()
+  const warn = jest.fn()
+  const logger = {
+    debug: jest.fn(),
+    log,
+    warn,
+    error: jest.fn(),
+    push: jest.fn(),
+  } as unknown as Logger
+  const messages = () => [
+    ...log.mock.calls.map(([message]) => message as string),
+    ...warn.mock.calls.map(([message]) => message as string),
+  ]
+  return { logger, log, warn, messages, output: () => messages().join('\n') }
+}
+
+function throwingLogger() {
+  const boom = () => { throw new Error('logger down') }
+  return {
+    debug: boom, log: boom, warn: boom, error: boom, push: boom,
+  } as unknown as Logger
+}
 
 test('renders local square SVG with quiet zone; fades in, retains scanned QR, then fades out before removal', () => {
   const ui = createChannelBindingUI(host, workflow)
@@ -128,4 +153,81 @@ test('verification success/rejection, errors and dismissal are owned by the SDK'
   jest.advanceTimersByTime(200)
   expect((host.firstElementChild as HTMLElement).hidden).toBe(true)
   ui.dispose()
+})
+
+test('emits content-free UI lifecycle logs without qr or operation secrets', () => {
+  const capture = captureLogger()
+  const ui = createChannelBindingUI(host, workflow, capture.logger)
+  ui.update(snapshot())
+  jest.advanceTimersByTime(20)
+  ui.update(snapshot({ state: 'scanned', revision: 2, qr_url: null }))
+  ui.update(snapshot({ state: 'bound', revision: 3, qr_url: null }))
+  jest.advanceTimersByTime(200)
+  jest.advanceTimersByTime(3000)
+  ;(host.querySelector('[data-binding-dismiss]') as HTMLButtonElement).click()
+  jest.advanceTimersByTime(200)
+  ui.error({ code: 'leaky_secret_code', message: 'raw backend detail token=top-secret' })
+  ui.dispose()
+
+  expect(capture.log.mock.calls.map(([message]) => message)).toEqual([
+    'channel_binding_ui update state=qr revision=1 has_qr=true same_op=false',
+    'channel_binding_ui qr_rendered',
+    'channel_binding_ui update state=scanned revision=2 has_qr=false same_op=true',
+    'channel_binding_ui update state=bound revision=3 has_qr=false same_op=true',
+    'channel_binding_ui hide reason=bound',
+    'channel_binding_ui dismiss state=bound revision=3',
+    'channel_binding_ui hide reason=dismiss',
+    'channel_binding_ui dispose state=bound revision=3',
+  ])
+  expect(capture.warn.mock.calls.map(([message]) => message)).toEqual([
+    'channel_binding_ui error code=unknown',
+  ])
+  for (const secret of ['wechat.example', 'token=secret', 'top-secret', 'raw backend', 'leaky_secret_code', 'one']) {
+    expect(capture.output()).not.toContain(secret)
+  }
+})
+
+test('cancelled snapshots hide with a cancelled reason', () => {
+  const capture = captureLogger()
+  const ui = createChannelBindingUI(host, workflow, capture.logger)
+  ui.update(snapshot())
+  ui.update(snapshot({ state: 'cancelled', revision: 2, qr_url: null }))
+  expect(capture.log).toHaveBeenCalledWith('channel_binding_ui hide reason=cancelled')
+  ui.dispose()
+})
+
+test('logs a sanitized qr render failure without the payload', () => {
+  const capture = captureLogger()
+  const ui = createChannelBindingUI(host, workflow, capture.logger)
+  ui.update(snapshot({ qr_url: 'x'.repeat(4000) }))
+  expect(capture.warn.mock.calls.map(([message]) => message)).toEqual([
+    'channel_binding_ui qr_render_failed',
+  ])
+  expect(capture.log.mock.calls.map(([message]) => message)).toEqual([
+    'channel_binding_ui update state=qr revision=1 has_qr=true same_op=false',
+  ])
+  expect(capture.output()).not.toContain('xxxx')
+  expect(host.textContent).toContain('二维码无法显示')
+  ui.dispose()
+})
+
+test('a throwing logger never disturbs UI rendering, dismissal, or disposal', () => {
+  const ui = createChannelBindingUI(host, workflow, throwingLogger())
+  ui.update(snapshot())
+  jest.advanceTimersByTime(20)
+  const qr = host.querySelector('[data-binding-qr]') as HTMLElement
+  expect(qr.querySelector('svg')).not.toBeNull()
+  expect(qr.style.opacity).toBe('1')
+  ui.update(snapshot({ state: 'cancelled', revision: 2, qr_url: null }))
+  jest.advanceTimersByTime(200)
+  expect((host.firstElementChild as HTMLElement).hidden).toBe(true)
+  ui.update(snapshot({ operation_id: 'two', revision: 1 }))
+  expect(host.textContent).toContain('请使用微信扫描二维码')
+  ;(host.querySelector('[data-binding-dismiss]') as HTMLButtonElement).click()
+  expect(workflow.cancel).toHaveBeenCalledWith('two')
+  ui.error({ code: 'binding_unavailable', message: 'WeChat binding service unavailable' })
+  expect(host.textContent).toContain('WeChat binding service unavailable')
+  ui.dispose()
+  jest.runOnlyPendingTimers()
+  expect(host.children).toHaveLength(0)
 })

@@ -1,3 +1,5 @@
+import type { Logger } from '../types'
+
 export const CHANNEL_BINDING_TOOL_NAME = 'bind_channel' as const
 
 export type ChannelBindingAction = 'initiate' | 'cancel'
@@ -67,6 +69,8 @@ export type ChannelBindingWorkflowOptions = {
   fetch?: FetchLike,
   onSnapshot?: (snapshot: ChannelBindingSnapshot) => void,
   onError?: (error: ChannelBindingError) => void,
+  /** Observer for content-free binding lifecycle diagnostics. */
+  logger?: Logger,
 }
 
 export type ChannelBindingWorkflow = {
@@ -91,6 +95,13 @@ const SAFE_MESSAGES: Record<string, string> = {
 
 function safeError(code: string): ChannelBindingError {
   return { code, message: SAFE_MESSAGES[code] || SAFE_MESSAGES.binding_unavailable }
+}
+
+function safeErrorCode(code: unknown): string {
+  return typeof code === 'string'
+    && Object.prototype.hasOwnProperty.call(SAFE_MESSAGES, code)
+    ? code
+    : 'binding_unavailable'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -190,6 +201,14 @@ function invalidArgumentsError(arguments_: unknown): ChannelBindingError {
 export function createChannelBindingWorkflow(
   options: ChannelBindingWorkflowOptions,
 ): ChannelBindingWorkflow {
+  const logEvent = (level: 'log' | 'warn', message: string) => {
+    try {
+      options.logger?.[level]?.(message)
+    } catch {
+      // Logging is an observer; a throwing logger cannot disturb binding state.
+    }
+  }
+
   const base = endpointBase(options.endpoint)
   const fetchImpl = options.fetch ?? ((input, init) => {
     if (typeof globalThis.fetch !== 'function') {
@@ -212,7 +231,8 @@ export function createChannelBindingWorkflow(
     const reactivatingLocallyCancelled = current?.state === 'cancelled'
       && snapshot.operation_id === operationId
       && snapshot.state !== 'cancelled'
-    const changed = operationId !== snapshot.operation_id
+    const newOperation = operationId !== snapshot.operation_id
+    const changed = newOperation
       || current === undefined
       || snapshot.revision > current.revision
       || reactivatingLocallyCancelled
@@ -238,6 +258,10 @@ export function createChannelBindingWorkflow(
       operationControllers.set(snapshot.operation_id, new AbortController())
     }
     current = cloneSnapshot(snapshot)
+    logEvent('log', `channel_binding snapshot state=${snapshot.state} revision=${snapshot.revision}`
+      + ` has_qr=${snapshot.qr_url !== null && snapshot.qr_url !== ''}`
+      + ` gen=${operationGeneration} new_op=${newOperation}`
+      + ` reactivated=${reactivatingLocallyCancelled}`)
     try {
       options.onSnapshot?.(cloneSnapshot(snapshot))
     } catch {
@@ -247,6 +271,7 @@ export function createChannelBindingWorkflow(
 
   const reportError = (error: ChannelBindingError) => {
     if (disposed) return
+    logEvent('warn', `channel_binding error code=${safeErrorCode(error.code)}`)
     try {
       options.onError?.(error)
     } catch {
@@ -368,6 +393,8 @@ export function createChannelBindingWorkflow(
     if (current.state === 'cancelled') return true
     // A failed login stops monitoring, but its visible failure can be dismissed.
     if (current.state === 'bound') return false
+    const previousState = current.state
+    const previousRevision = current.revision
     operationControllers.get(id)?.abort()
     operationControllers.delete(id)
     monitors.delete(id)
@@ -380,6 +407,8 @@ export function createChannelBindingWorkflow(
       verification: null,
       ...(current.error !== undefined ? { error: null } : {}),
     }
+    logEvent('log', `channel_binding local_cancel prev_state=${previousState}`
+      + ` revision=${previousRevision} gen=${operationGeneration}`)
     try {
       options.onSnapshot?.(cloneSnapshot(current))
     } catch {
@@ -391,25 +420,34 @@ export function createChannelBindingWorkflow(
   const workflow: ChannelBindingWorkflow = {
     async handleToolCall(call) {
       if (call.name !== CHANNEL_BINDING_TOOL_NAME) return undefined
-      if (disposed) return { ok: false, error: safeError('binding_unavailable') }
+      if (disposed) {
+        logEvent('warn', 'channel_binding tool_rejected reason=disposed')
+        return { ok: false, error: safeError('binding_unavailable') }
+      }
       if (!toolArgumentsAreValid(call.arguments)) {
+        logEvent('warn', 'channel_binding tool_rejected reason=invalid_arguments')
         return { ok: false, error: invalidArgumentsError(call.arguments) }
       }
+      const action = call.arguments.action
       try {
-        if (call.arguments.action === 'cancel') {
+        if (action === 'cancel') {
           if (operationId === undefined || current === undefined
               || current.state === 'cancelled' || !cancelOperation(operationId)) {
+            logEvent('log', 'channel_binding tool_result action=cancel ok=true status=not_active')
             return { ok: true, result: { status: 'not_active' } }
           }
+          logEvent('log', 'channel_binding tool_result action=cancel ok=true status=cancelled')
           return { ok: true, result: { status: 'cancelled' } }
         }
         await startInitiation()
+        logEvent('log', 'channel_binding tool_result action=initiate ok=true status=initiated')
         return { ok: true, result: { status: 'initiated' } }
       } catch (error) {
         const safe = isRecord(error) && typeof error.code === 'string'
           && typeof error.message === 'string'
           ? { code: error.code, message: error.message }
           : safeError('binding_unavailable')
+        logEvent('warn', `channel_binding tool_result action=${action} ok=false code=${safeErrorCode(safe.code)}`)
         reportError(safe)
         return { ok: false, error: safe }
       }
@@ -459,6 +497,10 @@ export function createChannelBindingWorkflow(
 
     dispose() {
       if (disposed) return
+      if (current !== undefined) {
+        logEvent('log', `channel_binding dispose state=${current.state}`
+          + ` revision=${current.revision} gen=${operationGeneration}`)
+      }
       disposed = true
       operationId = undefined
       monitors.clear()

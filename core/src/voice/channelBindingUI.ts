@@ -1,5 +1,13 @@
 import qrcode from 'qrcode-generator'
+import type { Logger } from '../types'
 import type { ChannelBindingError, ChannelBindingSnapshot, ChannelBindingWorkflow } from './channelBinding'
+
+const SAFE_UI_ERROR_CODES = new Set([
+  'invalid_arguments',
+  'invalid_request',
+  'unknown_operation',
+  'binding_unavailable',
+])
 
 const FADE_MS = 180
 const messages: Record<ChannelBindingSnapshot['state'], string> = {
@@ -39,7 +47,19 @@ function qrSvg(text: string): SVGSVGElement {
 }
 
 /** Internal, one controller per connection; never owns backend cancellation. */
-export function createChannelBindingUI(container: HTMLElement, workflow: ChannelBindingWorkflow) {
+export function createChannelBindingUI(
+  container: HTMLElement,
+  workflow: ChannelBindingWorkflow,
+  logger?: Logger,
+) {
+  const logUi = (level: 'log' | 'warn', message: string) => {
+    try {
+      logger?.[level]?.(message)
+    } catch {
+      // UI logging is an observer; it cannot disturb rendering or dismissal.
+    }
+  }
+
   const root = document.createElement('section')
   root.dataset.bindingUi = ''
   root.setAttribute('aria-live', 'polite')
@@ -94,8 +114,10 @@ export function createChannelBindingUI(container: HTMLElement, workflow: Channel
       if (!text || disposed) return
       try {
         qr.append(qrSvg(text))
+        logUi('log', 'channel_binding_ui qr_rendered')
         appearance = setTimeout(() => { qr.style.opacity = '1' }, 16)
       } catch {
+        logUi('warn', 'channel_binding_ui qr_render_failed')
         status.textContent = '二维码无法显示，请重试'
       }
     }
@@ -103,7 +125,8 @@ export function createChannelBindingUI(container: HTMLElement, workflow: Channel
     else replace()
   }
 
-  function hide() {
+  function hide(reason: 'cancelled' | 'bound' | 'dismiss') {
+    logUi('log', `channel_binding_ui hide reason=${reason}`)
     generation++
     input.value = ''
     form.hidden = true
@@ -114,8 +137,10 @@ export function createChannelBindingUI(container: HTMLElement, workflow: Channel
 
   const onDismiss = () => {
     if (disposed) return
+    logUi('log', `channel_binding_ui dismiss state=${current ? current.state : 'none'}`
+      + ` revision=${current ? current.revision : 'none'}`)
     if (current) workflow.cancel(current.operation_id)
-    hide()
+    hide('dismiss')
   }
   const onSubmit = async (event: Event) => {
     event.preventDefault()
@@ -147,24 +172,34 @@ export function createChannelBindingUI(container: HTMLElement, workflow: Channel
       clearTimeout(success)
       const sameOperation = current?.operation_id === snapshot.operation_id
       current = snapshot
+      logUi('log', `channel_binding_ui update state=${snapshot.state} revision=${snapshot.revision}`
+        + ` has_qr=${snapshot.qr_url !== null && snapshot.qr_url !== ''}`
+        + ` same_op=${sameOperation}`)
       input.value = ''
       submit.disabled = false
       verification.textContent = ''
       status.textContent = messages[snapshot.state]
       root.hidden = false
       form.hidden = snapshot.state !== 'verification' || !snapshot.verification
-      if (snapshot.state === 'cancelled') { hide(); return }
+      if (snapshot.state === 'cancelled') { hide('cancelled'); return }
       const terminal = snapshot.state === 'bound' || snapshot.state === 'failed'
       showQr(terminal ? null : snapshot.qr_url || (sameOperation ? targetQr : null))
-      if (snapshot.state === 'bound') success = setTimeout(hide, 3000)
+      if (snapshot.state === 'bound') success = setTimeout(() => hide('bound'), 3000)
     },
     error(error: ChannelBindingError) {
       if (disposed) return
+      const code = typeof error?.code === 'string' && SAFE_UI_ERROR_CODES.has(error.code)
+        ? error.code
+        : 'unknown'
+      logUi('warn', `channel_binding_ui error code=${code}`)
       root.hidden = false
       status.textContent = error.message
     },
     dispose() {
       if (disposed) return
+      if (current !== undefined) {
+        logUi('log', `channel_binding_ui dispose state=${current.state} revision=${current.revision}`)
+      }
       disposed = true
       generation++
       for (const timer of [transition, appearance, hiding, success]) clearTimeout(timer)

@@ -4,6 +4,7 @@ import {
   type ChannelBindingSnapshot,
   type VoiceClientToolCall,
 } from './channelBinding'
+import type { Logger } from '../types'
 
 function response(body: unknown, status = 200): Response {
   return {
@@ -51,6 +52,30 @@ function snapshot(overrides: Partial<ChannelBindingSnapshot>): ChannelBindingSna
     verification: null,
     ...overrides,
   }
+}
+
+function captureLogger() {
+  const log = jest.fn()
+  const warn = jest.fn()
+  const logger = {
+    debug: jest.fn(),
+    log,
+    warn,
+    error: jest.fn(),
+    push: jest.fn(),
+  } as unknown as Logger
+  const messages = () => [
+    ...log.mock.calls.map(([message]) => message as string),
+    ...warn.mock.calls.map(([message]) => message as string),
+  ]
+  return { logger, log, warn, messages, output: () => messages().join('\n') }
+}
+
+function throwingLogger() {
+  const boom = () => { throw new Error('logger down') }
+  return {
+    debug: boom, log: boom, warn: boom, error: boom, push: boom,
+  } as unknown as Logger
 }
 
 describe('createChannelBindingWorkflow', () => {
@@ -687,5 +712,148 @@ describe('createChannelBindingWorkflow', () => {
       error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
     })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('binding lifecycle logging', () => {
+  test('emits content-free lifecycle logs and never leaks verification or operation secrets', async () => {
+    const capture = captureLogger()
+    const monitor = deferred<Response>()
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      logger: capture.logger,
+      fetch: async (input, init) => {
+        const url = String(input)
+        if (init?.method === 'POST' && url.endsWith('/bindings')) {
+          return response(snapshot({
+            state: 'verification',
+            revision: 1,
+            verification: { required: true, retry: false },
+          }))
+        }
+        if (init?.method === 'POST' && url.endsWith('/verify')) return response({ accepted: true })
+        return monitor.promise
+      },
+    })
+
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: true, result: { status: 'initiated' },
+    })
+    await expect(workflow.verify('654321')).resolves.toEqual({ accepted: true })
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'cancel',
+    }))).resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+    workflow.dispose()
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: false,
+      error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
+    })
+    workflow.dispose()
+
+    expect(capture.log.mock.calls.map(([message]) => message)).toEqual([
+      'channel_binding snapshot state=verification revision=1 has_qr=false gen=1 new_op=true reactivated=false',
+      'channel_binding tool_result action=initiate ok=true status=initiated',
+      'channel_binding local_cancel prev_state=verification revision=1 gen=2',
+      'channel_binding tool_result action=cancel ok=true status=cancelled',
+      'channel_binding dispose state=cancelled revision=2 gen=2',
+    ])
+    expect(capture.warn.mock.calls.map(([message]) => message)).toEqual([
+      'channel_binding tool_rejected reason=disposed',
+    ])
+    for (const secret of ['654321', 'binding-1', '127.0.0.1', '8781', 'after_revision', 'operation_id']) {
+      expect(capture.output()).not.toContain(secret)
+    }
+  })
+
+  test('logs sanitized snapshot, rejection, and backend failure diagnostics', async () => {
+    const capture = captureLogger()
+    const monitor = deferred<Response>()
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://plugin.local:8781',
+      logger: capture.logger,
+      fetch: async (input, init) => {
+        const url = String(input)
+        if (init?.method === 'POST' && url.endsWith('/bindings')) {
+          return response(snapshot({
+            state: 'qr', revision: 2, qr_url: 'https://wechat.example/login?token=top-secret',
+          }))
+        }
+        return monitor.promise
+      },
+    })
+    await expect(workflow.handleToolCall(toolCall({ channel: 'wechat' }))).resolves.toEqual({
+      ok: false,
+      error: { code: 'invalid_arguments', message: 'invalid binding arguments' },
+    })
+    await workflow.handleToolCall(toolCall())
+    workflow.dispose()
+
+    expect(capture.log.mock.calls.map(([message]) => message)).toEqual([
+      'channel_binding snapshot state=qr revision=2 has_qr=true gen=1 new_op=true reactivated=false',
+      'channel_binding tool_result action=initiate ok=true status=initiated',
+      'channel_binding dispose state=qr revision=2 gen=1',
+    ])
+    expect(capture.warn.mock.calls.map(([message]) => message)).toEqual([
+      'channel_binding tool_rejected reason=invalid_arguments',
+    ])
+    for (const secret of ['top-secret', 'wechat.example', 'plugin.local', 'binding-1']) {
+      expect(capture.output()).not.toContain(secret)
+    }
+
+    const failing = captureLogger()
+    const failed = createChannelBindingWorkflow({
+      endpoint: 'http://plugin.local:8781',
+      logger: failing.logger,
+      fetch: async () => { throw new Error('private backend details at 127.0.0.1') },
+    })
+    await expect(failed.handleToolCall(toolCall())).resolves.toEqual({
+      ok: false,
+      error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
+    })
+    failed.dispose()
+    expect(failing.warn.mock.calls.map(([message]) => message)).toEqual([
+      'channel_binding tool_result action=initiate ok=false code=binding_unavailable',
+      'channel_binding error code=binding_unavailable',
+    ])
+    expect(failing.output()).not.toContain('private backend details')
+    expect(failing.output()).not.toContain('127.0.0.1')
+  })
+
+  test('a throwing logger never disrupts binding transport or state', async () => {
+    const monitor = deferred<Response>()
+    const workflow = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      logger: throwingLogger(),
+      fetch: async (input, init) => {
+        const url = String(input)
+        if (init?.method === 'POST' && url.endsWith('/bindings')) {
+          return response(snapshot({ state: 'qr', revision: 1, qr_url: 'https://qr.example/value' }))
+        }
+        return monitor.promise
+      },
+    })
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: true, result: { status: 'initiated' },
+    })
+    await expect(workflow.handleToolCall(toolCall({
+      channel: 'wechat', action: 'cancel',
+    }))).resolves.toEqual({ ok: true, result: { status: 'cancelled' } })
+    expect(workflow.snapshot).toEqual(snapshot({ state: 'cancelled', revision: 2, qr_url: null }))
+    workflow.dispose()
+    await expect(workflow.handleToolCall(toolCall())).resolves.toEqual({
+      ok: false,
+      error: { code: 'binding_unavailable', message: 'WeChat binding service unavailable' },
+    })
+
+    const failing = createChannelBindingWorkflow({
+      endpoint: 'http://127.0.0.1:8781',
+      logger: throwingLogger(),
+      fetch: async () => response({}, 400),
+    })
+    await expect(failing.handleToolCall(toolCall())).resolves.toEqual({
+      ok: false,
+      error: { code: 'invalid_request', message: 'WeChat binding request was invalid' },
+    })
+    failing.dispose()
   })
 })
