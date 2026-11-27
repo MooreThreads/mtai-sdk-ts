@@ -154,4 +154,95 @@ describe('getAvatars', () => {
       fetchMock.restore()
     }
   })
+
+  test('places built-in avatars before non-built-in avatars including numeric IDs', async () => {
+    const fetchMock = patchFetch({
+      body: {
+        '1001': { name: 'Custom One' },
+        '2002': { name: 'Custom Two' },
+        xiaomai: { name: 'Xiao Mai', built_in: true },
+        xiaomai_hair: { name: 'Xiao Mai Hair', built_in: true },
+      },
+    })
+    try {
+      const avatars = await getAvatars()
+      expect(avatars).toEqual([
+        {
+          id: 'xiaomai',
+          name: 'Xiao Mai',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/xiaomai/poster`,
+          built_in: true,
+        },
+        {
+          id: 'xiaomai_hair',
+          name: 'Xiao Mai Hair',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/xiaomai_hair/poster`,
+          built_in: true,
+        },
+        {
+          id: '1001',
+          name: 'Custom One',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/1001/poster`,
+        },
+        {
+          id: '2002',
+          name: 'Custom Two',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/2002/poster`,
+        },
+      ])
+      expect('built_in' in avatars[2]).toBe(false)
+      expect('built_in' in avatars[3]).toBe(false)
+    } finally {
+      fetchMock.restore()
+    }
+  })
+
+  test('recognizes legacy built-in markers and places them ahead of custom avatars', async () => {
+    const fetchMock = patchFetch({
+      body: {
+        '1001': { name: 'Custom', deletable: true, source: 'custom' },
+        legacy_builtin: { name: 'Legacy Builtin', builtin: true },
+        legacy_is_builtin: { name: 'Legacy Is Builtin', is_builtin: true },
+        legacy_not_deletable: { name: 'Legacy Not Deletable', deletable: false },
+        legacy_source: { name: 'Legacy Source', source: 'builtin' },
+      },
+    })
+    try {
+      const avatars = await getAvatars()
+      expect(avatars).toEqual([
+        {
+          id: 'legacy_builtin',
+          name: 'Legacy Builtin',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/legacy_builtin/poster`,
+          built_in: true,
+        },
+        {
+          id: 'legacy_is_builtin',
+          name: 'Legacy Is Builtin',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/legacy_is_builtin/poster`,
+          built_in: true,
+        },
+        {
+          id: 'legacy_not_deletable',
+          name: 'Legacy Not Deletable',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/legacy_not_deletable/poster`,
+          built_in: true,
+        },
+        {
+          id: 'legacy_source',
+          name: 'Legacy Source',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/legacy_source/poster`,
+          built_in: true,
+        },
+        {
+          id: '1001',
+          name: 'Custom',
+          poster: `${DEFAULT_DH2D_ENDPOINT}/api/v1/video_configs/1001/poster`,
+        },
+      ])
+      expect('built_in' in avatars[4]).toBe(false)
+    } finally {
+      fetchMock.restore()
+    }
+  })
 })

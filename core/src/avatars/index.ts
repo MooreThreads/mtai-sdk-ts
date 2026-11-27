@@ -11,15 +11,26 @@ function posterUrl(endpoint: string, id: string, poster: unknown): string {
     return `${endpoint}/api/v1/video_configs/${id}/poster`
 }
 
+function isBuiltinAvatar(record: Record<string, unknown>): boolean {
+    return (
+        record.built_in === true ||
+        record.builtin === true ||
+        record.is_builtin === true ||
+        record.deletable === false ||
+        record.source === "builtin"
+    )
+}
+
 /**
  * Fetches the available avatars from the DH2D server.
  *
  * The server exposes avatar (video) configurations as a single object keyed
  * by avatar id at `GET /api/v1/video_configs`. Each entry is normalized to
  * the SDK `Avatar` shape; poster URLs that are not already absolute are
- * replaced with the server's poster route for that avatar. When a
- * `voiceClient.dh2d_endpoint` is configured, discovery and poster URLs target
- * that endpoint; otherwise they use the legacy global `endpoint`.
+ * replaced with the server's poster route for that avatar. Built-in avatars
+ * are placed before non-built-in avatars. When a `voiceClient.dh2d_endpoint`
+ * is configured, discovery and poster URLs target that endpoint; otherwise
+ * they use the legacy global `endpoint`.
  *
  * @returns A promise that resolves to an array of available Avatar objects
  * @throws Error if the request fails or returns a non-200 status
@@ -46,18 +57,26 @@ export async function getAvatars(): Promise<Avatar[]> {
         return []
     }
 
-    const avatars: Avatar[] = []
+    const builtinAvatars: Avatar[] = []
+    const customAvatars: Avatar[] = []
     for (const [id, entry] of Object.entries(body)) {
         if (entry == null || typeof entry !== "object") {
             continue
         }
         const record = entry as Record<string, unknown>
         const name = typeof record.name === "string" ? record.name : undefined
-        avatars.push({
+        const builtIn = isBuiltinAvatar(record)
+        const avatar: Avatar = {
             id,
             ...(name !== undefined ? { name } : {}),
             poster: posterUrl(avatarEndpoint, id, record.poster),
-        })
+            ...(builtIn ? { built_in: true } : {}),
+        }
+        if (builtIn) {
+            builtinAvatars.push(avatar)
+        } else {
+            customAvatars.push(avatar)
+        }
     }
-    return avatars
+    return [...builtinAvatars, ...customAvatars]
 }
